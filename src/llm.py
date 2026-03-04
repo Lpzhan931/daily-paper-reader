@@ -103,6 +103,21 @@ class LLMClient:
     def _iter_request_bases(self) -> List[str]:
         return self._normalize_base_urls(self._base_urls)
 
+    def _iter_retry_bases(self, total_attempts: int = 6) -> List[str]:
+        bases = self._iter_request_bases()
+        if total_attempts <= 0:
+            return []
+        if not bases:
+            return []
+
+        if len(bases) == 1:
+            return [bases[0]] * total_attempts
+
+        attempts: List[str] = []
+        for idx in range(total_attempts):
+            attempts.append(bases[idx % len(bases)])
+        return attempts
+
     def _provider_name(self, base_url: str | None = None) -> str:
         try:
             url = (base_url or self.base_url or '').lower()
@@ -168,7 +183,7 @@ class LLMClient:
             pass
 
         start_time = time.time()
-        request_bases = self._iter_request_bases()
+        request_bases = self._iter_retry_bases(total_attempts=6)
         last_error: Exception | None = None
         for attempt_idx, req_base in enumerate(request_bases, start=1):
             request_url = f"{req_base.rstrip('/')}/chat/completions"
@@ -384,7 +399,7 @@ class BltClient(LLMClient):
         if top_n is not None:
             payload["top_n"] = int(top_n)
 
-        request_bases = self._iter_request_bases()
+        request_bases = self._iter_retry_bases(total_attempts=6)
         last_error: Exception | None = None
         for attempt_idx, req_base in enumerate(request_bases, start=1):
             request_url = f"{req_base.rstrip('/')}/rerank"
