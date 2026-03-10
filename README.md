@@ -109,7 +109,7 @@
 
 Fork 到自己的 GitHub 账号下，建议仓库名保持 `daily-paper-reader` 不变，方便直接复用默认配置与链接。
 
-[![Fork daily-paper-reader](https://img.shields.io/badge/Fork-daily--paper--reader-238636?style=for-the-badge&logo=github)](https://github.com/ziwenhahaha/daily-paper-reader/fork)
+[![Fork daily-paper-reader](https://img.shields.io/badge/Fork-daily--paper--reader-238636?style=flat-square&logo=github)](https://github.com/ziwenhahaha/daily-paper-reader/fork)
 
 ### 4) ▶️ 开启 GitHub Actions
 
