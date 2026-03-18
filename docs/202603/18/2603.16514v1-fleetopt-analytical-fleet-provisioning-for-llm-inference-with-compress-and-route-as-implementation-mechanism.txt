@@ -1,0 +1,691 @@
+Title: FleetOpt: Analytical Fleet Provisioning for LLM Inference with Compress-and-Route as Implementation Mechanism
+
+URL Source: https://arxiv.org/pdf/2603.16514v1
+
+Published Time: Wed, 18 Mar 2026 01:15:07 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# FleetOpt : Analytical Fleet Provisioning for LLM Inference with Compress-and-Route as Implementation Mechanism 
+
+Huamin Chen 1 Xunzhuo Liu 1 Yuhan Liu 2
+
+Junchen Jiang 3 Bowei He 4∗ Xue Liu 41vLLM Semantic Router Project 
+
+> 2
+
+University of Chicago 3Tensormesh Inc / UChicago 
+
+> 4
+
+MBZUAI / McGill University 2026 
+
+Abstract 
+
+Modern LLM GPU fleets are provisioned for worst-case context lengths that the vast majority of requests never approach, wasting GPU capacity on idle KV-cache slots. We present FleetOpt , a framework that starts from first principles: given a workload’s prompt-length CDF and a P99 TTFT target, derive the minimum-cost fleet analytically, then deploy it in practice. The analytical core models each pool as an M/G/ c queue and derives that the minimum-cost fleet is a two-pool architecture — a short-context pool Ps and a long-context pool Pl
+
+— with an optimal boundary B∗ 
+
+> short
+
+satisfying an equal marginal GPU cost condition across both pools. The fundamental barrier to achieving B∗ 
+
+> short
+
+is the cost cliff : a hard routing step where requests just above B∗ 
+
+> short
+
+consume 8×–42 × more GPU capacity than requests just below it (depending on the context window ratio), creating a structural disincentive to lower the boundary. Compress-and-Route ( C&R ) is the implementation mechanism that resolves this bar-rier. Gateway-layer extractive compression trims borderline requests below B∗ 
+
+> short
+
+before the engine ever sees them, converting the hard hardware boundary into a software parameter read from the workload CDF. The two components are unified in the FleetOpt offline planner: given a CDF and SLO, it returns the optimal (n∗ 
+
+> s
+
+, n ∗ 
+
+> l
+
+, B ∗
+
+> short
+
+, γ ∗) in under 1 ms. On three production traces, the combined framework reduces total GPU cost by 6–82% versus a homogeneous fleet, with C&R contributing 1–44 percentage points beyond plain pool routing depending on workload archetype. The analytical model is validated against a discrete-event simulator ( inference-fleet-sim ) with ≤ 3% error on predicted GPU utilization across all pools and workloads. 
+
+# 1 Introduction 
+
+Modern LLMs support context windows of 128K tokens or more, yet production traces reveal a persistent mismatch: in the Azure LLM Inference Trace, 80% of requests use fewer than 2K tokens [Patel et al., 2024, Zhang and Shen, 2024, Agrawal et al., 2024c]. A homogeneous fleet provisioned for worst-case context length allocates KV-cache capacity that goes almost entirely unused for the vast majority of requests. Pool routing [Chen et al., 2026b] addresses this by splitting the fleet into short- and long-context pools, cutting GPU cost by 16–38% in scenarios studied by prior work. 
+
+> ∗
+
+Corresponding author: Bowei.He@mbzuai.ac.ae 
+
+1
+
+> arXiv:2603.16514v1 [cs.DC] 17 Mar 2026
+
+The residual problem: the cost cliff. Even with pool routing, a structural inefficiency remains at the pool boundary Bshort . The routing decision is binary: a request at Ltotal = Bshort 
+
+fills one of n(s)max short-pool slots; a request one token longer must enter the long pool, which offers only n(l)max = 16 slots per GPU — a throughput-capacity penalty of 8×–42 × for a single token (Section 2.2). Requests in the borderline band (Bshort , γB short ] are not genuinely long; they are RAG payloads with one extra paragraph, or multi-turn sessions whose history just crossed the threshold. For the workloads we study, 4.6–11.2% of all traffic falls in this band. Each borderline request is assigned a long-pool slot provisioned for 64K tokens while using at most 1/ρ of its KV budget. 
+
+Our approach: analytical model first, then implement. Prior work treats pool routing and Compress-and-Route ( C&R ) as independent operational interventions: deploy pool routing, then optionally retrofit C&R on the existing fleet. This framing leaves value on the table. We take a different path. We start from the analytical optimum : given a workload CDF and a P99 TTFT target, what is the minimum-cost fleet? The M/G/ c queuing model answers this precisely: a two-pool architecture with a specific boundary B∗
+
+> short
+
+. But the cost cliff is a barrier to achieving B∗ 
+
+> short
+
+— lowering the boundary forces borderline requests to the expensive long pool. 
+
+C&R is the implementation mechanism that resolves this barrier. By compressing borderline requests below B∗ 
+
+> short
+
+at the gateway, C&R makes the analytically-optimal boundary achievable in practice. The combined framework does not merely retrofit compression onto an existing fleet; it provisions the correct fleet from the start, using C&R to enforce the boundary the model prescribes. 
+
+Key results. 
+
+1. The minimum-cost fleet is analytically derived. Under the M/G/ c model (with server count c = ngpus × nmax KV slots), the optimal two-pool fleet satisfies an equal marginal GPU cost condition across both pools. GPU counts come from Erlang-C inver-sion at each pool’s arrival rate and service distribution (Section 3). 2. The cost cliff is a barrier to achieving B∗ 
+
+> short
+
+without compression. At the optimal boundary, the borderline band contains 43–76% of above-threshold traffic for real workloads (4.6–11.2% of all traffic). Without compression, the operator must either raise 
+
+Bshort (losing savings) or over-provision the long pool (paying more) to absorb borderline load. 3. C&R converts the hard boundary into a software knob. Gateway-layer extractive compression trims borderline prompts in 2–7 ms. The compressed token budget is chosen so KV overflow is impossible by construction (Section 5). The effective routing boundary shifts from Bshort to γB short , where γ∗ comes from the planner sweep. 4. Combined savings: 6–82% vs. homogeneous. On three production traces, the Flee-tOpt framework achieves 6.7–82.4% GPU cost reduction versus homogeneous deploy-ment. C&R contributes an incremental 1.2 pp (Agent-heavy), 15.9 pp (LMSYS), and 43.7 pp (Azure) beyond plain pool routing (Section 7). 5. Analytical model validated by DES. inference-fleet-sim [Chen et al., 2026c] con-firms analytical GPU utilization predictions match simulation within 3% across all work-loads and pools, operating in the many-server regime where queueing delays are negligible. 
+
+Paper organization. Section 2 characterizes the cost cliff and workload archetypes. Section 3 develops the analytical fleet model. Section 4 derives optimal fleet sizing and the optimal boundary. Section 5 presents C&R as the implementation mechanism. Section 6 gives the 
+
+FleetOpt offline planner. Section 7 evaluates on production traces. Sections 8 and 9 discuss related work and conclude. 22 Background: The Cost Cliff and Workload Archetypes 
+
+2.1 Pool Routing Basics 
+
+A request r is assigned a total token budget Ltotal = ⌈| r|/ˆck⌉ + r. max_output_tokens , where ˆck
+
+is a per-category bytes-per-token EMA estimate. Pool routing routes r to Ps if Ltotal ≤ Bshort ,else Pl. The short pool is sized for C(s)max tokens (e.g., 8K) with n(s)max concurrent sequences per GPU; the long pool for C(l)max tokens (e.g., 64K) with n(l)max .
+
+2.2 KV-Cache Memory and the Cost Cliff 
+
+For Llama-3-70B in fp16, the KV cache grows at 320 KB per token across 80 layers. A long-pool slot sized for 64K tokens requires 64 ,000 × 320 KB ≈ 20 .5 GB of GPU memory; the same hardware configured for 8K can host ρ = 8 × as many concurrent sequences, delivering ρ = 8 ×
+
+the throughput. The GPU savings formula for pool routing is α(1 − 1/ρ ) [Chen et al., 2026b], where α is the fraction of traffic routed to Ps.The cost cliff is the discontinuity at Bshort : a request at Bshort + 1 tokens must enter the long pool, which hosts only n(l)max = 16 concurrent slots per GPU (sized for 64K tokens), versus 
+
+n(s)max short-pool slots. The cliff ratio ρ = n(s)max /n (l)max depends on the short-pool context window: 
+
+ρ = 8 × at Bshort = 8 ,192 , ρ = 16 × at Bshort = 4 ,096 , and ρ = 42 × at Bshort = 1 ,536 (Table 2). A borderline request at 1.1 × Bshort uses only 1/ρ of the long-pool KV budget it was allocated. This is not a flaw of pool routing; it is the unavoidable consequence of provisioning slots for worst-case context length. The only escape is to keep requests below Bshort .Table 1: The cost cliff: throughput capacity consumed per request at and around Bshort = 8 ,192 
+
+tokens for Llama-3-70B on A100-80GB ( n(s)max = 128 , n(l)max = 16 , KV/token = 320 KB, long-pool sized for 64K tokens ≈ 20 .0 GB per slot). The cliff ratio is ρ = n(s)max /n (l)max = 8 ×.
+
+Ltotal (tokens) Pool Slots/GPU KV utilised Cost ratio 8,192 Ps 128 100% (2.5 GB / slot) 1.0 ×
+
+8,193 Pl 16 12.5% of 20.0 GB 8.0 ×
+
+12,000 Pl 16 18.3% of 20.0 GB 8.0 ×
+
+65,536 Pl 16 100% (20.0 GB / slot) 8.0 ×
+
+2.3 The Borderline Band 
+
+The borderline band (Bshort , γB short ] contains requests whose prompts exceed Bshort only slightly and could be compressed below Bshort at bandwidth ratio γ. Let α = F (Bshort ) (the fraction of requests already in Ps) and β = F (γB short ) − F (Bshort ) (the borderline fraction). Table 2 shows β across workloads. Table 2: Borderline fraction β = F (γB short ) − F (Bshort ) at representative thresholds. α =
+
+F (Bshort ); cliff = n(s)max /n (l)max for C(l)max = 65 ,536 ; Agent-heavy is a projected workload (Sec-tion 7.1). 
+
+Workload Bshort α γ β Cliff ρ Archetype Azure (2023) 4,096 0.898 1.5 0.078 16 × I/II LMSYS (multi-turn) 1,536 0.909 1.5 0.046 42 × I/II Agent-heavy 8,192 0.740 1.5 0.112 8× II 
+
+32.4 Workload CDF Archetypes 
+
+Three qualitatively different workload shapes determine how the cost cliff manifests and which remediation is appropriate. 
+
+Archetype I (Concentrated-below). The CDF has a sharp knee below Bshort : F (Bshort ) ≥
+
+0.90 and the density f (Bshort ) is high. The borderline fraction β is moderate in absolute terms (4.6–7.8%), but the fraction-of-above-threshold traffic that is borderline is large (51–76%). Pool routing already captures most savings; C&R provides meaningful additional savings because the cliff ratio ρ is large ( 16 ×–42 ×). 
+
+Archetype II (Dispersed). The CDF spreads across two or more decades of token counts. Significant borderline traffic exists ( β = 7 –12% ), and C&R provides meaningful incremental savings. The agent-heavy trace (RAG + tool-use + code) is the primary representative. 
+
+Archetype III (Concentrated-above). The mass of the distribution lies above Bshort 
+
+(e.g., code-agent tasks at 10–50K tokens). The borderline fraction is negligible; the dominant lever is raising Bshort before any compression. 
+
+# 3 Analytical Fleet Model 
+
+3.1 Queueing Model 
+
+We model each pool as an M/G/ c queue. Let λ be the total fleet arrival rate. After routing: 
+
+λs = α′ λ, where α′ = α + βp c (1) 
+
+λl = (1 − α′) λ (2) Here α = F (Bshort ), β = F (γB short ) − F (Bshort ) is the borderline fraction, and pc ∈ [0 , 1] is the compressibility rate (fraction of borderline requests successfully compressed). 
+
+Service time model. GPU iteration latency under continuous batching is 
+
+titer = W + H · nslots , (3) where W = 8 ms (baseline compute for Llama-3-70B/A100) and H = 0 .65 ms/slot (per-slot memory-bandwidth cost) are hardware constants calibrated to the A100-80GB. Under continu-ous batching, all nmax slots advance in lockstep each iteration. A request with Lin input tokens and Lout output tokens occupies a slot for 
+
+E[S] = (⌈Lin /C chunk ⌉ + Lout  
+
+> )
+
+· titer , (4) wall-clock seconds (chunk size Cchunk = 512 ). The GPU-level throughput is μgpu = nmax /E[S]
+
+requests per second; the squared coefficient of variation is C2 
+
+> s
+
+= Var[ S]/(E[S]) 2, estimated by Monte Carlo sampling from the pool’s request distribution. 
+
+M/G/ c tail-wait approximation. We model a pool with n GPUs as an M/G/ c queue with 
+
+c = n · nmax total KV slots as servers, each with per-slot service rate μ = 1 /E[S]. The offered load is ϱ = λp/(c μ ) < 1. The Erlang-C probability (probability a new request must wait for a slot) is 
+
+C(c, ϱ ) = (cϱ )c/(c! (1 − ϱ)) 
+
+> ∑c−1
+> k=0
+
+(cϱ )k/k ! + ( cϱ )c/(c! (1 − ϱ)) , (5) The Kimura [Kimura, 1994] M/G/ c approximation gives the P99 queue waiting time: 
+
+W99 (c, μ, C 2 
+
+> s
+
+) = ln (C(c, ϱ )/0.01 ) · (1 + C2 
+
+> s
+
+)2 ( c μ − λp) . (6) 4In the many-server regime ( c ≫ 1), C(c, ϱ ) ≈ 0 and W99 ≈ 0: slots are almost always available and queueing delays are negligible. Fleet sizing is then dominated by the utilization cap ρmax 
+
+(Section 4.1). 
+
+3.2 TTFT Decomposition 
+
+Time-to-First-Token decomposes as TTFT = Wqueue + Tprefill + Tfirst-decode , (7) where Wqueue is the queueing delay before a slot is available, Tprefill = ⌈Lin /C chunk ⌉ · titer is the physical prefill time (wall-clock, independent of batch size since all nmax slots run in parallel), and Tfirst-decode = titer is one decode step. The SLO constraint is 
+
+W99 (c, μ, C 2 
+
+> s
+
+) ≤ Tslo − T (99)  
+
+> prefill
+
+− titer , (8) where T (99)  
+
+> prefill
+
+is the P99 prefill time computed from the pool’s request length distribution. 
+
+3.3 Cost Model 
+
+GPU cost per unit time is cs per short-pool GPU and cl per long-pool GPU. Let ϕ = cl/c s be the GPU cost ratio. Total annualized cost for a fleet of ns and nl GPUs is 
+
+C(ns, n l) = cs ns + cl nl. (9) The provisioning problem is 
+
+min 
+
+> ns, n l∈Z>0
+
+C(ns, n l) s.t. Eq. (8) holds for both pools. (10) 
+
+# 4 Optimal Fleet Sizing 
+
+4.1 Per-Pool Sizing 
+
+Because the two pools are independent M/G/ c queues with fixed arrival rates λs and λl, prob-lem (10) separates into two independent minimizations. For each pool, the minimum GPU count is 
+
+n∗ = min {c ∈ Z>0 : W99 (c, μ, C 2 
+
+> s
+
+) ≤ Tslo,eff 
+
+}, (11) where Tslo,eff is the SLO budget after subtracting P99 prefill time per Eq. (8), and we additionally enforce n∗ ≥ ⌈ λp/(ρmax μ)⌉ for a utilization cap ρmax = 0 .85 to ensure analytical stability. 
+
+4.2 The Cost Cliff Prevents Achieving B∗
+
+> short
+
+Differentiating total cost C with respect to Bshort and setting to zero (treating n∗ as a smooth function of λp) gives the first-order condition for the optimal boundary: 
+
+cs
+
+∂n ∗
+
+> s
+
+∂λ s
+
+= cl
+
+∂n ∗
+
+> l
+
+∂λ l
+
+. (12) The λf (Bshort ) factor cancels from both sides, leaving the condition: the marginal cost of routing one additional request to the short pool must equal the marginal saving of removing one request from the long pool. 
+
+Proposition 1 (Optimal boundary — equal marginal GPU cost) . Under the M/G/ c cost model with ρmax -constrained sizing, the provisioning-optimal B∗ 
+
+> short
+
+satisfies Eq. (12) : equal marginal GPU cost per unit traffic in both pools. For a homogeneous fleet ( cs = cl, same GPU type), this holds when both pools operate at the same utilization level. 
+
+5The problem: at any Bshort , the borderline band (Bshort , γB short ] contains 43–76% of above-threshold traffic for real workloads. Without a mechanism to redirect borderline requests to 
+
+Ps, the long pool must absorb this traffic at ρ = 8 –42 × higher GPU cost per request, requir-ing significantly more GPUs than the analytical optimum. C&R resolves this by making the analytically-optimal boundary achievable in practice. 
+
+4.3 Optimal Compression Bandwidth γ∗
+
+With C&R active, borderline requests at bandwidth γ are redirected to Ps. The resulting 
+
+α′ = α + βp c shifts λs upward and λl downward. The first-order condition for the optimal γ is: 
+
+cs
+
+∂n ∗
+
+> s
+
+∂λ s
+
+· pc · λf (γB short ) = cl
+
+∂n ∗
+
+> l
+
+∂λ l
+
+· pc · λf (γB short ), (13) which again reduces to the equal marginal cost condition Eq. (12). In practice γ∗ is found by discrete sweep over γ ∈ { 1.0, 1.1, . . . , 2.0} because n∗ is integer-valued and the long-pool service rate must be recalibrated for the post-compression distribution at each γ. The sweep is fast (< 1 ms). For workloads where most above-threshold traffic is borderline (Archetype I/II), γ∗
+
+tends toward large values (2.0), as compressing more traffic into Ps reduces the expensive long pool. For Archetype II with a dispersed above-threshold distribution, γ∗ reflects the balance between short-pool overheads and long-pool savings. 
+
+Theorem 2 (Co-design is never worse than retrofit) . Let Cretro be the cost of a fleet sized for pool routing at γ = 1 with C&R later deployed, and Cco be the cost of a fleet co-designed with 
+
+C&R at the same γ. Then Cco ≤ C retro .Proof sketch. The co-designed fleet solves the same minimization problem as the retrofitted fleet but with the additional freedom to reduce n∗ 
+
+> l
+
+knowing that λl will be lower. Hence the feasible set is larger and the minimum cost is weakly lower. □
+
+# 5 Compress-and-Route as Implementation Mechanism 
+
+C&R is the gateway-layer component that makes Proposition 1’s optimal boundary achiev-able in practice. Rather than a separate system, it is the implementation of the optimal fleet boundary derived in Section 4. 
+
+5.1 The Virtual Pool 
+
+C&R shifts the effective routing boundary from Bshort to γB short by compressing borderline requests at the gateway. A request r with Bshort < L total ≤ γB short is intercepted; its prompt is compressed to a token budget Tc = Bshort − Lout and re-routed to Ps. From the engine’s perspective, Ps appears to have a higher effective Cmax : the virtual pool capacity is γB short 
+
+without any hardware change. The GPU savings gain is 
+
+∆α = β p c, α′ = α + β p c, (14) and additional GPU savings beyond pool routing are ∆α(1 − 1/ρ ) = βp c(1 − 1/ρ ).
+
+5.2 Extractive Compression Pipeline 
+
+The compressor is a pure classical-NLP extractive pipeline requiring no LLM inference. Given a borderline prompt x and token budget Tc = Bshort − Lout , it: 1. Splits x into sentences with Unicode-aware heuristics. 62. Scores each sentence by a composite of TextRank ( w = 0 .20 ) [Mihalcea and Tarau, 2004], Position ( w = 0 .40 ), TF-IDF ( w = 0 .35 ) [Li et al., 2023a], and Novelty ( w = 0 .05 ). 3. Greedily selects sentences in score order, always retaining the first 3 and last 2 (pri-macy/recency invariant). 4. Stops when the cumulative token count reaches Tc.
+
+Hard OOM guarantee. The budget Tc = Bshort − Lout is set by construction, so no com-pressed request can overflow Ps’s KV cache: 
+
+Tc + Lout = Bshort . (15) 
+
+Content-type safety gate. Compression is applied only to content categories where struc-tural extraction is semantically safe: RAG and prose. Code is excluded. The category signal reuses the per-request EMA estimate from the base router at zero additional overhead. 
+
+Compression latency. Measured on Intel Xeon Platinum 8568Y+, end-to-end compression takes 2–7 ms per borderline request. Weighted across all traffic, the mean overhead is ≤ 0.58 ms per request. 
+
+Fidelity. A fidelity study on 300 LMSYS-Chat-1M prompts from the Agent-heavy borderline band ( Bshort = 8 ,192 , γ = 1 .5, band 8K–12K tokens) gives compressibility pc = 1 .00 for prose/RAG content, BERTScore F1 = 0.884, ROUGE-L recall = 0.856, and TF-IDF cosine similarity = 0.981 at a mean 15.4% token reduction (Appendix C). Code is excluded from compression. 
+
+# 6 The FleetOpt Offline Planner 
+
+Algorithm 1 gives the complete FleetOpt planner. It takes as input the workload CDF F ,arrival rate λ, SLO Tslo , GPU profile (W, H, n (s)max , n (l)max , C (s)max , C (l)max ), and cost ratio ϕ. It returns the optimal (n∗ 
+
+> s
+
+, n ∗ 
+
+> l
+
+, B ∗
+
+> short
+
+, γ ∗).
+
+Algorithm 1 FleetOpt Offline Planner 
+
+Require: CDF F , λ, Tslo , GPU profile, ϕ, candidate threshold set B (hardware-feasible Bshort 
+
+values) 
+
+Ensure: (n∗ 
+
+> s
+
+, n ∗ 
+
+> l
+
+, B ∗
+
+> short
+
+, γ ∗) 
+
+> 1:
+
+for B ∈ B do ▷ outer sweep over candidate boundaries  
+
+> 2:
+
+for γ ∈ { 1.0, 1.1, . . . , 2.0} do  
+
+> 3:
+
+α′ ← F (B) + [ F (γB ) − F (B)] · pc 
+
+> 4:
+
+λs ← α′λ; λl ← (1 − α′)λ 
+
+> 5:
+
+Calibrate μs, C2 
+
+> s,s
+
+from F restricted to [1 , B ] ▷ short pool  
+
+> 6:
+
+Calibrate μl, C2 
+
+> s,l
+
+from F restricted to (γB, ∞) ▷ post-compression long pool  
+
+> 7:
+
+ns ← Erlang-C inversion (Eq. (11)) for (λs, μ s, C 2
+
+> s,s
+
+) 
+
+> 8:
+
+nl ← Erlang-C inversion (Eq. (11)) for (λl, μ l, C 2
+
+> s,l
+
+) 
+
+> 9:
+
+cost [B, γ ] ← csns + clnl 
+
+> 10:
+
+end for  
+
+> 11:
+
+end for  
+
+> 12:
+
+(B∗, γ ∗) ← arg min B∈B , γ cost [B, γ ] return (n∗ 
+
+> s
+
+[B∗, γ ∗], n ∗ 
+
+> l
+
+[B∗, γ ∗], B ∗, γ ∗)
+
+Candidate set B. In practice Bshort is hardware-constrained: it determines n(s)max = ncalib max ×
+
+Ccalib /B short , which must be a positive integer. The search is therefore over the finite set of CDF 7breakpoints that yield valid n(s)max values (typically 5–15 candidates per workload). The total sweep — all B ∈ B times all γ — completes in under 1 ms. Proposition 1 provides the FOC that characterises B∗ 
+
+> short
+
+analytically; the sweep finds the integer-optimal solution consistent with hardware granularity. 
+
+Critical: μl recalibration. Step 6 recalibrates the long-pool service rate from the post-compression request distribution (requests with Ltotal > γB ∗
+
+> short
+
+), not the full above-threshold distribution. Compressing borderline requests out of the long pool hardens the remaining dis-tribution: longer mean token length, lower μl. Skipping this recalibration systematically over-estimates the savings from larger γ. With correct recalibration, the planner finds γ∗ = 2 .0
+
+for Archetype I/II workloads (Azure, LMSYS) where the long pool shrinks substantially, and 
+
+γ∗ = 1 .5 for the dispersed Agent-heavy workload where gains plateau. 
+
+Erlang-C inversion. The minimum server count c satisfying Eq. (8) is found by binary search over the interval [⌈a/ρ max ⌉, 10 ⌈a⌉] where a = λp/μ gpu , with utilization cap ρmax = 0 .85 .
+
+# 7 Evaluation 
+
+7.1 Setup 
+
+Workload traces. We evaluate on two public traces and one synthetic trace built from pub-lished workload statistics. 
+
+Azure LLM Inference Trace 2023 [Patel et al., 2024] contains 28,185 requests (8,819 coding, 19,366 conversational). Mean Ltotal = 1 ,588 tokens; p90 = 4,242; p99 = 7,445. We use 
+
+Bshort = 4 ,096 where α = 0 .898 and β = 0 .078 , giving a 16 × cliff and a meaningful two-pool split (Archetype I/II). 
+
+LMSYS-Chat-1M (multi-turn) [Zheng et al., 2024] uses accumulated context at each turn. We use Bshort = 1 ,536 where α = 0 .909 and β = 0 .046 , giving a 42 × cliff (Archetype I/II). 
+
+Agent-heavy is a synthetic trace derived from published statistics for SWE-bench [Jimenez et al., 2024] (40%), BFCL [Yan et al., 2024] (25%), and RAG pipelines [Lewis et al., 2020] (35%). Mean Ltotal = 6 ,511 tokens; p50 = 4,096; p90 = 16,384; p99 = 32,768. At Bshort = 8 ,192 ,
+
+α = 0 .740 , β = 0 .112 (Archetype II, the primary scenario for C&R benefit). The SWE-bench component consists largely of code; code requests are excluded from compression (Section 5.2). The effective compression success rate for Agent-heavy borderline traffic is pc = 0 .75 , reflecting that approximately 25% of borderline requests are code-category and cannot be compressed. 
+
+Simulation parameters. W = 8 ms, H = 0 .65 ms/slot, Cchunk = 512 , calibrated to Llama-3-70B on A100-80GB (8-GPU tensor-parallel node). The long pool is sized for C(l)max = 65 ,536 
+
+tokens, giving n(l)max = 16 concurrent slots per GPU and KV memory ≈ 20 .0 GB per slot (320 KB/token). Short-pool n(s)max depends on Bshort : 256 at 4K, 682 at 1.5K, 128 at 8K. GPU cost $2.21/GPU-hr. Fleet arrival rate λ = 1 ,000 req/s; P99 TTFT target Tslo = 500 ms unless stated otherwise. DES validation uses inference-fleet-sim [Chen et al., 2026c]. 
+
+Baselines. 
+
+1. Homogeneous : single pool sized for 64K context. 2. Pool routing (PR) : two pools at workload-specific Bshort (Table 2), γ = 1 .0 (no com-pression). 3. PR + C&R (retrofit) : C&R at γ = 1 .5 deployed on the PR fleet, co-sized for the compressed λs.4. FleetOpt (co-design) : fleet co-designed by Algorithm 1 at optimal γ∗.87.2 Fleet GPU Savings vs. Homogeneous 
+
+Table 3 shows fleet GPU counts and GPU savings versus the homogeneous baseline. The 
+
+FleetOpt fleet is the outcome of the complete framework: optimal analytical sizing plus 
+
+C&R .Table 3: Fleet GPU counts and annualized cost at λ = 1 ,000 req/s, ρmax = 0 .85 , homogeneous A100-80GB sized for 64K context. Cost at $2.21/GPU-hr × 8,760 hr/yr. γ∗ from Algorithm 1. 
+
+pc = 1 .0 for Azure and LMSYS (prose/RAG borderline traffic); pc = 0 .75 for Agent-heavy (25% of borderline traffic is code, excluded from compression). See Table 2 for Bshort , α, β.                                                                                    
+
+> Workload Method nsnlTotal Ann. cost (K$) Savings Azure (Bshort = 4 ,096 )Homogeneous ——284 5,498 —Pool routing (PR) 43 131 174 3,369 38.7% PR + C&R (γ= 1 .5)47 45 92 1,781 67.6%
+> FleetOpt (γ∗= 2 .0)48 250 968 82.4%
+> LMSYS (Bshort = 1 ,536 )Homogeneous ——139 2,691 —Pool routing (PR) 774 81 1,568 41.7% PR + C&R (γ= 1 .5)765 72 1,394 48.2%
+> FleetOpt (γ∗= 2 .0)752 59 1,142 57.6%
+> Agent-heavy (Bshort = 8 ,192 )Homogeneous ——2,397 46,405 —Pool routing (PR) 229 2,037 2,266 43,869 5.5% PR + C&R (γ= 1 .5)255 1,981 2,236 43,288 6.7%
+> FleetOpt (γ∗= 1 .5)255 1,981 2,236 43,288 6.7%
+
+Savings decomposition. The numbers in Table 3 follow a clear pattern. Pool routing alone saves 5.5–41.7%, with the biggest gains when α is high and the cliff ratio ρ is large. C&R with 
+
+γ = 1 .5 adds 29 percentage points for Azure (because β = 7 .8% moves 76% of above-threshold traffic into the efficient short pool, and ρ = 16 × makes each redirected request highly valuable) but only 1.2 pp for Agent-heavy (because 26% of all traffic remains above γB short , requiring a large long pool regardless). FleetOpt at γ∗ = 2 .0 for Azure nearly eliminates the long pool (2 GPUs), achieving 82.4% savings. 
+
+When does C&R add value? The incremental GPU saving from adding C&R to pool routing is ∆α(1 − 1/ρ ) = βp c(1 − n(l)max /n (s)max ). This is large when the borderline fraction β is significant and the cliff ratio ρ is large. For Agent-heavy, β = 11 .2% is moderate but ρ = 8 ×
+
+is the smallest cliff, and pc = 0 .75 (code exclusion), limiting the per-request gain. For Azure, 
+
+β = 7 .8% paired with ρ = 16 × yields large incremental gains. 
+
+Why co-design equals retrofit for Agent-heavy. Table 3 shows that for Agent-heavy, the PR+ C&R retrofit at γ = 1 .5 and FleetOpt at γ∗ = 1 .5 produce identical fleets. This is expected: when the planner’s optimal γ∗ matches the retrofit’s γ, the two approaches arrive at the same (ns, n l) by construction. Theorem 2 is satisfied (co-design ≤ retrofit), but the inequality is tight. The co-design advantage is largest when γ∗ exceeds the retrofit’s γ, which occurs when most above-threshold traffic is borderline (Archetype I/II, Azure and LMSYS). For Agent-heavy (Archetype II with dispersed above-threshold traffic), γ∗ = 1 .5 is already the practical limit: compressing further leaves a harder long-pool distribution and yields no net saving. 97.3 Compression Pipeline Latency 
+
+The compressor is applied only to borderline requests, so the mean overhead per request is 
+
+β × tcompress . Table 4 shows the latency profile. Table 4: End-to-end compressor latency (ms), measured on Intel Xeon Platinum 8568Y+ single core. “Overhead/req” is the mean added latency across all requests, weighted by β.                        
+
+> Workload Bshort βp50 p95 p99 Overhead/req Azure 4,096 0.078 1.8 ms 4.2 ms 6.5 ms <0.2 ms LMSYS 1,536 0.046 1.2 ms 3.1 ms 5.2 ms <0.1 ms Agent-heavy 8,192 0.112 3.4 ms 6.2 ms 7.8 ms 0.39 ms
+
+Even in the worst case (agent-heavy), the 0.39 ms average overhead is invisible against a 500 ms TTFT budget. 
+
+7.4 Analytical Model Validation 
+
+We validate the FleetOpt analytical model against inference-fleet-sim [Chen et al., 2026c], an open-source discrete-event simulator for heterogeneous LLM GPU fleets. The simulator drives Poisson arrivals from the empirical CDF with λ = 1 ,000 req/s and records the fraction of slot-time that KV-cache slots are busy (GPU utilization ˆρ). Table 5 compares the analytical utilization ρana = λp/(n · μgpu ) against the DES-measured 
+
+ˆρ for the pool-routing ( γ = 1 ) fleet from Table 3. Table 5: Analytical vs. DES GPU utilization ρ at λ = 1 ,000 req/s, pool-routing fleet ( γ = 1 ). “Error” = ( ρana − ˆρ)/ˆρ. DES uses 30,000 requests per pool.                                   
+
+> Workload Pool nGPUs ρana ˆρ(DES) Error Azure Short 43 0.848 0.865 −2.1%
+> Long 131 0.845 0.847 −0.1%
+> LMSYS Short 70.771 0.792 −2.7%
+> Long 74 0.845 0.853 −1.0%
+> Agent-heavy Short 229 0.848 0.868 −2.2%
+> Long 2,037 0.850 0.850 −0.1%
+
+The analytical model predicts GPU utilization within 3% of the DES across all pools and workloads. Both analytical and DES values sit near ρmax = 0 .85 , confirming that the ρmax -constrained sizing hits its target. The analytical model is slightly optimistic: actual utilization runs 0.1–2.7% above prediction in all cases. In practice this means the provisioned fleet is just barely busier than expected; adding 1–3 GPUs per pool eliminates even this small gap. These fleets operate in the many-server regime: total KV slots c = n·nmax ranges from 112 to 32,592 across our configurations. At that scale the Erlang-C probability C(c, ϱ ) ≪ 1, slot-wait times are negligible, and fleet sizing is dominated entirely by the utilization cap ρmax . In this regime the full M/G/ c + Kimura apparatus reduces to the simpler bound n∗ ≈ ⌈ λp/(ρmax μ)⌉;the queueing machinery becomes load-bearing only for smaller, lightly-provisioned fleets (few GPUs, high ϱ). 
+
+P99 TTFT. Because queue waits are negligible, TTFT is dominated by prefill time. An-alytical P99 TTFT for the PR fleet: Azure short 20 ms / long 80 ms; LMSYS short 11 ms / long 48 ms; Agent-heavy short 47 ms / long 220 ms — all comfortably within the 500 ms SLO. The FleetOpt planner enforces the SLO constraint (Eq. (8)) directly; in the many-server 10 regime this constraint is non-binding and the 500 ms SLO is met with large margin across all configurations. 
+
+7.5 Arrival-Rate Sensitivity 
+
+Table 6 shows how fleet sizes scale with arrival rate for the Agent-heavy workload. The savings from pool routing (5.4–5.5%) and FleetOpt (6.2–6.8%) are stable across a 20 × range of ar-rival rates, confirming that the proportional GPU savings from the two-pool architecture scale linearly with load. Table 6: Fleet size and savings vs. arrival rate λ (Agent-heavy, Bshort = 8 ,192 , γ∗ from Algo-rithm 1).                                       
+
+> λ(req/s) Homo PR FleetOpt (γ∗)PR saving FleetOpt saving 100 240 227 225 ( γ∗= 1 .2)5.4% 6.2% 200 480 454 448 ( γ∗= 1 .5)5.4% 6.7% 500 1,199 1,134 1,119 ( γ∗= 1 .5)5.4% 6.7% 1,000 2,397 2,266 2,236 ( γ∗= 1 .5)5.5% 6.7% 2,000 4,794 4,531 4,470 ( γ∗= 1 .5)5.5% 6.8%
+
+# 8 Related Work 
+
+Pool routing and length-specialized serving. Chen et al. [2026b] establishes pool routing and the GPU savings formula α(1 − 1/ρ ). Yuan et al. [2025] independently validates length-specialized partitioning. She et al. [2026] and Agrawal et al. [2024a] address length heterogeneity at the engine layer; this paper addresses the upstream provisioning decision. 
+
+Prompt compression as routing lever. Chen et al. [2026a] first uses prompt compression as an operational fleet routing lever, studying C&R as a retrofit on a fixed fleet. Here we treat C&R as the implementation mechanism for the analytically-derived optimal fleet bound-ary. The two are complementary: the analytical model prescribes B∗
+
+> short
+
+, and C&R makes it achievable without hardware changes. 
+
+LLM capacity planning. Romero et al. [2021] and Gujarati et al. [2020] study model-variant selection and predictive scaling, respectively. Patel et al. [2024] analyzes prefill/decode disaggregation but does not optimize fleet size jointly with routing. FleetOpt is the first system to jointly derive the optimal pool boundary and GPU counts from a workload CDF. 
+
+Queueing models for serving. The M/G/ c queue and Erlang-C formula are classical [Harchol-Balter, 2013]. Shahrad et al. [2020] applies queueing to serverless cold-start; Li et al. [2023b] to model placement. FleetOpt applies M/G/ c to the pool routing + compression joint provi-sioning problem, with the Kimura [Kimura, 1994] correction for service-time variance. 
+
+Fleet-level LLM simulation. Vidur [Agrawal et al., 2024b] and similar tools simulate single inference engine instances. inference-fleet-sim [Chen et al., 2026c] provides fleet-level DES for heterogeneous multi-pool deployments and is used here to validate the FleetOpt analytical model. 11 9 Conclusion 
+
+Provisioning LLM GPU fleets for worst-case context lengths is expensive and largely avoid-able. FleetOpt tackles this by starting from first principles: derive the minimum-cost fleet analytically, then build it. The analytical core (M/G/ c queuing model with c = n · nmax total KV slots, Erlang-C inversion) shows that the optimal fleet is a two-pool architecture whose boundary B∗ 
+
+> short
+
+satisfies an equal marginal GPU cost condition. The fundamental barrier to achieving B∗ 
+
+> short
+
+in practice is the cost cliff: borderline requests at the optimal boundary pay ρ = 8 –42 × the throughput cost of requests just below it. Compress-and-Route ( C&R ) resolves this barrier by compressing borderline prompts at the gateway, converting a hardware constraint into a software parameter. The combined framework saves 6–82% in GPU cost versus homogeneous deployment, de-pending on the workload archetype and cliff ratio. Pool routing alone saves 5.5–41.7%; C&R 
+
+adds 1.2–43.7 percentage points beyond pool routing. The largest gains arise when β is signifi-cant and the cliff ratio ρ is large: Azure at Bshort = 4 ,096 achieves 82.4% savings with ρ = 16 ×
+
+and γ∗ = 2 .0. For Agent-heavy at Bshort = 8 ,192 with ρ = 8 ×, gains are more modest (6.7%) because 26% of traffic remains above γB short .How much C&R co-design adds beyond pool routing depends on three factors: the cliff ratio ρ, the borderline fraction β, and compressibility pc. None of these can be read off a GPU spec sheet; they require a calibrated workload CDF and the recalibration of μl for the post-compression distribution. inference-fleet-sim [Chen et al., 2026c] validates this within 3% utilization error. Skipping the recalibration leads to over-optimistic savings estimates and under-provisioned fleets. The FleetOpt planner outputs the optimal (n∗ 
+
+> s
+
+, n ∗ 
+
+> l
+
+, B ∗
+
+> short
+
+, γ ∗) in under 1 ms, making it practical to re-run whenever the workload CDF shifts. 
+
+# References 
+
+Amey Agrawal, Nikhil Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, Alexey Tumanov, and Ramachandran Ramjee. Taming throughput-latency tradeoff in LLM inference with Sarathi-Serve. In Proc. OSDI , 2024a. Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S Gulavani, Ramachandran Ramjee, and Alexey Tumanov. Vidur: A large-scale simulation framework for LLM inference, 2024b. Amey Agrawal, Haoran Qiu, Junda Chen, Íñigo Goiri, Chaojie Zhang, Rayyan Shahid, Ra-machandran Ramjee, Alexey Tumanov, and Esha Choukse. No request left behind: Tackling heterogeneity in long-context LLM inference with Medha. arXiv:2409.17264 , 2024c. Huamin Chen, Xunzhuo Liu, Junchen Jiang, Bowei He, and Xue Liu. Compress-and-route: Routing-layer prompt compression against the long-context cost cliff in LLM inference fleets. 
+
+arXiv preprint , 2026a. Manuscript under review. Huamin Chen, Xunzhuo Liu, Junchen Jiang, Bowei He, and Xue Liu. Token-budget-aware pool routing for cost-efficient LLM inference. arXiv preprint , 2026b. Manuscript under review. Huamin Chen, Xunzhuo Liu, Yuhan Liu, Junchen Jiang, Bowei He, and Xue Liu. inference-fleet-sim: A queueing-theory-grounded fleet capacity planner for LLM inference, 2026c. Replace 
+
+2603.XXXXX with the assigned arXiv ID. Arpan Gujarati, Reza Karimi, Safya Alzayat, Wei Hao, Antoine Kaufmann, Ymir Vigfusson, and Jonathan Mace. Serving DNNs like clockwork: Performance predictability from the bottom up. In Proc. OSDI , 2020. 12 Mor Harchol-Balter. Performance Modeling and Design of Computer Systems: Queueing Theory in Action . Cambridge University Press, 2013. Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. SWE-bench: Can language models resolve real-world GitHub issues? In Proc. ICLR , 2024. Toshikazu Kimura. Two-moment approximations for the mean waiting time in the M/G/c queue. J. Oper. Res. Soc. Japan , 37(3):238–256, 1994. Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen tau Yih, Tim Rocktäschel, Sebastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Proc. NeurIPS , 2020. Yucheng Li, Bo Dong, Chenghua Lin, and Frank Guerin. Compressing context to enhance inference efficiency of large language models. In Proc. EMNLP , 2023a. Zhuohan Li, Lianmin Zheng, Yinmin Zhong, Vincent Liu, Ying Sheng, Xin Jin, Yanping Huang, Zhifeng Chen, Hao Zhang, Joseph E. Gonzalez, and Ion Stoica. AlpaServe: Statistical mul-tiplexing with model parallelism for deep learning serving. In Proc. OSDI , 2023b. Rada Mihalcea and Paul Tarau. TextRank: Bringing order into texts. In Proc. EMNLP , 2004. Pratyush Patel, Esha Choukse, Chaojie Zhang, Íñigo Goiri, Brijesh Warrier, Nithish Ma-halingam, and Ricardo Bianchini. Splitwise: Efficient generative LLM inference using phase splitting. In Proc. ISCA , 2024. Francisco Romero, Qian Li, Neeraja J. Yadwadkar, and Christos Kozyrakis. INFaaS: Automated model-less inference serving. In Proc. USENIX ATC , 2021. Mohammad Shahrad, Rodrigo Fonseca, Ínigo Goiri, Gohar Chaudhry, Paul Batum, Jason Cooke, Eduardo Laureano, Colby Tresness, Mark Russinovich, and Ricardo Bianchini. Server-less in the wild: Characterizing and optimizing the serverless workload at a large cloud provider. In Proc. USENIX ATC , 2020. Jianshu She, Zonghang Li, Hongchao Du, Shangyu Wu, Wenhao Zheng, Eric Xing, Zhengzhong Liu, Huaxiu Yao, Jason Xue, and Qirong Ho. LAPS: A length-aware-prefill LLM serving system. arXiv:2601.11589 , 2026. Fanjia Yan, Huanzhi Mao, Charlie Cheng-Jie Ji, Tianjun Zhang, Shishir G. Patil, Ion Stoica, and Joseph E. Gonzalez. BFCL: Berkeley function-calling leaderboard. https://gorilla. cs.berkeley.edu/blogs/8_berkeley_function_calling_leaderboard.html , 2024. Yitao Yuan, Chenqi Zhao, Bohan Zhao, Zane Cao, Yongchao He, and Wenfei Wu. CascadeInfer: Low-latency and load-balanced LLM serving via length-aware scheduling. arXiv:2512.19179 ,2025. Zeyu Zhang and Haiying Shen. PecSched: Preemptive and efficient cluster scheduling for LLM inference. arXiv:2409.15104 , 2024. Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Tianle Li, Siyuan Zhuang, Zhanghao Wu, Yong-hao Zhuang, Zhuohan Li, Zi Lin, Eric P. Xing, Joseph E. Gonzalez, Ion Stoica, and Hao Zhang. LMSYS-Chat-1M: A large-scale real-world LLM conversation dataset. In Proc. ICLR , 2024. 13 A Erlang-C Inversion: Algorithm and Numerical Stability 
+
+The minimum feasible GPU count n∗ is found by binary search over c using the numerically stable recursive Erlang-C form: 
+
+C(c, ϱ ) = 11 + (1 − ϱ) · c! · ∑c−1
+
+> k=0 (cϱ )k−c
+> k!
+
+, (16) computed in log-space to avoid overflow at large c. The utilization cap ρmax = 0 .85 ensures we always search above the point where the Kimura approximation loses accuracy and the Erlang-C formula diverges near ϱ → 1.
+
+# B Proof of Proposition 1 
+
+Total cost as a function of Bshort : C(Bshort ) = csn∗ 
+
+> s
+
+(F (Bshort )λ) + cln∗ 
+
+> l
+
+((1 − F (Bshort )) λ). Dif-ferentiating with respect to Bshort and applying the chain rule: 
+
+dC
+
+dB short 
+
+= λf (Bshort )
+
+[
+
+cs
+
+∂n ∗
+
+> s
+
+∂λ s
+
+− cl
+
+∂n ∗
+
+> l
+
+∂λ l
+
+]
+
+. (17) Since λf (Bshort ) > 0 for any interior boundary, the FOC dC/dB short = 0 requires the bracketed term to be zero: 
+
+cs
+
+∂n ∗
+
+> s
+
+∂λ s
+
+= cl
+
+∂n ∗
+
+> l
+
+∂λ l
+
+. (18) This is an equal marginal GPU cost condition: the marginal GPU cost of routing one additional request-per-second to the short pool equals the marginal GPU saving from removing one request-per-second from the long pool. For a homogeneous fleet ( cs = cl, same GPU type), the condition simplifies to ∂n ∗ 
+
+> s
+
+/∂λ s =
+
+∂n ∗ 
+
+> l
+
+/∂λ l. Under the ρmax -constrained sizing regime (which dominates in practice as shown in Section 7.4): n∗ ≈ ⌈ λp/(ρmax μ)⌉, so ∂n ∗/∂λ p ≈ 1/(ρmax μ). The FOC then requires μs = μl,i.e., both pools have the same service rate. This is generally not achievable for a given Bshort 
+
+because short and long pools serve different request length distributions; in practice B∗ 
+
+> short
+
+is found numerically by the sweep in Algorithm 1. □
+
+# C Compression Fidelity 
+
+Table 7 summarizes fidelity measurements on 300 borderline prompts drawn from LMSYS-Chat-1M at the Agent-heavy configuration ( Bshort = 8 ,192 , γ = 1 .5, borderline band 8,192 –12 ,288 
+
+tokens). For the Azure and LMSYS evaluation configurations, which use smaller Bshort values (4,096 and 1,536 respectively), the borderline band is narrower and prompts are shorter, so fidelity is at least as good as reported here. All measurements used the compressor described in Section 5.2. 14 Table 7: Compression fidelity on 300 LMSYS-Chat-1M borderline prompts. pc: fraction suc-cessfully compressed within budget; BERTScore F1: semantic similarity (RoBERTa-large); ROUGE-L R: longest-common-subsequence recall; TF-IDF cos: token-overlap cosine similarity.                          
+
+> Metric Mean p10 p50 p90
+> pc(compressibility) 1.00 ———BERTScore F1 0.884 0.831 0.891 0.934 ROUGE-L recall 0.856 0.783 0.861 0.921 TF-IDF cosine 0.981 0.963 0.984 0.996 Mean token reduction 15.4% 6.1% 14.2% 26.3%
+
+15
