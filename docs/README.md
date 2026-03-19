@@ -6,88 +6,82 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-18
-- 运行时间：2026-03-18 19:56:34 UTC
+- 最新运行日期：2026-03-19
+- 运行时间：2026-03-19 19:47:15 UTC
 - 运行状态：成功
-- 本次总论文数：22
-- 精读区：11
+- 本次总论文数：20
+- 精读区：9
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度解析 22 篇 AI 论文，重点聚焦 KV 缓存压缩与扩散大模型（Diffusion LLM）的推理加速。
-满分神作 VQKV 实现了高保真、高倍率的缓存压缩，ES-dLLM 则通过早停机制大幅优化了扩散模型的生成效率。
-推荐优先研读 KV Cache 优化与 MoE 冗余削减方案，这是当前提升大模型长文本与多智能体性能的核心趋势。
-- 详情：[/202603/18/README](/202603/18/README)
+今日深度解析 20 篇大模型推理前沿论文，重点攻克多阶段流调度与存储瓶颈。
+满分研究展示了跨 SSD 的 KVCache 协同卸载与多阶段调度技术，能显著提升长文本服务效率。
+建议关注 Mamba-Transformer 混合架构及多智能体服务框架，探索更高效的系统级部署方案。
+- 详情：[/202603/19/README](/202603/19/README)
 
 ### 精读区论文标签
-1. [VQKV: High-Fidelity and High-Ratio Cache Compression via Vector-Quantization](/202603/18/2603.16435v1-vqkv-high-fidelity-and-high-ratio-cache-compression-via-vector-quantization)  
+1. [Multi-stage Flow Scheduling for LLM Serving](/202603/19/2603.17456v1-multi-stage-flow-scheduling-for-llm-serving)  
    标签：评分：10.0/10、query:llm
-   evidence：通过矢量量化进行KV缓存压缩
-2. [ES-dLLM: Efficient Inference for Diffusion Large Language Models by Early-Skipping](/202603/18/2603.10088v1-es-dllm-efficient-inference-for-diffusion-large-language-models-by-early-skipping)  
+   evidence：多阶段流调度优化大模型服务的首字延迟
+2. [Swarm: Co-Activation Aware KVCache Offloading Across Multiple SSDs](/202603/19/2603.17803v1-swarm-co-activation-aware-kvcache-offloading-across-multiple-ssds)  
+   标签：评分：10.0/10、query:llm
+   evidence：利用协同激活相关性将KV缓存卸载到SSD
+3. [Efficient Training-Free Multi-Token Prediction via Embedding-Space Probing](/202603/19/2603.17942v1-efficient-training-free-multi-token-prediction-via-embedding-space-probing)  
+   标签：评分：10.0/10、query:llm
+   evidence：无需训练的多标记预测与投机标记树
+4. [ASAP: Attention-Shift-Aware Pruning for Efficient LVLM Inference](/202603/19/2603.14549v2-asap-attention-shift-aware-pruning-for-efficient-lvlm-inference)  
    标签：评分：9.0/10、query:llm
-   evidence：通过跳过标记实现扩散大语言模型的推理加速框架
-3. [Serving Hybrid LLM Loads with SLO Guarantees Using CPU-GPU Attention Piggybacking](/202603/18/2603.12831v2-serving-hybrid-llm-loads-with-slo-guarantees-using-cpu-gpu-attention-piggybacking)  
+   evidence：针对视觉语言模型的注意力偏移感知剪枝
+5. [LEXI: Lossless Exponent Coding for Efficient Inter-Chiplet Communication in Hybrid LLMs](/202603/19/2603.15589v1-lexi-lossless-exponent-coding-for-efficient-inter-chiplet-communication-in-hybrid-llms)  
    标签：评分：9.0/10、query:llm
-   evidence：优化混合LLM负载的吞吐量和延迟
-4. [Learning to Forget: Sleep-Inspired Memory Consolidation for Resolving Proactive Interference in Large Language Models](/202603/18/2603.14517v1-learning-to-forget-sleep-inspired-memory-consolidation-for-resolving-proactive-interference-in-large-language-models)  
+   evidence：激活值与缓存的无损压缩
+6. [Mostly Text, Smart Visuals: Asymmetric Text-Visual Pruning for Large Vision-Language Models](/202603/19/2603.16001v1-mostly-text-smart-visuals-asymmetric-text-visual-pruning-for-large-vision-language-models)  
    标签：评分：9.0/10、query:llm
-   evidence：在KV缓存上实现学习型睡眠周期
-5. [FlashHead: Efficient Drop-In Replacement for the Classification Head in Language Model Inference](/202603/18/2603.14591v1-flashhead-efficient-drop-in-replacement-for-the-classification-head-in-language-model-inference)  
+   evidence：针对大型视觉语言模型的非对称文本-视觉剪枝技术
+7. [ZipServ: Fast and Memory-Efficient LLM Inference with Hardware-Aware Lossless Compression](/202603/19/2603.17435v1-zipserv-fast-and-memory-efficient-llm-inference-with-hardware-aware-lossless-compression)  
    标签：评分：9.0/10、query:llm
-   evidence：推理中分类层的高效替代方案
-6. [MobileLLM-Flash: Latency-Guided On-Device LLM Design for Industry Scale](/202603/18/2603.15954v1-mobilellm-flash-latency-guided-on-device-llm-design-for-industry-scale)  
+   evidence：针对大模型推理的硬件感知无损压缩
+8. [RAMP: Reinforcement Adaptive Mixed Precision Quantization for Efficient On Device LLM Inference](/202603/19/2603.17891v1-ramp-reinforcement-adaptive-mixed-precision-quantization-for-efficient-on-device-llm-inference)  
    标签：评分：9.0/10、query:llm
-   evidence：端侧LLM设计，采用注意力跳过技术进行加速
-7. [inference-fleet-sim: A Queueing-Theory-Grounded Fleet Capacity Planner for LLM Inference](/202603/18/2603.16054v1-inference-fleet-sim-a-queueing-theory-grounded-fleet-capacity-planner-for-llm-inference)  
+   evidence：用于高效推理的强化学习自适应混合精度量化
+9. [CARE: Covariance-Aware and Rank-Enhanced Decomposition for Enabling Multi-Head Latent Attention](/202603/19/2603.17946v1-care-covariance-aware-and-rank-enhanced-decomposition-for-enabling-multi-head-latent-attention)  
    标签：评分：9.0/10、query:llm
-   evidence：大模型推理延迟与吞吐量的集群容量规划器
-8. [Efficient LLM Serving for Agentic Workflows: A Data Systems Perspective](/202603/18/2603.16104v1-efficient-llm-serving-for-agentic-workflows-a-data-systems-perspective)  
-   标签：评分：9.0/10、query:llm
-   evidence：针对智能体工作流的高效大模型服务
-9. [Frequency Matters: Fast Model-Agnostic Data Curation for Pruning and Quantization](/202603/18/2603.16105v1-frequency-matters-fast-model-agnostic-data-curation-for-pruning-and-quantization)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于剪枝和量化的数据筛选策略
-10. [SpecSteer: Synergizing Local Context and Global Reasoning for Efficient Personalized Generation](/202603/18/2603.16219v1-specsteer-synergizing-local-context-and-global-reasoning-for-efficient-personalized-generation)  
-   标签：评分：9.0/10、query:llm
-   evidence：将投机采样用于分布式推理加速
-11. [FleetOpt: Analytical Fleet Provisioning for LLM Inference with Compress-and-Route as Implementation Mechanism](/202603/18/2603.16514v1-fleetopt-analytical-fleet-provisioning-for-llm-inference-with-compress-and-route-as-implementation-mechanism)  
-   标签：评分：9.0/10、query:llm
-   evidence：通过管理空闲KV缓存槽位优化GPU容量
+   evidence：在不增加KV缓存成本的情况下提高表达能力
 
 ### 速读区论文标签
-1. [LightMoE: Reducing Mixture-of-Experts Redundancy through Expert Replacing](/202603/18/2603.12645v1-lightmoe-reducing-mixture-of-experts-redundancy-through-expert-replacing)  
+1. [Orla: A Library for Serving LLM-Based Multi-Agent Systems](/202603/19/2603.13605v1-orla-a-library-for-serving-llm-based-multi-agent-systems)  
    标签：评分：8.0/10、query:llm
-   evidence：MoE大模型压缩中的专家替换技术
-2. [Efficient and Interpretable Multi-Agent LLM Routing via Ant Colony Optimization](/202603/18/2603.12933v1-efficient-and-interpretable-multi-agent-llm-routing-via-ant-colony-optimization)  
+   evidence：跨后端协调大模型推理的服务层
+2. [Flash-Unified: A Training-Free and Task-Aware Acceleration Framework for Native Unified Models](/202603/19/2603.15271v1-flash-unified-a-training-free-and-task-aware-acceleration-framework-for-native-unified-models)  
    标签：评分：8.0/10、query:llm
-   evidence：高效的多智能体路由以降低LLM推理成本和延迟
-3. [Dependency-Aware Parallel Decoding via Attention for Diffusion LLMs](/202603/18/2603.12996v1-dependency-aware-parallel-decoding-via-attention-for-diffusion-llms)  
+   evidence：针对原生统一模型的任务感知加速框架
+3. [DUET: Disaggregated Hybrid Mamba-Transformer LLMs with Prefill and Decode-Specific Packages](/202603/19/2603.15530v1-duet-disaggregated-hybrid-mamba-transformer-llms-with-prefill-and-decode-specific-packages)  
    标签：评分：8.0/10、query:llm
-   evidence：通过注意力机制实现扩散LLM的并行解码
-4. [CAMD: Coverage-Aware Multimodal Decoding for Efficient Reasoning of Multimodal Large Language Models](/202603/18/2603.14745v1-camd-coverage-aware-multimodal-decoding-for-efficient-reasoning-of-multimodal-large-language-models)  
+   evidence：针对混合模型预填充和解码阶段的解耦加速器
+4. [Efficient Reasoning on the Edge](/202603/19/2603.16867v1-efficient-reasoning-on-the-edge)  
    标签：评分：8.0/10、query:llm
-   evidence：多模态大语言模型的高效解码
-5. [Optimal Expert-Attention Allocation in Mixture-of-Experts: A Scalable Law for Dynamic Model Design](/202603/18/2603.10379v1-optimal-expert-attention-allocation-in-mixture-of-experts-a-scalable-law-for-dynamic-model-design)  
+   evidence：优化边缘部署中的KV缓存占用和Token成本
+5. [ExPosST: Explicit Positioning with Adaptive Masking for LLM-Based Simultaneous Machine Translation](/202603/19/2603.14903v1-exposst-explicit-positioning-with-adaptive-masking-for-llm-based-simultaneous-machine-translation)  
    标签：评分：7.0/10、query:llm
-   evidence：MoE模型中专家与注意力的最优计算分配以实现高效扩展
-6. [Leech Lattice Vector Quantization for Efficient LLM Compression](/202603/18/2603.11021v1-leech-lattice-vector-quantization-for-efficient-llm-compression)  
+   evidence：通过KV缓存实现高效解码
+6. [Attention Residuals](/202603/19/2603.15031v1-attention-residuals)  
    标签：评分：7.0/10、query:llm
-   evidence：用于高效大模型压缩的向量量化
-7. [Summarize Before You Speak with ARACH: A Training-Free Inference-Time Plug-In for Enhancing LLMs via Global Attention Reallocation](/202603/18/2603.11067v1-summarize-before-you-speak-with-arach-a-training-free-inference-time-plug-in-for-enhancing-llms-via-global-attention-reallocation)  
+   evidence：通过注意力残差进行选择性聚合并减少内存占用
+7. [DOS: Dependency-Oriented Sampler for Masked Diffusion Language Models](/202603/19/2603.15340v1-dos-dependency-oriented-sampler-for-masked-diffusion-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：LLM免训练推理时插件
-8. [Spend Less, Reason Better: Budget-Aware Value Tree Search for LLM Agents](/202603/18/2603.12634v1-spend-less-reason-better-budget-aware-value-tree-search-for-llm-agents)  
+   evidence：掩码扩散语言模型的高效并行解码
+8. [100x Cost & Latency Reduction: Performance Analysis of AI Query Approximation using Lightweight Proxy Models](/202603/19/2603.15970v2-100x-cost--latency-reduction-performance-analysis-of-ai-query-approximation-using-lightweight-proxy-models)  
    标签：评分：7.0/10、query:llm
-   evidence：大模型智能体的预算感知推理框架
-9. [Duration Aware Scheduling for ASR Serving Under Workload Drift](/202603/18/2603.11273v1-duration-aware-scheduling-for-asr-serving-under-workload-drift)  
+   evidence：通过代理模型实现高效推理
+9. [On the Computational Hardness of Transformers](/202603/19/2603.11332v1-on-the-computational-hardness-of-transformers)  
    标签：评分：6.0/10、query:llm
-   evidence：集成到vLLM中的语音识别服务调度
-10. [On the Nature of Attention Sink that Shapes Decoding Strategy in MLLMs](/202603/18/2603.14337v1-on-the-nature-of-attention-sink-that-shapes-decoding-strategy-in-mllms)  
+   evidence：注意力机制的计算复杂度与效率研究
+10. [Outcome-Aware Tool Selection for Semantic Routers: Latency-Constrained Learning Without LLM Inference](/202603/19/2603.13426v1-outcome-aware-tool-selection-for-semantic-routers-latency-constrained-learning-without-llm-inference)  
    标签：评分：6.0/10、query:llm
-   evidence：基于注意力汇聚点的推理策略
-11. [Compute Allocation for Reasoning-Intensive Retrieval Agents](/202603/18/2603.14635v1-compute-allocation-for-reasoning-intensive-retrieval-agents)  
+   evidence：LLM推理网关中受延迟限制的工具选择
+11. [Retrieval-Feedback-Driven Distillation and Preference Alignment for Efficient LLM-based Query Expansion](/202603/19/2603.13776v1-retrieval-feedback-driven-distillation-and-preference-alignment-for-efficient-llm-based-query-expansion)  
    标签：评分：6.0/10、query:llm
-   evidence：检索流水线中的计算分配以管理推理成本
+   evidence：通过蒸馏实现高效的大模型查询扩展
 
 
 <div class="dpr-home-promo-card">
