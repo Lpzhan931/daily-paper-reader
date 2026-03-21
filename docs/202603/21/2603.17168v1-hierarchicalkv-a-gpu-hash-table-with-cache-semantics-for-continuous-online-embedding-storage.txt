@@ -1,0 +1,691 @@
+Title: HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage
+
+URL Source: https://arxiv.org/pdf/2603.17168v1
+
+Published Time: Thu, 19 Mar 2026 00:25:31 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage 
+
+# Haidong Rong ∗
+
+NVIDIA USA hrong@nvidia.com 
+
+# Jiashu Yao †
+
+NVIDIA China jiashuy@nvidia.com 
+
+# Matthias Langer 
+
+NVIDIA Australia mlanger@nvidia.com 
+
+# Shijie Liu 
+
+NVIDIA China aleliu@nvidia.com 
+
+# Li Fan 
+
+Tencent China oppenheimli@tencent.com 
+
+# Dongxin Wang 
+
+Vipshop China dxwang.bill@gmail.com 
+
+# Jia He 
+
+BOSS Zhipin China hejia01@kanzhun.com 
+
+# Jinglin Chen 
+
+BOSS Zhipin China chenjinglin@kanzhun.com 
+
+# Jiaheng Rang 
+
+ByteDance China rangjiaheng@gmail.com 
+
+# Julian Qian 
+
+Snap USA julian.qian@gmail.com 
+
+# Mengyao Xu 
+
+NVIDIA USA mengyaox@nvidia.com 
+
+# Fan Yu 
+
+NVIDIA China fayu@nvidia.com 
+
+# Minseok Lee 
+
+NVIDIA USA minseokl@nvidia.com 
+
+# Zehuan Wang 
+
+NVIDIA China zehuanw@nvidia.com 
+
+# Even Oldridge 
+
+NVIDIA Canada eoldridge@nvidia.com 
+
+## Abstract 
+
+Traditional GPU hash tables preserve every inserted key—a dic-tionary assumption that wastes scarce High Bandwidth Memory (HBM) when embedding tables routinely exceed single-GPU ca-pacity. We challenge this assumption with cache semantics , where policy-driven eviction is a first-class operation. We introduce Hi-erarchicalKV (HKV), the first general-purpose GPU hash table library whose normal full-capacity operating contract is cache-semantic: each full-bucket upsert (update-or-insert) is resolved in place by eviction or admission rejection rather than by rehashing or capacity-induced failure. HKV co-designs four core mechanisms— cache-line-aligned buckets, in-line score-driven upsert, score-based dynamic dual-bucket selection, and triple-group concurrency—and uses tiered key-value separation as a scaling enabler beyond HBM. On an NVIDIA H100 NVL GPU, HKV achieves up to 3.9 billion key–value pairs per second (B-KV/s) find throughput, stable across load factors 0.50–1.00 (<5% variation), and delivers 1.4 × higher find 
+
+throughput than WarpCore (the strongest dictionary-semantic GPU baseline at 𝜆 =0.50 ) and up to 2.6–9.4 × over indirection-based GPU baselines. Since its open-source release in October 2022, HKV has  
+
+> ∗Corresponding author. Equal contribution.
+> †Equal contribution. Permission to make digital or hard copies of all or part of this work for personal or classroom use is granted without fee provided that copies are not made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for components of this work owned by others than the author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or republish, to post on servers or to redistribute to lists, requires prior specific permission and/or a fee. Request permissions from permissions@acm.org.
+> SIGMOD ’27, Berlin, Germany
+> ©2027 Copyright held by the owner/author(s). Publication rights licensed to ACM. ACM ISBN 978-1-4503-XXXX-X/2027/06 https://doi.org/XXXXXXX.XXXXXXX
+
+been integrated into multiple open-source recommendation frame-works. 
+
+## CCS Concepts 
+
+• Information systems → Data structures ; Hash table design ;
+
+• Computer systems organization → Parallel architectures .
+
+## Keywords 
+
+GPU, hash table, cache semantics, eviction, embedding storage, recommendation systems, key-value store 
+
+ACM Reference Format: 
+
+Haidong Rong, Jiashu Yao, Matthias Langer, Shijie Liu, Li Fan, Dongxin Wang, Jia He, Jinglin Chen, Jiaheng Rang, Julian Qian, Mengyao Xu, Fan Yu, Minseok Lee, Zehuan Wang, and Even Oldridge. 2027. HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage. In Proceedings of the 2027 International Conference on Management of Data (SIGMOD ’27), June 22–27, 2027, Berlin, Germany. ACM, New York, NY, USA, 14 pages. https://doi.org/XXXXXXX.XXXXXXX 
+
+## 1 Introduction 
+
+Modern recommendation, search, and advertising systems [ 44 ] rely on deep learning models whose embedding tables —mapping sparse features to dense vectors—are the dominant memory consumer, routinely exceeding single-GPU HBM capacity (e.g., a billion 64-dim float32 keys occupy ∼256 GB vs. 94 GB on an NVIDIA H100 NVL). Continuous online training further intensifies the pressure, demanding sustained key ingestion under a hard memory budget. Every widely-used GPU hash table—cuCollections [ 45 ], Warp-Core [ 28 ], BGHT [ 5], WarpSpeed [ 39 ], and Hive [ 50 ]—adopts dictio-nary semantics : every inserted key must be preserved. As the load factor approaches 1.0, probe chains lengthen, throughput degrades,  
+
+> arXiv:2603.17168v1 [cs.DB] 17 Mar 2026 SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al.
+
+and the system must rehash or fail. These limitations are intrinsic to dictionary semantics: as long as every key must be preserved, high-load-factor degradation and external maintenance remain un-avoidable. Our measurements show that find throughput drops by 31–100% as 𝜆 approaches 1.0 (§5.2), rendering dictionary-semantic hash tables unsuitable for continuously filled embedding caches. We observe that embedding storage is better modeled as a 
+
+cache than a dictionary: power-law access patterns mean retaining high-value entries and evicting low-value ones preserves model quality, while the hard memory budget makes eviction an inevitable, recurring event. This shift from dictionary to cache semantics fun-damentally changes the design constraints: a full table is no longer an error state but the normal operating condition . Just as the distinc-tion between B-tree indexes (dictionary semantics) and buffer pools (cache semantics) drives fundamentally different concurrency and replacement designs in database systems, the same semantic divide drives fundamentally different GPU hash table designs. Embracing 
+
+cache semantics opens a new design space but introduces four concrete challenges (§2.4): bounding per-key lookup work to a fixed number of GPU memory transactions (C1), resolving full-bucket upserts in place without rehashing (C2), preserving high-value entries under bounded associativity (C3), and separating structural from non-structural writes under mixed workloads (C4). To address these challenges, we introduce HierarchicalKV (hereafter HKV), the first general-purpose GPU hash table library 
+
+whose normal full-capacity operating contract is cache-semantic: each full-bucket upsert (update-or-insert) is resolved in place by eviction or admission rejection, without rehashing or external maintenance. HKV synthesizes four co-designed mechanisms into a cohesive architecture: (1) Single-bucket-confined cache-line-aligned bucket (§3.2): single-bucket confinement collapses each key’s entire candi-date space into 128 one-byte digests occupying one GPU L1 cache line, enabling definitive per-bucket miss in a single mem-ory transaction (one transaction in single-bucket mode; two in dual-bucket mode). (2) In-line score-driven upsert semantics (§3.3): bucket-local score comparison, admission control, and Compare-And-Swap (CAS) commit are fused directly into the insert path, so a full-bucket upsert is resolved inside the table with no separate evic-tion workflow. (3) Score-based dynamic dual-bucket selection (§3.4): extends the power-of-two-choices (P2C) paradigm [ 6, 43 ] from load balancing to eviction-quality optimization in GPU hash tables, recovering the ∼34% HBM left unused when birthday-paradox collisions trigger premature eviction at 𝜆 ≈0.66 in single-bucket mode, and achieving 99.4% top-𝑁 score retention at 𝜆 =1.0.(4) Triple-group concurrency (§3.5): reader/updater/inserter role separation with a CPU–GPU dual-layer lock, confining all struc-tural modifications to the inserter kernel so that reader and updater kernels require no CAS or eviction logic—substantially reducing per-kernel complexity and enabling independent opti-mization of each access pattern. As a scaling enabler, tiered key-value separation (§3.6) extends ca-pacity beyond HBM: keys, digests, and scores reside in HBM while values overflow to pinned host memory (HMEM) via position-based addressing. Together the four core mechanisms are co-designed so that their interactions deliver three properties absent from all prior GPU hash tables: fixed per-bucket miss work at every load factor, full-capacity in-place upsert without rehashing, and concurrent read/update/insert execution with role-isolated kernels; tiered KV separation extends this design to hybrid HBM+HMEM deployment while keeping key-side processing on GPU. Our evaluation on an NVIDIA H100 NVL GPU shows that HKV achieves up to 3.9 B-KV/s find throughput, stable across load fac-tors 0.50–1.00 (<5% variation), and delivers 1.4 × the find throughput of WarpCore and up to 2.6–9.4 × over indirection-based designs (i.e., those using (key, index) pairs with separate value gather: BP2HT, BGHT, cuCollections) (§5). Since its open-source release in October 2022, HKV has been integrated into NVIDIA Merlin HugeCTR [ 58 ], TFRA [ 54 ], and NVIDIA RecSys Examples [ 46 ]. This paper presents the design principles, formal properties, and comprehensive evaluation of HKV’s cache-semantic architecture. This paper contributes: 
+
+• We analyze GPU embedding cache workloads and identify four challenges (C1–C4) motivating a shift from dictionary to cache semantics (§2). 
+
+• We design a GPU cache-line-aligned bucket that achieves de-finitive per-bucket miss in one fixed memory transaction : single-bucket confinement collapses each key’s entire candidate space into 128 one-byte digests packed into one GPU L1 cache line—a single cache-line load constitutes a complete negative lookup, not merely per-step acceleration within a variable-length probe chain—an alignment infeasible on 64 B CPU cache lines (§3.2). 
+
+• We introduce an in-line score-driven upsert path that resolves every full-bucket insertion inside the table —fusing score compar-ison, admission control, and Compare-And-Swap commit into a single GPU operation—eliminating the separate eviction data structures, multi-kernel pipelines, and CPU involvement required by all prior eviction-aware designs [20, 26, 40, 41] (§3.3). 
+
+• We introduce score-based dynamic dual-bucket selection, which extends the power-of-two-choices paradigm [ 6 , 43 ] from load balancing to eviction-quality optimization in GPU hash tables: at full capacity, load-based P2C degenerates to a random coin flip because both buckets are equally full; HKV restores a mean-ingful selection criterion by comparing minimum scores across candidate buckets—a decision dimension meaningful only under cache semantics—recovering the ∼34% HBM wasted by birthday-paradox collisions and achieving 99.4% top-𝑁 score retention at 
+
+𝜆 =1.0 (§3.4). 
+
+• We design triple-group concurrency with reader/updater/inserter role separation that distinguishes structural from non-structural GPU writes—a split plane absent from all prior role-based de-signs [ 21 , 55 ]—coordinated by a CPU–GPU dual-layer lock—to our knowledge the first hash table concurrency protocol span-ning CPU and GPU execution domains—yielding up to 4.80 ×
+
+throughput over R/W locking (§3.5). 
+
+• We implement tiered KV separation as a scaling enabler for hy-brid HBM+HMEM deployment (§3.6), evaluate on H100 NVL against four baselines (§5), and report open-source integrations in HugeCTR [ 58 ], TFRA [ 54 ], and NVIDIA RecSys Examples [ 46 ]since October 2022. HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage SIGMOD ’27, June 22–27, 2027, Berlin, Germany 
+
+Figure 1: Embedding lookup pipeline in a recommendation model. Sparse categorical features are mapped to dense vec-tors via embedding tables, which constitute the dominant memory consumer of the model. Online training continu-ously ingests new keys under a hard memory budget. 
+
+## 2 Background and Motivation 
+
+We survey embedding storage demands (§2.1), the GPU hash table design space (§2.2), dictionary-semantic performance pathology at high load factors (§2.3), and four challenges motivating HKV’s cache-semantic architecture (§2.4). 
+
+## 2.1 Embedding Storage in Recommendation Systems 
+
+Feature IDs occupy a sparse uint64 key space with power-law access [ 44 ], making embedding storage a natural fit for cache semantics (Figure 1). 
+
+## 2.2 GPU Hash Table Design Space 
+
+GPU hash tables serve as the indexing substrate for embedding storage. Their design involves three interrelated decisions: collision resolution strategy, probe distance bound, and semantic commit-ment (dictionary vs. cache). 
+
+Open addressing vs. bucketed designs. Open-addressing schemes (WarpCore [ 28 ], WarpSpeed [ 39 ], cuCollections [ 45 ]) probe consecutive slots on collision with unbounded probe dis-tances. Bucketed designs (Hive [ 50 ], BP2HT [ 5]) group slots into fixed-size buckets, bounding probe distance. All adopt dictionary semantics : every key must be preserved, and a full table triggers rehashing or insertion failure—unacceptable for an embedding cache under continuous ingestion. Table 1 summarizes the design space; no existing GPU hash table provides built-in eviction or a policy interface. 
+
+## 2.3 Workload Analysis: Continuous Online Ingestion 
+
+Figure 2 summarizes three key workload characteristics of continu-ous online ingestion. 
+
+Throughput degradation in dictionary-semantic hash tables. Under sustained insertion, probe distances lengthen as 
+
+𝜆 increases, and once full the system must rehash or fail. As 𝜆 
+
+rises from 0.25 to 1.00, WarpCore find drops 90%, BGHT 31%, and cuCollections 100% (Figure 6); HKV remains within <1% .
+
+Table 1: GPU hash table design space. All prior GPU hash tables adopt dictionary semantics with no built-in eviction. HKV instead adopts a cache-semantic full-capacity contract, integrating score-driven admission and eviction directly into the insert path.                                                     
+
+> System Collision Probe Sem. Evict. LF WarpCore [28] Open addr. Unbounded Dict. No <1.0
+> WarpSpeed [39] Open addr. Unbounded Dict. No <1.0
+> cuColl. [45] Open addr. Unbounded Dict. No <1.0
+> BGHT [5] Bucketed 𝑘 ×𝑏 Dict. No ∼.85
+> BP2HT ‡[5] Bkt. P2C 2×16 Dict. No ∼.90
+> Hive †[50] Bkt. cuckoo 2×32 Dict. No ∗∼.95
+> HKV Bucketed 128 Cache Yes 1.0
+> †Hive: arXiv 2025-10-16 (concurrent/subsequent work; HKV has been open-source since October 2022).
+> ∗Hive uses bounded cuckoo relocation + overflow stash (dictionary semantics); no score-driven eviction.
+> ‡The original BP2HT paper [ 5] reports 𝜆 ≤0.82 with 16-slot buckets; our benchmark confirms stable throughput through 𝜆 =0.90 (Figure 6).
+
+Figure 2: Workload characteristics of continuous online em-bedding ingestion. (a) Load factor increases monotonically as new features arrive; without eviction, it reaches the capacity ceiling. (b) Miss ratio remains high because new (unseen) feature IDs dominate during exploration phases. (c) In open-addressing schemes, probe distance grows super-linearly be-yond load factor 0.8, causing warp divergence on GPUs. 
+
+## 2.4 Challenges 
+
+The analysis above motivates four design challenges: 
+
+C1: Fixed-work lookup (§3.2). Dictionary-semantic hash tables suffer 31–100% throughput degradation as 𝜆 →1.0 (Figure 6), yet em-bedding caches must operate continuously at high 𝜆 . Each operation must therefore complete in a fixed number of memory transactions independent of 𝜆 .
+
+C2: In-place full-capacity upsert (§3.3). Continuously arriving new embeddings require full-bucket inserts to be resolved in place. Dictionary-semantic designs either fail the insertion or rehash— blocking the GPU and temporarily doubling memory—neither is acceptable under a hard HBM budget. Cache-semantic insertion must instead resolve each full bucket by in-line eviction or admis-sion rejection. 
+
+C3: Retention under bounded associativity (§3.4). Evictions are not equal: evicting a popular embedding forces costly recom-putation or a remote fetch. Under single-bucket confinement, the birthday paradox wastes ∼34% of capacity; a dual-bucket scheme SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al. 
+
+with score-aware bucket selection is needed to maximize retention of high-value entries. 
+
+C4: Mixed-workload concurrency (§3.5). Production systems issue reads and writes simultaneously from overlapping inference and training kernels [ 58 ]. With up to 270 K resident GPU threads, coarse-grained R/W locks that serialize non-structural value updates against structural inserts become a first-order bottleneck. Practical embedding tables still often exceed single-GPU HBM capacity. We therefore treat tiered key-value separation (§3.6) as a scaling enabler layered on top of the core cache-semantic contract, rather than as one of the four core challenges above. 
+
+Cache-Semantic Hash Tables. Definition 2.1 (Cache-Semantic Hash Table). A hash table 𝐻 is 
+
+cache-semantic if it satisfies: (CS1) every full-bucket insert attempt is resolved in place by policy-driven eviction or admission rejec-tion; (CS2) no operation triggers rehashing or external capacity management; (CS3) lookup cost is bounded independent of the cumulative number of insertions. No dictionary-semantic hash table satisfies all three properties: CS1 requires in-table full-capacity resolution, which dictionary se-mantics forbids. The remainder of this paper designs and evaluates a GPU hash table library whose normal full-capacity operating contract satisfies CS1–CS3. 
+
+## 3 System Design 
+
+HKV departs from dictionary semantics —where every inserted key must be preserved and a full table triggers rehashing or insertion failure—and embraces cache semantics , where eviction is a first-class, policy-driven operation. Under continuous online ingestion at load factor 𝜆 =1.0, each full-bucket upsert is resolved in place by score-driven eviction or admission rejection; there is no capacity-induced insertion failure, no rehashing on the critical path, and no external maintenance workflow. MemcachedGPU [ 26 ]provides cache semantics at the network-service level with a single fixed Least Recently Used (LRU) policy and CPU on the eviction path; HKV instead operates as a library-level GPU hash table primitive with single-CAS eviction, five pluggable scoring policies, and zero-cost admission control—all resolved entirely on the GPU. 
+
+## 3.1 Architecture Overview 
+
+HKV is a GPU hash table library exposing 17 Standard Template Library (STL)-compatible APIs ( find , insert_or_assign , find_-or_insert , insert_and_evict , assign , contains , etc.) through batched kernel invocations processing millions of key–value pairs per launch. As shown in Figure 3, each request computes Murmur3 hashes, locates target buckets in HBM, and performs digest-accelerated lookups; for insert_or_assign , the kernel additionally scans scores when the bucket is full and resolves the upsert in place by admission control plus CAS commit—completing lookup, victim selection, and insertion in a single kernel launch. 
+
+Co-design philosophy. The four core mechanisms—single-bucket-confined bucket (§3.2), in-line score-driven upsert (§3.3), dynamic dual-bucket selection (§3.4), and triple-group concurrency (§3.5)—form a dependency chain whose interactions produce three 
+
+Figure 3: HKV architecture. Keys, digests, and scores reside in HBM; overflow values are placed in pinned host memory (HMEM) via zero-copy mapped pointers. The SSD/GDS tier (dashed) is an architectural extension point. Table 2: Core properties of the four co-designed mechanisms in §3.2–§3.5. Tiered KV separation (§3.6) is a scaling enabler on top of this core.                           
+
+> System 1-txn per-bucket miss In-place full-capacity resolution Concurrent R/U/I SwissTable/F14/BBC ×𝑎 ×n/a MemC3 [20] ×𝑏 ✓𝑐 n/a MemcachedGPU [26] ×✓𝑐 ×𝑑
+> FBGEMM TBE [40] ×✓𝑐 ×
+> WarpCore/BGHT/BP2HT ×××
+> HKV ✓✓✓
+> 𝑎 Variable-length probes. 𝑏 Two-bucket cuckoo miss path. 𝑐 Fixed-policy in-place resolution, not HKV’s GPU upsert contract. 𝑑 CPU on the critical path.
+
+system-level properties (Table 2) unattainable by any single compo-nent: confinement creates fixed miss work; in-line upsert enables full-capacity resolution; dual-bucket recovers birthday-paradox retention loss; and confining structural modifications to the upsert path enables triple-group concurrency. Tiered KV separation (§3.6) extends the design beyond HBM as a scaling enabler. 
+
+## 3.2 Single-Bucket-Confined Cache-Line-Aligned Design 
+
+Prior GPU hash tables use variable-length probe chains [5, 28, 50] or multi-bucket designs [ 20 , 24 , 25 ]; HKV covers all 128 candidates in a single cache-line load (Table 3). The key design principle of HKV’s bucket structure is to collapse the entire candidate space of every key into a single, GPU L1 cache-line-aligned unit , so that a miss within a bucket can be determined defini-tively in one fixed memory transaction. (Under dual-bucket mode (§3.4), two fixed-length transactions cover both candidate buckets.) 
+
+Single-bucket confinement. HKV maps each key by a GPU-optimized hash derived from Murmur3 to exactly one bucket of 128 slots—no secondary hash, no overflow chain, no cuckoo reloca-tion. The bucket is the key’s entire candidate space. Unlike bounded-probe designs that still require secondary probes [ 5, 11 , 25 , 49 , 50 ], single-bucket confinement guarantees a definitive miss after HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage SIGMOD ’27, June 22–27, 2027, Berlin, Germany 
+
+scanning one bucket. Cache semantics as structural enabler. 
+
+Single-bucket confinement is unachievable under dictionary seman-tics at high load factors: a full bucket with no overflow chain causes insertion failure. Cache semantics addresses this—score-driven eviction deterministically replaces the minimum-score entry, elim-inating overflow chains, rehashing, and capacity-induced failures. This semantic shift is what makes confinement viable at 𝜆 =1.0 and, in turn, enables the definitive miss property described below. Adas et al. [ 22 ] show that bounded associativity with eviction maintains 
+
+𝑂 (1) worst-case lookup. On GPUs, single-hash lookup eliminates three architecture-specific costs: (1) warp divergence from branch-ing on “which bucket holds the key?”; (2) the computation cost of a second independent hash function across millions of keys per kernel launch; and (3) non-coalesced memory access from probing two non-adjacent buckets, which doubles L1/L2 cache pressure per lookup. 
+
+Cache-line-aligned digest array. HKV couples single-bucket confinement with inline fingerprinting for the GPU memory hierarchy: each slot stores an 8-bit digest (bits 32–39 of the GPU-optimized Murmur3 variant). HKV separates digests into a contiguous array purpose-built for the GPU’s 128 B L1 cache line: 128 one-byte digests = one cache-line load, enabling 128 candidates in a single memory transaction. CPU hash tables—SwissTable [ 8 ](7-bit H2 per group, SSE scan) and F14 [ 12 ] (7-bit tag, SIMD chunk filtering)—embed tags within fixed-size groups of at most 16 entries per 64 B CPU cache line; BBC [ 10 ] places a contiguous 16-fingerprint sub-array at each bucket head for SIMD scanning, but its buckets span multiple cache lines and still require overflow probing at high load factors. In contrast, MemcachedGPU [ 26 ]embeds 8-bit hashes in ≥20 B per-entry headers, requiring up to 16 candidate slots across multiple cache-line loads per miss. HKV achieves 8× the candidate coverage per transaction versus both CPU and prior GPU designs. A lookup performs 32 __vcmpeq4 com-parisons; only digest-matching slots trigger full key comparison (false-positive rate 1/256 , ∼0.5 unnecessary key reads per miss). 
+
+Definitive per-bucket miss in one memory transaction. 
+
+Three co-designed decisions collapse the miss-path cost to one cache-line load per bucket (Figure 4): (1) contiguous digest sep-aration packs 128 digests into one 128-byte GPU L1 cache line; (2) single-bucket confinement makes these 128 slots the key’s entire candidate space; (3) one load therefore covers all candidates. In single-bucket mode this yields a table-level definitive miss because the bucket is the entire candidate space; dual-bucket mode (§3.4) extends to two buckets (two fixed-length transactions) while improving retention quality. Algorithm 1 summarizes the digest-accelerated find path for a single bucket. 
+
+Proposition 3.1 (Definitive Per-Bucket Miss). In single-bucket mode with 𝑆 =128 slots per bucket, for any key 𝑘 not present in 𝑇 , Find (𝑘 ) (Algorithm 1) returns NotFound after examining exactly one bucket, performing 𝑆 digest comparisons and at most 
+
+𝑆 · 2−8 = 0.5 expected full-key comparisons, using a single 128-byte memory transaction. 
+
+Algorithm 1 Digest-Accelerated Find                                                                               
+
+> Require: Key 𝑘 , hash table 𝑇 with 𝐵 buckets of 𝑆 =128 slots each
+> Ensure: Found (𝑣 )or NotFound
+> 1: 𝑏 ←Hash (𝑘 )mod 𝐵 ⊲Map to bucket
+> 2: 𝑑 ←Hash (𝑘 ) [ 31:24 ]⊲8-bit digest
+> 3: 𝐷 [0..𝑆 −1] ← 𝑇 .𝑑𝑖𝑔𝑒𝑠𝑡𝑠 [𝑏 ]⊲One 128 B cache-line load
+> 4: for 𝑖 ←0to 𝑆 /4−1do ⊲SIMD 4-way compare
+> 5: 𝑚 ←__vcmpeq4 (𝐷 [4𝑖 :4 𝑖 +3], 𝑑 ×0x01010101 )
+> 6: for each set byte 𝑗 in 𝑚 do
+> 7: if 𝑇 .𝑘𝑒𝑦𝑠 [𝑏 ] [ 4𝑖 +𝑗 ]=𝑘 then
+> 8: return Found (𝑇 .𝑣𝑎𝑙𝑢𝑒𝑠 [𝑏 ] [ 4𝑖 +𝑗 ] )
+> 9: end if
+> 10: end for
+> 11: end for
+> 12: return NotFound ⊲Definitive miss—all 𝑆 slots checked
+
+Table 3: Miss-path I/O cost (memory loads per negative lookup) at representative load factors. “—” indicates the load factor is unreachable (rehash required). Prior-system rows are schematic structural counts derived from published probe organizations rather than same-platform benchmark measurements. HKV is the only design with load-factor-independent miss cost.                                    
+
+> Design 𝜆 =0.50 𝜆 =0.875 𝜆 =1.0
+> CPU (SwissTable, F14, BBC) [8, 10, 12] ∼2 loads ∼8 loads —MemC3 [20] 2 bkt loads 2 bkt loads —
+> GPU hash tables
+> WarpCore [28] ∼2probes ∼8probes —BGHT [5] 2×16 slots 2×16 slots —BP2HT [5] 2×16 slots 2×16 slots —Hive [50] 2×32 slots 2×32 slots —
+> HKV (single) 1 CL load 1 CL load 1 CL load HKV (dual) 2 CL loads 2 CL loads 2 CL loads
+
+Figure 4: Memory layout of a single HKV bucket (128 slots). The digest array occupies exactly one GPU L1 cache line (128 B), enabling a complete per-bucket negative lookup in a single cache-line load. Values are addressed by bucket and slot index (position-based addressing, §3.6); no per-entry pointer is stored. 
+
+Table 3 quantifies this distinction. All prior designs incur miss costs that grow with load factor or require rehashing at full ca-pacity; HKV delivers constant-cost misses at every load factor including 𝜆 =1.0.SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al. 
+
+Single-bucket confinement guarantees constant-cost misses; the next subsection addresses what happens when a confined bucket fills. 
+
+## 3.3 Score-Driven Built-in Eviction 
+
+Under cache semantics, a full bucket is not an error—it is the steady state . To our knowledge, HKV is the first GPU hash table to fuse eviction directly into the insert path so that no external eviction workflow (export, sort, compact) is ever needed. 
+
+Architectural distinction from prior eviction-aware de-signs. In all prior hash tables with built-in eviction—CPHash [ 41 ](LRU list, 16 B/entry pointer overhead), MemC3’s CLOCK [ 20 ] (per-entry reference bits with external clock-hand sweep), CacheLib [ 9](intrusive hook lists, ∼24 B/entry), and FBGEMM TBE [ 40 ] (multi-kernel eviction pipeline)—eviction metadata forms a second data structure with its own memory layout, traversal logic, and synchro-nization domain. HKV eliminates this second structure entirely: the score array is the eviction metadata, the bucket is the eviction scope, and the CAS is the eviction lock—a unification absent from all prior GPU hash tables. HashPipe [ 52 ] embeds count-based eviction into a pipeline of single-entry hash stages on a switch ASIC; HKV shares the principle of in-path eviction but operates on 128-slot GPU buck-ets with pluggable scoring and general key–value semantics. The contrast with FBGEMM TBE—the closest industrial system— is illustrative: (i) FBGEMM requires a multi-kernel pipeline (separate kernels for cache-miss resolution, per-set victim selection, and replacement) vs. HKV’s single in-line upsert path with CAS com-mit; (ii) FBGEMM supports 2 fixed eviction policies (LRU, Least Frequently Used (LFU)) vs. HKV’s built-in score variants plus a caller-supplied custom-score path; (iii) FBGEMM’s associativity is 8–32 ways (version-dependent) vs. HKV’s 128-slot GPU L1-aligned bucket with digest-accelerated victim search. A further departure is admission control : when the incoming key’s score is lower than the bucket minimum, the insertion is refused—the table retains the higher-value entry, preserving cache quality under adversarial patterns. Unlike TinyLFU’s [ 19 ] frequency-sketch-based admission gate, HKV’s admission check is embedded in the bucket-local upsert path with zero additional data structures. 
+
+Scoring policies. A compile-time ScoreFunctor abstraction realizes LRU, LFU, epoch-aware, and custom scoring through the same in-line upsert mechanism—without a second eviction data structure (§5). 
+
+In-line bucket-local admission and commit. When a bucket is full, the kernel scans all 128 scores, identifies the minimum-score slot, and atomically replaces it via CAS on the key field. The scan uses asynchronous prefetch with double-buffered shared memory to hide HBM latency (§4.3). Algorithm 2 formalizes the complete upsert path. 
+
+Proposition 3.2 (Liveness). If bucket 𝑏 is full and the inserting thread holds the exclusive lock, then Algorithm 2 terminates in 𝑂 (𝐵 )
+
+time, where 𝐵 =128 is the bucket capacity. If additionally 𝑠 ≥ 𝑠 min (𝑏 ),the new entry replaces the minimum-score entry via a single CAS. Under the triple-group protocol (§3.5), at most one inserter kernel executes concurrently per table. Because each warp cooperatively pro-cesses exactly one key and its corresponding bucket, no two warps 
+
+Algorithm 2 Upsert with Bucket-Local Admission and Eviction. Free slots trigger direct insertion (line 8); full buckets undergo eviction with admission control (lines 10–13); CAS serves as lock and commit (line 14).                                                                                              
+
+> Require: Key 𝑘 , value 𝑣 , score 𝑠 , hash table 𝑇
+> Ensure: Inserted ,Updated ,Rejected , or Evicted (𝑘 old )
+> 1: Run Algorithm 1 for 𝑘 in bucket 𝑏
+> 2: if found at slot 𝑗 then
+> 3: 𝑇 .𝑣𝑎𝑙𝑢𝑒𝑠 [𝑏 ] [ 𝑗 ] ← 𝑣 ;𝑇 .𝑠𝑐𝑜𝑟𝑒𝑠 [𝑏 ] [ 𝑗 ] ← 𝑠
+> 4: return Updated
+> 5: end if
+> 6: 𝑒 ←first empty slot in bucket 𝑏
+> 7: if 𝑒 ≠Nil then
+> 8: Write (𝑘, 𝑣, 𝑠, 𝑑 )to slot 𝑒
+> 9: return Inserted
+> 10: end if ⊲Bucket full—eviction path
+> 11: 𝑚 ←arg min 𝑖 𝑇 .𝑠𝑐𝑜𝑟𝑒𝑠 [𝑏 ] [ 𝑖 ]
+> 12: if 𝑠 <𝑇 .𝑠𝑐𝑜𝑟𝑒𝑠 [𝑏 ] [ 𝑚 ]then
+> 13: return Rejected ⊲Admission control
+> 14: end if
+> 15: if CAS (𝑇 .𝑘𝑒𝑦𝑠 [𝑏 ] [ 𝑚 ], 𝑘 old ,Locked )=𝑘 old then
+> 16: Write (𝑘, 𝑣, 𝑠, 𝑑 )to slot 𝑚
+> 17: return Evicted (𝑘 old )
+> 18: else
+> 19: goto line 11 ⊲Retry on CAS failure
+> 20: end if
+
+operate on the same bucket simultaneously; CAS contention is there-fore confined to threads within a single warp, bounding retries to at most 𝑊 −1=31 per thread (warp width 𝑊 =32 ). 
+
+## 3.4 Score-Based Dynamic Dual-Bucket Selection 
+
+Single-bucket confinement (§3.2) introduces a fundamental memory-utilization problem: with 128-slot buckets, the birth-day paradox triggers the first eviction at 𝜆 ≈0.66 [56 ], leaving ∼34% 
+
+of allocated HBM unused before the eviction path even activates. On GPUs where HBM capacity directly constrains model size, this waste is unacceptable. HKV addresses this with a dynamic dual-bucket mode that extends the power-of-two-choices paradigm [ 6 ,43 , 51 ] from load-based to score-based selection. Each key maps to two candidate buckets via independent hashes. Unlike BP2HT [ 5]and other load-based two-choice designs, HKV introduces a two-phase adaptive policy that shifts the selection criterion from load balancing to eviction quality —selecting the bucket whose minimum score yields the best eviction decision. The two phases are: 
+
+Phase D1 (warm-up): memory utilization. While at least one candidate bucket has a free slot, the key is inserted into the less-loaded bucket—classic load-balanced two-choice placement that delays the first eviction from 𝜆 ≈0.66 to 𝜆 >0.97 (§5.5), recovering nearly all wasted HBM. 
+
+Phase D2 (steady state): score-based selection. At 𝜆 ≈1.0
+
+both buckets are full, so load-based P2C degenerates to a coin flip. HKV restores the two-choice benefit by shifting the decision dimension from load to score : the kernel evicts in the bucket with the lower minimum score (Algorithm 3). Under sustained Zipfian ingestion, dual-bucket mode yields 99.4% top-𝑁 score retention versus 95.4% for single-bucket—a 4.05 pp improvement (§5.5). HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage SIGMOD ’27, June 22–27, 2027, Berlin, Germany 
+
+Figure 5: Two-phase dual-bucket selection. Phase D1 (left) inserts into the less-loaded bucket for memory utilization; Phase D2 (right, 𝜆 ≈1.0) evicts in the bucket with the lower minimum score, improving eviction correctness. Algorithm 3 Score-Based Dual-Bucket Upsert                                                                               
+
+> Require: key 𝑘 , value 𝑣 , score 𝑠
+> 1: 𝑏 1←ℎ1(𝑘 )mod 𝐵 ;𝑏 2←ℎ2(𝑘 )mod 𝐵 ⊲two candidate buckets
+> 2: if occupancy (𝑏 1)<128 or occupancy (𝑏 2)<128 then ⊲Phase D1
+> 3: insert (𝑘, 𝑣, 𝑠 )into less-occupied bucket
+> 4: else ⊲Phase D2: score-based ( 𝜆 =1.0)
+> 5: 𝑚 1←min -score (𝑏 1);𝑚 2←min -score (𝑏 2)
+> 6: 𝑏 ∗←arg min (𝑚 1, 𝑚 2)⊲bucket with lower min-score
+> 7: if 𝑠 >min (𝑚 1, 𝑚 2)then ⊲admission control
+> 8: call Upsert-With-Eviction (𝑏 ∗,𝑘 ,𝑣 ,𝑠 )⊲Alg. 2
+> 9: else
+> 10: reject insertion ⊲incoming score too low
+> 11: end if
+> 12: end if
+
+Lookup cost analysis. Dual-bucket mode issues two cache-line transactions instead of one on the miss path—still 𝑂 (1) and load-factor-independent. Despite the extra transaction, dual-bucket achieves comparable or higher throughput (§5.5) by avoiding premature eviction overhead starting at 𝜆 ≈0.66 . Figure 5 illustrates the two-phase policy. 
+
+Proposition 3.3 (Score-Based Selection Advantage). Under i.i.d. scores drawn from CDF 𝐹 , selecting the bucket with the lower minimum score reduces the expected evicted score from E[𝑋 (1: 𝑛 ) ] to 
+
+E[min (𝑋 (1: 𝑛 ) , 𝑌 (1: 𝑛 ) )] . For uniform 𝐹 on [0, 1] with bucket size 𝑛 =128 ,this halves the expected evicted score: E[min ] = 1/( 2𝑛 +1) ≈ 0.0039 
+
+vs. 1/( 𝑛 +1) ≈ 0.0078 ; see standard order-statistics references such as David and Nagaraja [17]. 
+
+Under production Zipfian workloads, scores are not i.i.d. uniform; the empirical improvement (Table 11) exceeds the i.i.d. bound be-cause high-value entries cluster in the hot bucket. With bucket design, eviction, and load balancing in place, the remaining challenge is safe concurrent access from both GPU and CPU. 
+
+## 3.5 Triple-Group Concurrency Control 
+
+HKV introduces a three-group concurrency protocol that sep-arates operations by whether they modify bucket structure —a split plane absent from all prior role-based hash table designs. 
+
+Table 4: Triple-group concurrency compatibility. ✓= concur-rent execution permitted; ×= mutually exclusive. 
+
+Reader Updater Inserter Reader ✓ × ×
+
+Updater × ✓ ×
+
+Inserter × × ×
+
+No prior role-based design—whether “read vs. write” (Read-Copy-Update (RCU) [ 55 ]) or “mutation vs. resize” (Fatourou et al. [ 21 ])—distinguishes structural from non-structural writes, and none spans CPU–GPU execution domains (§6). HKV’s triple-group scheme isolates readers , updaters , and inserters into distinct GPU kernels, adding a CPU–GPU dual-layer lock for host/device coordination. The three groups are: 
+
+• Readers (find , contains , size ): multiple readers execute in parallel; each reader kernel assumes stable bucket structure and requires no CAS. 
+
+• Updaters (assign , assign_scores ): multiple updaters execute in parallel; they modify existing entries’ values or scores in place but never alter bucket structure (no slot allocation, no digest update, no eviction). 
+
+• Inserters (insert_or_assign , find_or_insert , erase ): exclu-sive access; inserters allocate slots, update digests, and perform evictions—structural modifications that are incompatible with concurrent reads or updates. The structural/non-structural distinction is enabled by score-driven eviction (§3.3): because eviction, slot allocation, and digest updates are embedded in the insert path, all structural modifications are con-fined to the inserter role. Single-bucket confinement (Section 3.2) ensures that an insert never triggers cascading relocations across multiple buckets; this containment property makes table-level reader/updater/inserter role isolation sufficient for correctness without per-bucket fine-grained locking. Fusing eviction into the insert path is likewise essential: if eviction were a separate background process (as in MemC3’s CLOCK scan or CacheLib’s Ac-cessContainer ), it would create structural modifications outside the inserter role, breaking the three-group invariant that confines all structural changes to a single kernel type. Table 4 summarizes the resulting compatibility matrix. 
+
+Concurrency semantics. The compatibility matrix (Table 4) follows Gray’s intent-lock hierarchy [ 23 ]. The key benefit over a reader/writer lock is that multiple updaters execute concurrently :under R/W locking, all value updates serialize as writes, whereas triple-group allows parallel updater batches, yielding up to 4.80 ×
+
+throughput (§5.4). Readers and updaters are mutually exclusive because GPU value updates span up to 256 bytes and cannot be observed atomically without per-entry locking; table-level serialization avoids this over-head. The acquire/release protocol uses atomic group counters; details appear in §4.4. 
+
+Proposition 3.4 (Reader Safety). Under the triple-group pro-tocol, a reader kernel never observes a bucket in which a key has SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al. 
+
+been evicted but its replacement has not yet been written. This fol-lows directly from the compatibility matrix (Table 4): no reader and inserter kernel execute concurrently, so the reader cannot observe any intermediate eviction state. 
+
+CPU–GPU dual-layer lock. GPU kernels cannot directly observe host-side atomic variables, and host threads cannot con-trol the execution order of warps within a running kernel. This cross-domain gap necessitates an explicit two-layer synchroniza-tion mechanism that bridges the host/device boundary. The host layer announces role-group transitions via std::atomic counters that track active readers, updaters, and inserters; a lightweight synchronization kernel propagates the committed role state to device memory, ensuring all GPU warps observe the new role assignment before the next group launches. This avoids GPU-side global barriers and device-wide atomic contention while guaran-teeing that incompatible role groups never execute concurrently. Implementation details appear in Section 4.4. With the four core mechanisms in place, one capacity constraint remains: embedding tables that exceed single-GPU HBM. The next subsection extends the design beyond HBM while keeping key-side processing on GPU. 
+
+## 3.6 Tiered Key-Value Separation 
+
+Embedding tables often exceed single-GPU HBM capacity. As a scaling enabler, HKV implements position-based tiered KV sep-aration: keys, digests, and scores always reside in HBM; values overflow to pinned host memory (HMEM) via zero-copy mapped pointers, keeping the CPU off the critical path. Because each key maps to exactly one bucket, a value’s address is computed arithmetically from bucket and slot indices—no per-entry pointer is stored, eliminating 8 B/entry overhead (1 GB at 128 M capacity). The architectural consequence is that key-side throughput ( find* ,
+
+contains ) is largely independent of value placement: on H100 NVL, 
+
+find* retains 96.0% of pure-HBM throughput in hybrid mode. The architecture accommodates additional storage tiers (e.g., SSD via GPUDirect Storage) below HMEM; the present work focuses on the HBM+HMEM path that covers the dominant deployment scenario. Implementation details appear in §4.2. Section 5 validates these claims experimentally. 
+
+## 4 Implementation 
+
+This section describes the engineering choices that map HKV’s design (§3) onto GPU hardware. We cover the public API surface (§4.1), the tiered storage engine that realizes key-value sepa-ration (§4.2), GPU kernel engineering (§4.3), and the physical implementation of the triple-group lock (§4.4). 
+
+## 4.1 API Design and Usability 
+
+HKV exposes an STL-style interface centered on a templated 
+
+HashTable<K,V,S> class, where K is the key type (typically 
+
+uint64_t ), V the value element type (e.g., float ), and S the score type ( uint64_t ). HKV retains familiar map operations ( find , erase , insert_or_ assign ) and adds cache-specific primitives: insert_and_evict 
+
+returns evicted entries in a single kernel launch; find_or_insert 
+
+combines lookup with insertion for cold-start; and export_batch_ if streams entries matching a predicate to the host for checkpoint-ing. Each call acquires the corresponding triple-group lock (§3.5), launches CUDA kernels, and releases the lock upon completion. 
+
+## 4.2 Tiered Storage Engine 
+
+The key-value separation described in §3.6 is realized through a slice-based memory allocator. At initialization, HKV computes a user-configurable HBM watermark that determines the maximum HBM budget for value storage. Keys, digests, and scores are always placed in HBM; value slices spill to pinned host memory (HMEM) via CUDA mapped allocation when the watermark is exhausted. Pinned pages are mapped into the GPU address space, so kernels access host-resident values through the same pointer interface— no CPU thread is on the data path .Value storage is organized into coarse-grained slices (256 KB– 16 GB depending on table capacity) to amortize pinned-memory allocation overhead. Within each slice, values are laid out contigu-ously by bucket; a value’s address is derived from its bucket and slot index—no per-entry pointer is stored. 
+
+## 4.3 Adaptive Kernel Selection 
+
+Maximizing key-level parallelism (one thread per key) yields the highest probe throughput, but large-value copies and high-𝜆 
+
+eviction scans each demand different thread cooperation. HKV provides three upsert kernel variants and a runtime selector based on load factor and value size. 
+
+TLPv1: SIMD digest probing. Each thread handles one key independently. The 128-slot digest array is loaded as 32 vector-ized 4-byte words, each compared via __vcmpeq4 (byte-parallel SIMD)—covering all 128 slots in 32 instructions with expected ∼0.5
+
+false-positive key comparisons per miss ( 1/256 per slot). Value writes use streaming stores ( __stcs ) to bypass L1. Selected for small values ( ≤32 B) at 𝜆 ≤ 0.98 .
+
+TLPv2: two-phase parallelism switching. Probing is identical to TLPv1, but after the probe phase threads regroup into cooper-ative groups of 8–16 that collectively copy each member’s value through double-buffered shared memory—switching from key-level to bandwidth-level parallelism mid-kernel. The shared-memory buffers are reused between eviction-scan and value-copy phases. Selected for medium values ( 32 –512 B) at 𝜆 ≤ 0.95 .
+
+Pipeline: warp-cooperative 4-stage overlap. A full 32-thread warp processes keys sequentially, overlapping four stages across consecutive keys: (1) async prefetch of 128 digests via __-pipeline_memcpy_async ; (2) warp-wide SIMD digest comparison; (3) cooperative score reduction ( cg::reduce ) with CAS commit; (4) warp-cooperative value writeback. Three-deep pipeline commits hide HBM latency. Selected at 𝜆 > 0.95 , where frequent eviction scans make latency hiding critical. 
+
+Runtime selection. Value size determines the cooperation strat-egy (TLPv1 vs. TLPv2); load factor triggers transition to Pipeline at 
+
+𝜆 ≈0.95 , where latency hiding outweighs per-key serialization cost. Lookup kernels follow an analogous structure but omit locking via the triple-group guarantee (§3.5). HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage SIGMOD ’27, June 22–27, 2027, Berlin, Germany 
+
+Table 5: Benchmark configurations. All configurations use a single NVIDIA H100 NVL GPU. Capacity is in millions of key–value pairs (M-KV).                          
+
+> Config dim Capacity HBM HMEM Mode A8128 M 4 GB —Pure HBM B32 128 M 16 GB —Pure HBM C64 64 M 16 GB —Pure HBM D64 128 M 16 GB 16 GB HBM+HMEM
+
+## 4.4 Triple-Group Lock and Key-Level CAS 
+
+The triple-group lock is implemented via three atomic counters on the host and mirrored device-side atomic variables; a light-weight single-thread propagation kernel synchronizes the two layers, reusing a thread-local cached CUDA stream. The two layers synchronize via a store–launch–fence handshake: the host writes its atomic counter, launches the synchronization kernel, and the kernel’s completion constitutes the cross-domain fence. Fine-grained slot-level mutual exclusion is achieved by atomically replacing a key with a sentinel lock value via CAS with acquire semantics, restoring the actual key after the value write completes. 
+
+## 5 Evaluation 
+
+We evaluate HKV through four experiments: load-factor sensitivity against four baselines (§5.2), end-to-end throughput including hybrid HBM+HMEM mode (§5.3), component ablation covering digest filtering, eviction overhead, cache quality, admission control, and concurrency (§5.4), and single- vs. dual-bucket analysis (§5.5). 
+
+## 5.1 Experimental Setup 
+
+Hardware. All experiments run on a single NVIDIA H100 NVL GPU (94 GB HBM3, Hopper, Compute Capability 9.0) connected via Peripheral Component Interconnect Express (PCIe) Gen5 ×16, installed in a server with an AMD EPYC 7313P (16 cores, 32 threads, 3.0 GHz) and 125 GB DDR4 host DRAM. 
+
+Software. Ubuntu 24.04, CUDA 12.9 (Driver 580.105.08), GCC 13.3, compiled with nvcc -O3 -arch=sm_90 . The HKV version under test is main@2026-02; baseline versions are Warp-Core v1.3.1, BGHT v0.1, cuCollections v0.1.0-ea, and BP2HT (BGHT main@2026-02). 
+
+Workload parameters. Unless stated otherwise, keys are 
+
+uint64_t , values are float32 ×dim , batch size is 1 M key– value pairs per operation, and the eviction strategy is LRU. We vary embedding dimension ( dim ∈ { 8, 32, 64 }) and load factor (𝜆 ∈ { 0.50, 0.75, 1.00 }). 
+
+Configurations. Table 5 summarizes configurations A–C (pure HBM) and D (HBM+HMEM via cudaHostAllocMapped ). 
+
+Memory overhead. Per-entry metadata (key 8 B, digest 1 B, score 8 B) totals 17 B; values contribute 32–256 B depending on dimension (6–35% overhead). 
+
+Statistical methodology. Each value is the median of 5 cold-start runs (coefficient of variation CV <3% for reads, <5% for writes); error bars are smaller than plot markers and omitted. 
+
+Baselines. We compare against four dictionary-semantic GPU hash tables compiled with identical CUDA/driver on the same H100 NVL: WarpCore [ 28 ], BGHT [ 5], cuCollections [ 45 ], and BP2HT [ 5]. 0.25 0.50 0.75 0.80 0.85 0.90 0.95 1.00       
+
+> Load Factor ( λ)
+> 0
+> 1
+> 2
+> 3
+> Throughput (B-KV/s)
+> collapse
+> zone
+> (a) Insert
+> 0.25 0.50 0.75 0.80 0.85 0.90 0.95 1.00
+> Load Factor ( λ)
+> 0
+> 1
+> 2
+> 3
+> Throughput (B-KV/s)
+> collapse
+> zone
+> (b) Find
+> cuCollections BGHT BP2HT WarpCore HKV
+
+Figure 6: Insert (a) and find (b) throughput vs. load fac-tor ( 𝜆 =0.25 –1.00 , dim=32, batch=1 M). HKV (LRU eviction, cache semantics) maintains near-constant find through-put ( ∼3.4 B-KV/s) across the entire 𝜆 range, including 𝜆 =1.0,while resolving full-bucket inserts in place with no rehash or capacity-induced failure. Dictionary-semantic baselines degrade monotonically; WarpCore, BGHT, and cuCollec-tions collapse beyond 𝜆 ≈0.95 (shaded region). BP2HT insert throughput is corrected to count only successful insertions— at 𝜆 =1.0, only 48% of inserts succeed. Note: cuCollections, BGHT, and BP2HT use (key, index) indirection as described in §5.1. CV <3% for all data points (5 runs); error bars omitted as they are smaller than markers. (Exp #1) 
+
+cuCollections, BGHT, and BP2HT use (key, index) indirection ; all measurements include end-to-end value gather/scatter. 1
+
+## 5.2 Exp #1: Load Factor Analysis 
+
+Cache semantics deliver stable throughput across the entire load fac-tor range, including 𝜆 =1.0—a regime where all dictionary-semantic baselines degrade or fail. 
+
+Cross-system comparison. Figure 6 plots insert and find throughput as a function of 𝜆 for HKV and four baselines (Warp-Core, BGHT, cuCollections, BP2HT), all on the same H100 NVL with dim = 32, batch = 1 M. HKV’s find throughput varies by less than 1.0% across 𝜆 =0.25 –
+
+1.00 (3.37–3.40 B-KV/s), and every insert is resolved in place with no rehash or failure. All baselines degrade monotonically: find 
+
+drops 90% (WarpCore), 31% (BGHT), and 4% (BP2HT); cuCollec-tions collapses to zero. Beyond 𝜆 ≈0.95 (shaded region), WarpCore, BGHT, and cuCollections collapse—a capability gap , not merely a performance gap. BP2HT silently drops insertions: only 48% succeed at 𝜆 =1.0 (effective 0.38 B-KV/s). Table 6 quantifies the widening gap. The load-factor sweep uses uniform-random keys to isolate structural degradation from access-pattern effects; §5.4 (Exp #3c) evaluates cache quality under production-like Zipfian skew ( 𝛼 =0.50 –1.25 ). At 𝜆 =0.50 , HKV find is 1.38–9.43 × faster than all baselines; the gap widens at higher 𝜆 (Table 6). 
+
+Per-API sensitivity. Figure 7 breaks down HKV’s LF sensitivity by API (Configs A–C).      
+
+> 1WarpSpeed [ 39 ] (scalar-only), FBGEMM TBE [ 40 ] (fused operator), and Mem-cachedGPU [ 26 ] (network service) are excluded due to incompatible API semantics. Hive [ 50 ] (arXiv 2025, dictionary semantics with bounded cuckoo relocation) was not included because its source code was not publicly available at the time of evaluation. SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al.
+
+Table 6: Find throughput (B-KV/s) at representative load fac-tors. H100 NVL, dim=32, batch=1 M. “ ≈0”: near-zero (system stalls). (Exp #1)  
+
+> System
+
+𝜆 =0.50 𝜆 =0.75 𝜆 =1.00 Evict. Conc.                   
+
+> HKV 3.37 3.38 3.40 Yes R/U/I
+> WarpCore 2.45 2.12 0.25 No LF BGHT †1.31 1.30 0.92 No LF cuColl. †0.36 0.36
+
+≈0 No LF BP2HT † 1.09 1.09 1.07 No LF           
+
+> †cuCollections, BGHT, and BP2HT use (key, index) indirection (§5.1). R/U/I = reader/updater/inserter; LF = lock-free CAS. 0.50 0.75 1.00
+> Load Factor ( λ)
+> 0
+> 2
+> 4
+> 6
+> 8
+> Throughput (B-KV/s)  (dim=8)
+> 0.50 0.75 1.00
+> Load Factor ( λ)
+> (dim=32)
+> 0.50 0.75 1.00
+> Load Factor ( λ)
+> (dim=64)
+> find find* insert_or_assign assign contains
+
+Figure 7: Throughput vs. load factor ( 𝜆 ∈ { 0.50 , 0.75 , 1.00 }) in pure HBM mode (Configs A–C). find varies by at most 4.7% across all configurations (1.3% at dim = 8); find* drops ∼38% at 𝜆 =1.00 due to loss of empty-slot early termination; insert_-or_assign shows a bounded 32–41% decrease at 𝜆 =1.00 due to eviction scan overhead. (Exp #1) find   
+
+> find*
+> insert_or_assign
+> assign
+> insert_and_evict
+> contains
+> 0
+> 2
+> 4
+> 6
+> 8
+> Throughput (B-KV/s)
+> 3.926
+> 6.970
+> 2.119
+> 3.264
+> 2.024
+> 5.098
+> 3.638
+> 6.951
+> 1.986
+> 2.826
+> 1.559
+> 5.092
+> 3.554
+> 7.233
+> 1.704
+> 2.585
+> 1.445
+> 5.155
+> Config A (dim=8) Config B (dim=32) Config C (dim=64)
+
+Figure 8: End-to-end throughput of HKV across all core APIs in pure HBM mode (Configurations A–C, 𝜆 =0.50 ,batch=1 M KV/op). find ranges from 3.61 B-KV/s (dim=64) to 3.89 B-KV/s (dim=8); pointer-returning find* is dimension-independent at ∼7.05 B-KV/s; contains maintains ∼5.10 B-KV/s across all configurations. (Exp #2) 
+
+Consistent with the cross-system data, find varies by at most 1.3% across 𝜆 (e.g., 3.889–3.941 B-KV/s at dim=8). find* degrades by ∼38% at 𝜆 =1.0 due to loss of empty-slot early termination; 
+
+insert_or_assign decreases 32–41% from eviction overhead; 
+
+assign varies by at most 6.7%, confirming non-structural updates are unaffected by occupancy (at most 6.7% variation). 
+
+## 5.3 Exp #2: End-to-End Throughput 
+
+Pure HBM throughput. HKV achieves 3.61–3.89 B-KV/s for find 
+
+and ∼7.05 B-KV/s for the pointer-returning find* across all embed-ding dimensions (Figure 8). 
+
+Table 7: Digest ablation: find throughput (B-KV/s) with and without digest pre-filtering. Speedup = with/without. (Exp #3a)  
+
+> Config
+
+𝜆 With digest No digest Speedup A (dim=8) 0.50 3.376 2.052 1.65 ×    
+
+> B (dim=32) 0.50 3.321 1.929 1.72
+
+×    
+
+> C (dim=64) 0.50 3.157 1.685 1.87
+
+×    
+
+> A (dim=8) 1.00 4.768 1.825 2.61
+
+×    
+
+> B (dim=32) 1.00 4.769 1.828 2.61
+
+×    
+
+> C (dim=64) 1.00 4.769 1.836 2.60
+
+×
+
+find delivers 3.61–3.89 B-KV/s (7.2% reduction at dim=64 from value-copy cost); the pointer-returning find* attains ∼7.05 B-KV/s independent of dimension, confirming that value copy—not key-side indexing—is the bottleneck. Write APIs remain in the B-KV/s regime: insert_or_assign 1.72–2.13 B-KV/s, insert_and_evict 
+
+5–21% additional overhead, assign 2.59–3.26 B-KV/s. 
+
+Latency and scaling. Per-batch find latency remains stable across load factors (P50 ≈ 0.30 ms at both 𝜆 =0.50 and 1.00 , Con-fig B, 1,000 batches). Throughput varies <3% across capacities 16 M–512 M. 
+
+Hybrid storage impact. Position-based value addressing (§3.6) keeps key-side throughput within 4% of pure-HBM in hybrid HBM+HMEM mode: the pointer-returning find* retains 96.0% throughput (6.949 vs. 7.242 B-KV/s in pure HBM, Config D, dim=64, 128 M capacity). Value-copying APIs, by contrast, are bounded by PCIe: find drops to 0.172 B-KV/s ( −95%). 
+
+## 5.4 Exp #3: Component Ablation 
+
+We decompose HKV’s throughput to quantify the contribution of individual design components. 
+
+Exp #3a: Digest contribution. We disable digest pre-filtering at compile time and measure find throughput (Table 7). At 𝜆 =0.50 , digest filtering yields 1.65–1.87 × speedup; at 𝜆 =1.00 
+
+the advantage grows to 2.60–2.61 × because without digest every miss compares all 128 keys (throughput converges to ∼1.83 B-KV/s regardless of dimension). 
+
+Exp #3b: Eviction overhead. Comparing insert_or_assign 
+
+at 𝜆 =0.50 (no eviction) vs. 𝜆 =1.00 (every insert evicts), overhead is 32–41% (dim=8: 41%, dim=32: 39%, dim=64: 32%)—bounded because the eviction scan always processes exactly one 128-slot bucket. 
+
+Exp #3c: Cache quality under production-like access patterns. Cache hit rate measures the fraction of lookups that find their target in the table during sustained online ingestion—a runtime metric complementary to top-𝑁 retention (§5.5), which measures the quality of the final table state. Production recommen-dation models exhibit power-law embedding access with Zipfian skew 𝛼 ≈0.99 [ 44 , 58 ]. Table 8 sweeps 𝛼 across all five shipped 
+
+ScoreFunctor specializations (Config B, 𝜆 =1.0). At production-typical 𝛼 =0.99 , LFU achieves 88.3% (+4.4 pp over LRU); at 𝛼 ≥1.25 all converge to ∼99 .4% as the hot-set shrinks below capacity. All poli-cies deliver comparable throughput (2.97–3.04 B-KV/s), confirming that the contribution is the shared in-line upsert mechanism rather than policy-count breadth. 
+
+Exp #3d: Admission control. The score-based admission gate (Algorithm 2, line 10) rejects keys scoring below the bucket HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage SIGMOD ’27, June 22–27, 2027, Berlin, Germany 
+
+Table 8: Cache hit rate (%) by scoring policy and Zipfian 𝛼 
+
+(Config B, 𝜆 =1.0, single-bucket, capacity = 128 M). The 𝛼 sweep is used as a sensitivity study around production-like power-law skew; see text. (Exp #3c)                         
+
+> Policy 𝛼 =0.50 𝛼 =0.75 𝛼 =0.99 𝛼 =1.25
+> kLru 18.6 43.0 83.9 99.4 kLfu 31.4 55.7 88.3 99.7
+> kEpochLru 18.6 43.0 83.9 99.4 kEpochLfu 18.6 43.0 83.9 99.4 kCustomized 18.6 43.0 83.9 99.4
+
+Table 9: Admission control ablation: hit-rate change after a 4 M-key burst injection into a 16 M-slot table at 𝜆 =0.96 .(Exp #3d)        
+
+> Burst score Admitted Δhit rate Low ( 𝑠 =1)0% (fully rejected) +0.00 pp High ( 𝑠 =10 9)100% (displaces originals) −21.48 pp
+
+Table 10: Co-design ablation: removing any component breaks a system-level property. H100 NVL (§5.3–§5.5).                
+
+> Removed Broken Property Measured Impact Eviction Insert fails at 𝜆 >0.66 Cannot sustain 𝜆 =1.0
+> Dual-bucket Early eviction, lower retention 𝜆 1st : .98 →.63; top-𝑁 : 99.4 →95.4% Triple-group Updates serialize 4.80 ×slower Single-bucket Miss needs ≥2 loads 1-txn definitive miss lost
+
+Table 11: Single-bucket vs. dual-bucket mode under sustained Zipfian ingestion ( 𝛼 =0.99 , capacity =128 M, 𝑏 =128 ). Top-𝑁 re-tention measures the fraction of the ideal highest-scored 
+
+𝑁 keys ( 𝑁 = capacity) present in the table after 5× capacity steady-state inserts at 𝜆 =1.0. (Exp #4)               
+
+> Metric Single Dual Δ
+> First-eviction 𝜆 0.633 0.977 +54.3% Top-𝑁 score retention 95.39% 99.44% +4.05 pp Cache hit ratio 83.88% 84.02% +0.14 pp
+
+minimum. A burst experiment (16 M-slot table at 𝜆 =0.96 , 4 M injected keys) isolates the gate’s contribution (Table 9). 
+
+Exp #3e: Concurrency ablation. We replace triple-group (§3.5) with a conventional R/W lock and measure seven workload mixes (𝜆 =0.75 , dim = 16, 64 K keys/batch, 200 batches/thread). As updaters scale from 1 to 10, triple-group reaches 2.569 B-KV/s while R/W lock anti-scales to 0.535 B-KV/s ( 4.80 ×). Under mixed workloads the gap narrows but remains significant: update-heavy (4F/5U/1I) 
+
+3.21 ×, insert-heavy (4F/2U/4I) 1.20 ×; read-heavy (8F/1U/1I) shows near-parity ( 1.03 ×) because a single updater rarely contends. Table 10 summarizes the system-level impact of removing each component, demonstrating that the four innovations form a non-decomposable design: each removal breaks a downstream emergent property. 
+
+## 5.5 Exp #4: Single-Bucket vs. Dual-Bucket 
+
+Dual-bucket selection delays first eviction from 𝜆 =0.633 to 𝜆 =0.977 
+
+(+54.3%) and raises top-𝑁 score retention to 99.44% (Table 11). Results compare the dual-bucket GPU kernel (§3.4) against the default single-bucket mode. 
+
+Throughput. Dual-bucket mode delivers comparable or higher throughput than single-bucket across all load factors. At 𝜆 =0.50 ,dual-bucket find throughput is ∼5% higher than single-bucket— two-choice placement distributes keys more evenly across buckets, reducing per-bucket occupancy and shortening the average digest-scan path—and insert_or_assign throughput is within 1% . At 
+
+𝜆 =1.0, the advantage widens: dual-bucket insert_or_assign 
+
+attains 1.64 × higher throughput than single-bucket because single-bucket suffers from premature eviction overhead starting at 𝜆 ≈0.66 ,while dual-bucket delays eviction onset to 𝜆 ≈0.98 . Combined with the 54 .3% improvement in first-eviction load factor and 4.05 pp gain in top-𝑁 score retention (Table 11), dual-bucket offers strictly superior behavior for memory-constrained deployments with no throughput penalty. 
+
+## 6 Related Work 
+
+GPU Hash Tables under Dictionary Semantics. GPU hash tables have evolved from cuckoo-based designs [ 1] through Stadium Hash-ing [ 29 ], warp-cooperative slabs [ 4], WarpCore [ 28 ], cuCollec-tions [ 45 ], BGHT [ 5], and WarpSpeed [ 39 ]. DyCuckoo [ 33 ] ad-dresses dynamic resizing; DACHash [ 61 ] optimizes GPU hardware cache efficiency; GPHash [ 16 ] targets byte-granularity persistent memory; Hegeman et al. [ 24 ] adapt compact hashing to GPU buck-ets but still require multi-bucket probing. For a comprehensive survey of GPU hashing techniques, see Lessley and Childs [ 30 ]. These systems differ in collision resolution and hardware optimiza-tion, but they retain dictionary semantics: every inserted key must be preserved, so a full table triggers rehashing or insertion failure. 
+
+Bounded-Probe, Two-Choice, and Fingerprinted Miss Filtering. The power-of-two-choices paradigm [ 6 , 43 , 51 ] proves that choosing the less loaded of two bins exponentially reduces maximum load; Pani-grahy [ 49 ], Walzer et al. [ 56 ], and BP2HT [ 5] connect this lineage to bucketized and GPU hash tables (BP2HT uses static load-based selection and fails when both buckets are full), while bounded-probe designs—Hopscotch [ 25 ], bucketized cuckoo [ 18 , 48 ], Horton Tables [ 11 ]—still rely on overflow mechanisms under dictionary semantics. CPU hash tables—SwissTable [ 8], F14 [ 12 ], BBC [ 10 ]— use inline fingerprints but require multi-group traversal for misses. On the miss path specifically, MemC3 [ 20 ] probes two buckets of 4 slots with no GPU support; MemcachedGPU [ 26 ] embeds 8-bit hashes within ≥20 B per-entry headers, requiring up to 16 candi-date slots across multiple cache-line loads per miss; BP2HT [ 5] and Hive [ 50 ] (arXiv, 2025) use multi-bucket designs without digest arrays, incurring ≥2 bucket reads per miss. In contrast, HKV com-bines single-bucket confinement with a contiguous digest array, so each bucket check is definitive and costs one fixed cache-line load. SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al. 
+
+Cache Replacement and Eviction-Aware Data Structures. Belady’s optimal algorithm [ 7 ] provides the offline lower bound; practical on-line policies trade optimality for 𝑂 (1) overhead. RRIP [ 27 ] demon-strates that prediction-based replacement outperforms recency-only policies in hardware caches—a principle HKV applies at the hash-table library level through a shared score-computation inter-face. CPHash [ 41 ] introduces LRU-aware hash tables; Friedman and Mozes [ 22 ] show that limited associativity improves throughput with marginal hit-ratio impact; Cavast [ 57 ] optimizes data lay-out at the OS page level for CPU LLC efficiency; HKV operates at the hash table bucket level for GPU L1 cache-line alignment. MemC3 [ 20 ] co-designs cuckoo hashing with tags and CLOCK evic-tion; CacheLib [ 9] provides production-grade pluggable eviction via linked-list-based MMContainers decoupled from the hash in-dex. TinyLFU [ 19 ] proposes a lightweight admission gate that HKV adapts to per-bucket score-based admission (§3.3). HashPipe [ 52 ]embeds count-based eviction into a data-plane pipeline of single-entry hash stages; HKV shares the in-path eviction principle but operates on 128-slot GPU buckets with pluggable scoring and gen-eral key–value semantics. Unlike all of these, HKV fuses eviction scoring into the insert CAS path with no separate eviction queue, eviction data structure, or admission filter—the hash table is the cache. 
+
+Concurrent Hash Tables. Li et al. [ 32 ] achieve fine-grained concur-rent cuckoo hashing with optimistic locking; RCU hash tables [ 55 ]define reader/writer/resizer roles; Fatourou et al. [ 21 ] separate per-bucket mutation from directory resizing—Fatourou’s update role bundles all mutations (insert, delete, value change) into one role via per-bucket PSim instances, whereas HKV further decomposes mutations: non-structural value/score updates run concurrently with lookups, and only structural inserts (which may trigger evic-tion) require exclusive access, constituting ∼10% of mixed-workload operations. Bw-tree [ 31 ] formalizes structure modification opera-tions; oneTBB’s concurrent_hash_map [ 38 ] provides per-bucket reader/writer accessors. Liu et al. [ 36 ] present a three-phase freeze-migrate pattern for nonblocking hash table resizing; no prior GPU hash table separates value/score updates from insert/evict structure changes. HKV adapts the structural-vs.-non-structural split to GPU hash tables, separating value/score updates (parallelizable) from inserts/evictions (exclusive), with a CPU–GPU dual-layer lock and role-isolated kernels absent from prior CPU-only designs. 
+
+Key-Value Separation and Tiered Storage. Key-value separa-tion was pioneered by WiscKey [ 37 ] and HashKV [ 13 ] in the SSD/LSM-tree context; FAWN-DS [ 2], SILT [ 34 ], and FASTER [ 14 ]employ compact in-memory hash indices pointing to storage-resident data. MICA [ 35 ] pioneered holistic KV store design with circular-log value storage and parallel hash-index partitioning; MemcachedGPU [ 26 ] and Mega-KV [ 60 ] represent early GPU key-value separation but store per-entry value pointers and require CPU threads on the critical path (MemcachedGPU for SET process-ing from CPU-resident slabs, Mega-KV for allocation and eviction scheduling). HKV introduces position-based value addressing : keys, digests, and scores reside in HBM while values overflow to HMEM via cudaHostAllocMapped —each slot’s key and value share the same array index, eliminating per-entry value pointers and keeping the CPU off the critical path via zero-copy mapped pointers. 
+
+Embedding Storage for Recommendations. Deep learning recom-mendation models [ 44 ] have driven specialized embedding storage. Meta’s FBGEMM [ 40 ] is HKV’s closest industrial analogue, provid-ing GPU set-associative LRU/LFU cache with 8–32 ways (version-dependent). The key architectural difference is where eviction de-cisions are made : FBGEMM decouples eviction into a multi-kernel pipeline with separate data structures, whereas HKV embeds score comparison, admission control, and victim replacement directly into the bucket-local insert path. NVIDIA’s cuEmbed [ 3] and nv-embedding-cache [ 47 ] independently address the same problem with an 8-way set-associative design, further validating the impor-tance of GPU embedding caching. Fleche [ 59 ] and UGACHE [ 53 ]provide GPU embedding caching with approximate LRU and static placement respectively; Catalyst [ 42 ] automates caching decisions via learned cost models; LCR [ 15 ] applies learned replacement at the framework level. HKV serves as a low-level GPU hash table primitive with in-kernel eviction; higher-level systems can layer framework-specific policy on top. 
+
+## 7 Conclusion 
+
+We have presented HKV, the first GPU hash table library whose normal full-capacity operating contract is cache-semantic: eviction is a first-class, policy-driven operation, not an error or mainte-nance event. Four co-designed mechanisms deliver three core system-level properties: cache-line-aligned 128-slot buckets with contiguous digest arrays achieve definitive per-bucket miss in one memory transaction (§3.2); in-line score-driven upsert combined with score-based dual-bucket selection resolves full-bucket inserts in place via eviction or admission rejection while improving reten-tion at 𝜆 =1.0 (§3.3, §3.4); and the triple-group concurrency protocol preserves mixed-workload throughput by separating structural from non-structural GPU writes (§3.5). As a scaling enabler, tiered key-value separation extends the same design beyond HBM while keeping key-side processing on GPU (§3.6). Together, these prop-erties enable HKV to sustain stable billion-scale throughput at load factor 1.0 on an NVIDIA H100 NVL GPU—a combination unattainable by any single prior component. Open-source integra-tions in NVIDIA Merlin HugeCTR [ 58 ], TFRA [ 54 ], and NVIDIA RecSys Examples [ 46 ] provide a practical deployment path for GPU-accelerated embedding storage. Limitations and future work. Reader–updater mutual exclusion trades atomicity for simplicity (relaxable with single-word-atomic values); dual-bucket mode covers insert_or_assign and find while the single-bucket path supports the full API; multi-GPU sharding is delegated to application code by design. Looking ahead, wider GPU cache lines would enable larger buckets; SSD/GDS tiering and dynamic rehash remain open extensions. More broadly, HKV establishes cache semantics as a practical design paradigm for GPU-resident data structures—one that trades the dictionary invariant for sustained full-capacity operation under continuous ingestion. 
+
+## Acknowledgments 
+
+We thank Yafei Zhang (Tencent) for his valuable contributions to the early design, implementation, and code review of HKV during the formative stages of this project. HierarchicalKV: A GPU Hash Table with Cache Semantics for Continuous Online Embedding Storage SIGMOD ’27, June 22–27, 2027, Berlin, Germany 
+
+## References 
+
+[1] Dan A. Alcantara, Vasily Volkov, Shubhabrata Sengupta, Michael Mitzenmacher, John D. Owens, and Nina Amenta. 2012. Building an Efficient Hash Table on the GPU. In GPU Computing Gems Jade Edition . Morgan Kaufmann, Waltham, MA, 39–53. [2] David G. Andersen, Jason Franklin, Michael Kaminsky, Amar Phanishayee, Lawrence Tan, and Vijay Vasudevan. 2009. FAWN: A Fast Array of Wimpy Nodes. In Proceedings of the ACM Symposium on Operating Systems Principles (SOSP) . ACM, Big Sky, MT, USA, 1–14. [3] Michael Anderson. 2025. cuEmbed: CUDA Embedding Lookup Kernel Library. https://github.com/NVIDIA/cuembed. NVIDIA, Apache-2.0 license. [4] Saman Ashkiani, Martin Farach-Colton, and John D. Owens. 2018. A Dynamic Hash Table for the GPU. In Proceedings of the IEEE International Parallel and Distributed Processing Symposium (IPDPS) . IEEE, Vancouver, BC, Canada, 419– 429. [5] Muhammad A. Awad, Saman Ashkiani, Serban D. Porumbescu, Martín Farach-Colton, and John D. Owens. 2023. Analyzing and Implementing GPU Hash Tables. In Proceedings of the Symposium on Algorithmic Principles of Computer Systems (APOCS) . SIAM, Florence, Italy, 33–50. doi:10.1137/1.9781611977578.ch3 arXiv title: “Better GPU Hash Tables”; cited for both the BGHT benchmark suite and the BP2HT (power-of-two-choices) hash table design.. [6] Yossi Azar, Andrei Z. Broder, Anna R. Karlin, and Eli Upfal. 1994. Balanced Allocations. In Proceedings of the ACM Symposium on Theory of Computing (STOC) .ACM, Montreal, QC, Canada, 593–602. [7] L. A. Belady. 1966. A Study of Replacement Algorithms for a Virtual-Storage Computer. IBM Systems Journal 5, 2 (1966), 78–101. [8] Sam Benzaquen, Alkis Evlogimenos, Matt Kulukundis, and Roman Perepelitsa. 2017. SwissTable: A Fast and Cache-Friendly Hash Table. CppCon 2017 / Google Abseil Library. [9] Benjamin Berg, Daniel S. Berger, Sara McAllister, Isaac Grosof, Sathya Gunasekar, Jimmy Lu, Michael Pelchat, Thibaud Tabber, Qi Zhong, and Mor Harchol-Balter. 2020. CacheLib: Caching Engine for Web Scale Services. In Proceedings of the USENIX Symposium on Operating Systems Design and Implementation (OSDI) .USENIX Association, 753–768. [10] Maximilian Böther, Lawrence Benson, and Tilmann Rabl. 2023. Vectorized and Performance-Portable Hash Tables. Proceedings of the VLDB Endowment 16, 11 (2023), 2755–2768. [11] Alex D. Breslow, Dong Ping Zhang, Joseph L. Greathouse, Nuwan Jayasena, and Dean M. Tullsen. 2016. Horton Tables: Fast Hash Tables for In-Memory Data-Intensive Computing. In Proceedings of the USENIX Annual Technical Conference (ATC) . USENIX Association, Denver, CO, USA, 281–294. [12] Nathan Bronson and Xiao Shi. 2019. F14: A Fast, Compact Hash Table Based on SIMD Lookup. Meta Engineering Blog / Folly Library. [13] Helen H. W. Chan, Yongkun Li, Patrick P. C. Lee, and Yinlong Xu. 2018. HashKV: Enabling Efficient Updates in KV Storage via Hashing. In Proceedings of the USENIX Annual Technical Conference (ATC) . USENIX Association, 1007–1019. [14] Badrish Chandramouli, Guna Prasaad, Donald Kossmann, Justin Levandoski, James Hunter, and Mike Barnett. 2018. FASTER: A Concurrent Key-Value Store with In-Place Updates. In Proceedings of the ACM SIGMOD International Confer-ence on Management of Data . ACM, Houston, TX, USA, 275–290. [15] Ao Chen et al . 2025. Toward Robust and Efficient ML-Based GPU Caching for Modern Inference. In Proceedings of the 23rd USENIX Conference on File and Storage Technologies (FAST) . USENIX Association, Santa Clara, CA, USA, 237–254. [16] Menglei Chen, Yu Hua, Zhangyu Chen, Ming Zhang, and Gen Dong. 2025. GPHash: An Efficient Hash Index for GPU with Byte-Granularity Persistent Memory. In Proceedings of the USENIX Conference on File and Storage Technologies (FAST) . USENIX Association, Santa Clara, CA, USA, 203–220. [17] Herbert A. David and Haikady N. Nagaraja. 2003. Order Statistics (3rd ed.). Wiley-Interscience. [18] Martin Dietzfelbinger and Christoph Weidling. 2005. Balanced Allocation and Dictionaries with Tightly Packed Constant Size Bins. In Proceedings of the Inter-national Colloquium on Automata, Languages, and Programming (ICALP) (Lecture Notes in Computer Science) . Springer, Berlin, Heidelberg, 166–178. [19] Gil Einziger, Roy Friedman, and Ben Manes. 2017. TinyLFU: A Highly Efficient Cache Admission Policy. ACM Transactions on Storage 13, 4 (2017), 35:1–35:31. [20] Bin Fan, David G. Andersen, and Michael Kaminsky. 2013. MemC3: Compact and Concurrent MemCache with Dumber Caching and Smarter Hashing. In Proceed-ings of the USENIX Symposium on Networked Systems Design and Implementation (NSDI) . USENIX Association, Lombard, IL, USA, 371–384. [21] Panagiota Fatourou, Nikolaos D. Kallimanis, and Thomas Ropars. 2018. An Efficient Wait-free Resizable Hash Table. In Proceedings of the ACM Symposium on Parallelism in Algorithms and Architectures (SPAA) . ACM, Vienna, Austria, 111–120. [22] Roy Friedman and Adi Mozes. 2022. On the Performance of Bounded-Associativity Caching. In Proceedings of the ACM International Conference on Distributed Com-puting and Networking (ICDCN) . ACM, Delhi, India, 87–96. [23] Jim N. Gray, Raymond A. Lorie, Gianfranco R. Putzolu, and Irving L. Traiger. 1976. Granularity of Locks and Degrees of Consistency in a Shared Data Base. In 
+
+Modelling in Data Base Management Systems . North-Holland, 365–394. [24] Steef Hegeman, Daan Wöltgens, Anton Wijs, and Alfons Laarman. 2024. Compact Parallel Hash Tables on the GPU. In Euro-Par 2024: Parallel Processing . Springer, Madrid, Spain, 226–241. doi:10.1007/978-3-031-69766-1_16 [25] Maurice Herlihy, Nir Shavit, and Moran Tzafrir. 2008. Hopscotch Hashing. In 
+
+Proceedings of the International Symposium on Distributed Computing (DISC) (Lecture Notes in Computer Science) . Springer, Arcachon, France, 350–364. [26] Tayler H. Hetherington, Timothy G. Rogers, Lisa Hsu, Mike O’Connor, and Tor M. Aamodt. 2015. MemcachedGPU: Scaling-up Scale-out Key-value Stores. In Proceedings of the ACM Symposium on Cloud Computing (SoCC) . ACM, Kohala Coast, HI, USA, 43–57. [27] Aamer Jaleel, Kevin B. Theobald, Simon C. Steely Jr., and Joel Emer. 2010. High Performance Cache Replacement Using Re-Reference Interval Prediction (RRIP). In ISCA . 60–71. [28] Daniel Jünger, Robin Kobus, André Müller, Christian Hundt, Kai Trendelkamp-Schroer, and Jens Ziegenhagen. 2020. WarpCore: A Library for Fast Hash Tables on GPUs. In Proceedings of the IEEE International Conference on High Performance Computing (HiPC) . IEEE, Pune, India, 11–20. [29] Farzad Khorasani, Mehmet E. Belviranli, Rajiv Gupta, and Laxmi N. Bhatia. 2015. Stadium Hashing: Scalable and Flexible Hashing on GPUs. In Proceedings of the International Conference on Parallel Architectures and Compilation Techniques (PACT) . IEEE, 63–74. [30] Brenton Lessley and Hank Childs. 2020. Data-Parallel Hashing Techniques for GPU Architectures. IEEE Transactions on Parallel and Distributed Systems 31, 1 (2020), 237–250. doi:10.1109/TPDS.2019.2929768 [31] Justin J. Levandoski, David B. Lomet, and Sudipta Sengupta. 2013. The Bw-Tree: A B-tree for New Hardware Platforms. In Proceedings of the IEEE International Con-ference on Data Engineering (ICDE) . IEEE Computer Society, Brisbane, Australia, 302–313. [32] Xiaozhou Li, David G. Andersen, Michael Kaminsky, and Michael J. Freedman. 2014. Algorithmic Improvements for Fast Concurrent Cuckoo Hashing. In Proceed-ings of the European Conference on Computer Systems (EuroSys) . ACM, 27:1–27:14. [33] Yuchen Li, Qiwei Zhu, Zheng Lyu, Zhongdong Huang, and Jianling Sun. 2021. DyCuckoo: Dynamic Hash Tables on GPUs. In Proceedings of the 37th IEEE International Conference on Data Engineering (ICDE) . IEEE, Chania, Greece, 768– 779. [34] Hyeontaek Lim, Bin Fan, David G. Andersen, and Michael Kaminsky. 2011. SILT: A Memory-Efficient, High-Performance Key-Value Store. In Proceedings of the ACM Symposium on Operating Systems Principles (SOSP) . ACM, Cascais, Portugal, 1–13. [35] Hyeontaek Lim, Dongsu Han, David G. Andersen, and Michael Kaminsky. 2014. MICA: A Holistic Approach to Fast In-Memory Key-Value Storage. In Proceedings of the USENIX Symposium on Networked Systems Design and Implementation (NSDI) . USENIX Association, 429–444. [36] Yujie Liu, Kunlong Zhang, and Michael Spear. 2014. Dynamic-Sized Nonblocking Hash Tables. In Proceedings of the ACM Symposium on Principles of Distributed Computing (PODC) . 242–251. doi:10.1145/2611462.2611495 [37] Lanyue Lu, Thanumalayan Sankaranarayana Pillai, Hariharan Gopalakrishnan, Andrea C. Arpaci-Dusseau, and Remzi H. Arpaci-Dusseau. 2016. WiscKey: Sepa-rating Keys from Values in SSD-Conscious Storage. In Proceedings of the USENIX Conference on File and Storage Technologies (FAST) . USENIX Association, Santa Clara, CA, USA, 133–148. [38] Anton Malakhov. 2015. Per-Bucket Concurrent Rehashing Algorithms. Intel oneAPI Threading Building Blocks (oneTBB), concurrent_hash_map .[39] Nicolas McCoy and Prashant Pandey. 2025. WarpSpeed Hash Tables. arXiv preprint arXiv:2509.16407 (2025). [40] Meta Platforms, Inc. 2019. FBGEMM: Facebook GEneral Matrix Multiplication — GPU Embedding Operations. https://github.com/pytorch/FBGEMM. [41] Zviad Metreveli, Nickolai Zeldovich, and M. Frans Kaashoek. 2012. CPHash: A Cache-Partitioned Hash Table. In Proceedings of the ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) . ACM, New Orleans, LA, USA, 319–320. [42] Xupeng Miao, Yining Shi, Hailin Zhang, Xin Zhang, Xiaonan Nie, Zhi Yang, and Bin Cui. 2023. Catalyst: A System for Automated GPU-Accelerated Caching. 
+
+Proceedings of the VLDB Endowment 16, 11 (2023), 2797–2810. [43] Michael Mitzenmacher. 2001. The Power of Two Choices in Randomized Load Balancing. IEEE Transactions on Parallel and Distributed Systems 12, 10 (2001), 1094–1104. [44] Maxim Naumov, Dheevatsa Mudigere, Hao-Jun Michael Shi, Jianyu Huang, Narayanan Sundaraman, Jongsoo Park, Xiaodong Wang, Udit Gupta, Carole-Jean Wu, Alisson G. Azzolini, Dmytro Dzhulgakov, Andrey Mallevich, Ilia Cherni-avskii, Yinghai Lu, Raghuraman Krishnamoorthi, Ansha Yu, Volodymyr Kon-dratenko, Stephanie Pereira, Xianjie Chen, Wenlin Chen, Vijay Rao, Bill Jia, Liang Xiong, and Misha Smelyanskiy. 2019. Deep Learning Recommendation Model for Personalization and Recommendation Systems. arXiv preprint arXiv:1906.00091 
+
+(2019). SIGMOD ’27, June 22–27, 2027, Berlin, Germany Rong and Yao, et al. 
+
+[45] NVIDIA Corporation. 2020. cuCollections: GPU-Accelerated Concurrent Data Structures. https://github.com/NVIDIA/cuCollections. [46] NVIDIA Corporation. 2024. RecSys Examples: Optimized Recommender Models for Accelerated Infrastructure. https://github.com/NVIDIA/recsys-examples. [47] NVIDIA Corporation. 2026. nv-embedding-cache: Embedding Cache SDK for GPU-Accelerated Recommendation Systems. https://github.com/NVIDIA/nv-embedding-cache. [48] Rasmus Pagh and Flemming Friche Rodler. 2004. Cuckoo Hashing. Journal of Algorithms 51, 2 (2004), 122–144. [49] Rina Panigrahy. 2005. Efficient Hashing with Lookups in Two Memory Accesses. In Proceedings of the ACM-SIAM Symposium on Discrete Algorithms (SODA) . SIAM, Vancouver, BC, Canada, 830–839. [50] Md Sabbir Hossain Polak, David Troendle, and Byunghyun Jang. 2025. Hive Hash Table: A Warp-Cooperative, Dynamically Resizable Hash Table for GPUs. arXiv preprint arXiv:2510.15095 (2025). Source code not yet released as of February 2026. [51] André Seznec. 1993. A Case for Two-Way Skewed-Associative Caches. In Pro-ceedings of the 20th Annual International Symposium on Computer Architecture (ISCA) . ACM, 169–178. [52] Vibhaalakshmi Sivaraman, Srinivas Narayana, Ori Rottenstreich, S. Muthukrish-nan, and Jennifer Rexford. 2017. HashPipe: Heavy-Hitter Detection Entirely in the Data Plane. In Proceedings of the Symposium on SDN Research (SOSR) . ACM, Santa Clara, CA, USA, 164–175. doi:10.1145/3050220.3063772 [53] Xiaoniu Song, Rong Chen, Haitao Song, Yiwen Zhang, and Haibo Chen. 2026. Unified and Near-optimal Multi-GPU Cache for Embedding-based Deep Learning. 
+
+ACM Transactions on Computer Systems 44, 1 (2026), 1:1–1:32. Extended version of SOSP 2023 paper. [54] TensorFlow SIG Recommenders. 2020. TensorFlow Recommenders Addons: Dynamic Embedding Technology for Large-Scale Recommendation Systems. https://github.com/tensorflow/recommenders-addons. [55] Josh Triplett, Paul E. McKenney, and Jonathan Walpole. 2011. Resizable, Scalable, Concurrent Hash Tables via Relativistic Programming. In Proceedings of the USENIX Annual Technical Conference (ATC) . USENIX Association, Portland, OR, USA. [56] Stefan Walzer. 2023. Load Thresholds for Cuckoo Hashing with Overlapping Blocks. ACM Transactions on Algorithms 19, 3 (2023), 1–22. doi:10.1145/3589558 [57] Kefei Wang, Jian Liu, and Feng Chen. 2020. Put an Elephant into a Fridge: Optimizing Cache Efficiency for In-Memory Key-Value Stores. Proceedings of the VLDB Endowment 13, 9 (2020), 1540–1554. doi:10.14778/3397230.3397247 [58] Zehuan Wang, Yingcan Wei, Minseok Lee, Matthias Langer, Fan Yu, Jie Liu, Shijie Liu, Daniel G. Abel, Xu Guo, Jianbing Dong, Ji Shi, and Kunlun Li. 2022. Merlin HugeCTR: GPU-accelerated Recommender System Training and Inference. In 
+
+Proceedings of the ACM Conference on Recommender Systems (RecSys) . ACM, Seattle, WA, USA, 534–537. [59] Minhui Xie, Youyou Lu, Jiazhen Lin, Qing Wang, Jian Gao, Kai Ren, and Jiwu Shu. 2022. Fleche: An Efficient GPU Embedding Cache for Personalized Recommenda-tions. In Proceedings of the European Conference on Computer Systems (EuroSys) .ACM, Rennes, France, 402–416. [60] Kai Zhang, Kaibo Wang, Yuan Yuan, Lei Guo, Rubao Lee, and Xiaodong Zhang. 2015. Mega-KV: A Case for GPUs to Maximize the Throughput of In-Memory Key-Value Stores. Proceedings of the VLDB Endowment 8, 11 (2015), 1226–1237. [61] Hao Zhou, David Troendle, and Byunghyun Jang. 2021. DACHash: A Dy-namic, Cache-Aware and Concurrent Hash Table on GPUs. In Proceedings of the IEEE International Symposium on Computer Architecture and High Performance Computing (SBAC-PAD) . IEEE Computer Society, Los Alamitos, CA, USA, 1–10. doi:10.1109/SBAC-PAD53543.2021.00012
