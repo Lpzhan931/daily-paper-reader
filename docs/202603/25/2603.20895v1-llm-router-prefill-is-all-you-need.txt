@@ -1,0 +1,407 @@
+Title: LLM Router: Prefill is All You Need
+
+URL Source: https://arxiv.org/pdf/2603.20895v1
+
+Published Time: Tue, 24 Mar 2026 00:54:32 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+Preprint 
+
+# LLM Router: Prefill is All You Need 
+
+Tanay Varshney ∗ Annie Surla ∗ Michelle Xu Gomathy Venkata Krishnan Maximilian Jeblick David Austin Neal Vaidya Davide Onofrio NVIDIA ∗
+
+Abstract 
+
+LLMs often share comparable benchmark accuracies, but their complemen-tary performance across task subsets suggests that an Oracle router—a theoretical selector with perfect foresight—can significantly surpass stan-dalone model accuracy by navigating model-specific strengths. While current routers rely on fragile semantic signals, we propose using internal prefill activations via Encoder-Target Decoupling —a functional separation between the model providing the predictive signal (the Encoder ) and the model whose performance is being estimated (the Target ). This allows optimized heterogeneous pairing between unique encoders and target models. We utilize Fisher Separability ( J) and Effective Dimensionality (deff ) as mathematical probes to isolate optimal layer-wise signals, pro-viding the predictive foundation for our SharedTrunkNet architecture. SharedTrunkNet captures up to 45.58% of the accuracy gap between the strongest standalone model and the Oracle while achieving 74.31% cost savings relative to the highest-cost model. 
+
+1 Introduction 
+
+Current model routing is primarily predicated on semantic or intent-based signals, leverag-ing query features and domain descriptions to map tasks to specialized LLMs (e.g., KNN on embeddings). While effective for domain specialization, this paradigm suffers from two foundational flaws: 1. Lack of mechanistic interpretation: Routers ignore the intrinsic generative limits of the underlying models. 2. Semantic-complexity gap: Semantic similarity does not correlate with task diffi-culty; routers fine-tuned for representation often fail to capture signals indicative of model behavior. Furthermore, traditional evaluations are often inflated by “agreement” cases where all models share the same output. Without a signal reflecting intrinsic difficulty, routing performance degrades under strict cost-based Service Level Agreements (SLAs). Our primary contributions include: • Encoder-Target Decoupling: We demonstrate that “foreign” open-source encoders (e.g., Qwen) can predict the performance of closed-source targets (e.g., Claude) more effectively than the targets’ own states. • Fisher-based layer selection: We move beyond “final layer” assumptions by using 
+
+deff and Fisher Separability ( J) to mathematically identify the most separable layer. • SharedTrunkNet: A multi-output architecture providing cross-model context to assess relative difficulty by comparing simultaneous encoder responses. • Comprehensive evaluation: A framework quantifying “Router Efficacy” by mea-suring the area between the router’s accuracy-cost curve and the theoretical Pareto frontier. 
+
+> ∗
+
+Equal contribution. 
+
+1
+
+> arXiv:2603.20895v1 [cs.CL] 21 Mar 2026
+
+Preprint 
+
+2 Literature survey 
+
+The landscape of LLM orchestration has transitioned from static selection to dynamic, data-driven routing, categorized by decision-making signals and architectural complexity. 
+
+Non-predictive frameworks. Initial approaches relied on heuristics or cascading strategies. Chen et al. (2023) sequentially direct queries through increasingly complex models. While cost-effective for trivial tasks, these suffer from prohibitive cumulative latency on complex queries. 
+
+Semantic and intent-based routing. Predictive “black-box” routers select LLMs before generation using query embeddings. Ong et al. (2024) utilize human preference data, while Shao et al. (2024) and Lin et al. (2024) leverage retrieval-based patterns. Similarly, Zhu et al. (2024) and Xu et al. (2025) employ GNNs or shallow encoders (e.g., DeBERTa) to map embeddings to model choices. These are fundamentally limited by the representational bottleneck of semantic embeddings, which fail to capture intrinsic task complexity. 
+
+Mechanistic routing. Recent research shifts toward internal hidden states and attention patterns as high-fidelity signals. Cencerrado et al. (2025) demonstrate that LLMs encode accuracy within the residual stream, with “correctness directions” crystallizing during prefill. Furthermore, Chen et al. (2025) extract activation statistics for zero-cost intent classification. Our work extends this via Encoder-Target Decoupling, using small open-source models to predict closed-source performance. 
+
+Strategy and multi-level orchestration. Frameworks like Route to Reason (Pan et al., 2025) dynamically allocate both models and reasoning strategies (e.g., Chain-of-Thought), reducing token usage by 60%. Xu et al. (2025) further operationalize routing across query, thought, and model levels. 
+
+3 Architecture 
+
+From first principles, a router is a function of two signals: per-LLM confidence and per-model cost of inference. These signals, collected for all models in a pool, are fed into a routing policy to select the optimal model. 
+
+Per-LLM confidence. A scalar in [0, 1 ] representing confidence in an LLM’s ability to answer the given query correctly. 
+
+Per-LLM cost. The cost in USD required to fulfill one LLM inference request. Cost factors differ by deployment scenario: • API endpoints: cost is a function of input tokens, output tokens, and per-token pricing. • Local engine deployment: cost is a function of input tokens, output tokens, inter-token latency (ITL), time to first token (TTFT), and GPU rental cost per unit time. In both scenarios, all signals except output token count are observable or estimable prior to generation, yielding: best model = ROUTER (confidence, COST (isl, osl, ITL, TTFT, GPU cost )) 
+
+Therefore, the two signals imperative to predict are per-LLM confidence and per-LLM output token count. This work focuses on confidence prediction; output token prediction is deferred to future work. We use each model’s median training output tokens as a cost proxy. Architecturally, we have a two-step process: 1. Signal extraction: model(s) that extract signals from inputs available at routing time. 2. Signal capture: model(s) that map those signals to a per-LLM confidence score. 2Preprint 
+
+Figure 1: Overview of the two-stage routing architecture: signal extraction and confidence estimation. 
+
+4 Methodology 
+
+4.1 LLM evaluation 
+
+In addition to data from LLMRouterBench, we design a lightweight evaluation harness that queries each model across three benchmarks: MMLU-Pro, Humanity’s Last Exam (HLE), and LiveCodeBench (LCB). Models are queried via OpenAI-compatible streaming endpoints with per-provider adapters. All models use a maximum of 128,000 tokens and their highest available reasoning effort— reasoning effort: high for Claude and GPT-OSS, and enable thinking with provider-recommended sampling for Qwen and Nemotron. For each (model, question) pair we record the response, reasoning trace, and wall-clock latency. Scoring follows standard protocols: exact-match extraction for MMLU-Pro, GPT-4o-as-a-judge for HLE, and sandboxed pass@1 execution for LCB. All evaluators produce a unified binary correctness label per (model, question) pair, which serves as the ground-truth signal for router training and evaluation. No intentional prompt engineering or harness tuning was applied. 
+
+4.2 Semantic router 
+
+Semantic routers predict per-model correctness P(model k correct | q) from features derived exclusively from the input query text, without executing any candidate LLM. We organize all data into pre-split train, calibration, and test bundles and extract the following feature families: • Question embeddings: 2048-d dense vectors from NV-Embed-v2 (Lee et al., 2025), optionally reduced via PCA to 128 or 256 dimensions. • kNN statistics (50-d per model): Using FAISS (Johnson et al., 2019) flat-L2 indices over training embeddings, we retrieve K ∈ { 5, 10, 25, 50, 100 } neighbors. For each 
+
+K, 10 statistics are computed—including neighbor-correct ratio, distance-weighted correctness, and class-conditional distance means. • Handcrafted text complexity (∼30-d): Readability indices (Flesch-Kincaid, Coleman-Liau, ARI, SMOG), lexical diversity (type-token ratio, hapax legomenon ratio, Yule’s K), structural signals (negation count, math/code presence, parentheti-cal nesting depth, number density), and information-theoretic measures (character entropy, zlib compression ratio). • GPT-2 perplexity (4-d): Mean log-probability, perplexity, max surprise, and token-level entropy from a frozen GPT-2 model (Radford et al., 2019), capturing language-model-perceived complexity. 3Preprint These feature families were evaluated across a wide array of architectures and classifiers. Standard training used multi-seed initialization, Adam/AdamW optimizers, and early stopping (patience 20–25), with the best model selected by mean calibration-set AUC. Core architectures included: • Rule-based kNN routers: kNN Majority Vote and kNN Score ( ∑i wi · yi, inverse distance-weighted) (Shao et al., 2024). • Feature-based classifiers: kNN, raw embedding, or complexity features fed into Logistic Regression (LR), XGBoost (Chen & Guestrin, 2016), plain MLP, or a Multi-Task Neural Network (MT) with dual heads for correctness (BCE) and difficulty (CE). • Unified Multi-Task Network: Following Stripelis et al. (2024), a single shared backbone predicting correctness and difficulty for all models jointly in one forward pass. • End-to-End text models: LoRA-finetuned (Hu et al., 2021) DeBERTa-v3-base (He et al., 2021), in “Shared” (shared LoRA, per-model heads) and “Per-model” (inde-pendent encoders) configurations. Raw predictions were passed through a calibration suite: Platt scaling, isotonic regression, percentile mapping, and z-score normalization. We also swept kNN distance-weighting ker-nels, FAISS index sizes, and multi-task loss λ weights. Over 400 non-ceiling configurations were evaluated in total. Additional advanced architectures were explored but did not yield improvements dis-tinguishable from noise: (i) IRT & MIRT-2PL (Embretson & Reise, 2000), mapping fea-tures to a latent difficulty vector θq ∈ RD and per-model ability vectors am, computing 
+
+P(correct ) = σ(θ⊤ 
+
+> q
+
+am + bm); (ii) GNN-based routing (Feng et al., 2025; Zhu et al., 2024) using two GAT-style attention layers over K=25 neighbors; (iii) LLM-as-judge difficulty soft labels; (iv) disagreement-weighted training; and (v) two-stage tiered routing. 
+
+4.3 Prefill router 
+
+Following Chen et al. (2025), we propose leveraging an LLM’s internal activations during prefill as a predictive signal for model correctness—a fundamentally different approach from coarse query embeddings. We distinguish between the Encoder LLM , which provides hidden-state signals, and the Target LLM , whose performance is predicted. This decoupling lets us approximate closed-source model capabilities using open-weights encoders. We evaluate three operational modes: 
+
+per model (fixed assignments), single (one encoder for all targets), and auto (optimal encoder per target). For a query q, we extract hidden states from the upper half of the encoder’s transformer layers (Lugoloobi et al., 2026) ( L/ 2 to L, where L is the total number of layers), compare last-token vs. mean-pooling, and apply PCA to reduce dimensionality ( d ∈ { 50, . . . , 300 }). Layer selection is determined by a grid search validated with 5-fold stratified cross-validation using L2-regularized logistic regression. The final feature vector concatenates PCA-reduced features across all K targets, where fk ∈ Rdpca  
+
+> k
+
+is the PCA-reduced hidden-state feature vector for target k ∈ K :
+
+x = [ f1 | f2 | · · · | fK ] ∈ R∑k dpca  
+
+> k
+
+(1) Correctness probabilities are modeled with SharedTrunkNet , a multi-output MLP (Linear-ReLU-Dropout) mapping x to simultaneous P(correct ) estimates for all targets. We ensemble the top 5 models (from a pool of 10) trained with BCEWithLogitsLoss and Adam. Joint optimization provides two advantages over independent probes: • Cross-model context: features from one encoder supply complementary evidence about query difficulty for other models. 4Preprint • Inherent calibration: joint optimization keeps outputs on a comparable scale, mitigating calibration drift. Final predictions are refined with post-hoc Platt scaling on out-of-fold samples, yielding a self-contained routing checkpoint comprising layer configurations, PCA transforms, and ensemble weights. 
+
+4.4 Verbosity and cost 
+
+The router provides per-model cost estimates Ck,q alongside confidence scores, where 
+
+k ∈ { 1, . . . , K} indexes the K candidate models and q denotes the query. Using the input token count nin, q, model pricing rates ( rin  
+
+> k
+
+, rout  
+
+> k
+
+), and the training-set median output length ˜nout  
+
+> k
+
+:
+
+Ck,q = nin, q
+
+10 6 · rin  
+
+> k
+
++ ˜nout 
+
+> k
+
+10 6 · rout  
+
+> k
+
+(2) We deliberately exclude OSL from confidence-prediction features to avoid ground-truth leakage. By exposing {P(correct k)} and {Ck,q} as independent outputs, the router re-mains a composable primitive supporting arbitrary downstream selection policies (budget-constrained argmax, inverse-cost weighting, etc.) without retraining. 
+
+4.5 Routing function design 
+
+For a given query, each of the K candidate models receives a scalar routing score: score k,q = λ · P(correct k) − (1 − λ) · cost k,q (3) where cost k,q is the per-model cost normalized to [0, 1 ] over the training-set cost range: cost k,q = Ck,q − Cmin 
+
+Cmax − Cmin 
+
+(4) where Cmin = min k Ck and Cmax = max k Ck are anchored to the training-set cost range, making cost k,q a stable zero-shot heuristic that requires no query-specific foresight. The routing policy selects: Selected model = arg max 
+
+> k∈K
+
+score k,q (5) The hyperparameter λ ∈ [0, 1 ] controls the accuracy-cost trade-off: λ=1 always picks the highest-confidence model; λ=0 always picks the cheapest; intermediate values interpolate. Sweeping λ traces the full accuracy-cost curve. 
+
+5 Evaluation paradigm 
+
+5.1 Metrics 
+
+5.1.1 ROC-AUC 
+
+ROC-AUC measures classifier quality across all thresholds—it equals the probability that a model ranks a random positive above a random negative. Because routing requires judging model capability across varying difficulty levels, threshold-dependent metrics such as F1 are unsuitable as primary drivers. 
+
+5.1.2 Brier score 
+
+For binary labels, the Brier Score reduces to MSE between predicted probabilities and outcomes: BS = 1
+
+|Q| ∑
+
+> q∈Q
+
+( fq − oq)2 (6) where Q is the test set, fq is the confidence score for query q, and oq ∈ { 0, 1 } the actual outcome. The Brier score serves as our primary calibration metric. 5Preprint 
+
+5.1.3 Accuracy 
+
+We track three accuracy paradigms: 1. Individual LLM accuracy: baseline performance of each model. 2. Routed pool accuracy: aggregate accuracy with the router active. 3. Conditional accuracy: accuracy of each model on the subset of queries routed to it. 
+
+5.1.4 Cost 
+
+Cost in USD arises from two sources: (1) LLM inference , computed from total input/output tokens and per-million rates; and (2) router overhead , which in a production vLLM setting can be negated by caching prefill activations. 
+
+5.2 Framework 
+
+We partition the dataset by model consensus to isolate where routing adds value: • All correct: queries answered correctly by every model. • All incorrect: queries failed by every model. • Model disagreement: queries where at least one model succeeds while others fail—the primary regime where routing matters. 
+
+5.2.1 Level 1: Mechanistic interpretation (per LLM) 
+
+• Per-model AUC: ROC-AUC between predicted P(correct k) and ground-truth labels for each target k.• Brier score: calibration quality per model. • Routing delta: accuracy and cost on queries routed to vs. away from model k.
+
+5.2.2 Level 2: Global router efficacy (accuracy vs. cost) 
+
+Padded Area Under the Cost Coverage Curve (P-AUCCC). We sweep λ ∈ [0, 1 ] to trace a curve of (cost, accuracy) operating points. Rather than plotting accuracy against raw cost, we use inverse cost (1 / ¯ C): both axes then share the same direction — higher is better — so that larger area under the curve directly rewards achieving high accuracy at low cost — a router that picks cheaply when it can will accumulate more area than one that defaults to expensive models. At each operating point, the router selects model k∗(q) per query 
+
+q ∈ Q, where Q is the test set; we collect the estimated costs Ck∗ (q),q (Eq. 2) and average them: ¯ C = 1 
+
+> |Q|
+
+∑q∈Q Ck∗ (q), q.Both axes are then normalised to [0, 1 ] using the cheapest and most expensive models in the pool as anchors: invcost norm = 1/ ¯ C − 1/ Cmax 
+
+1/ Cmin − 1/ Cmax 
+
+(7) acc norm = acc − acc floor 
+
+acc ceil − acc floor 
+
+(8) where Cmin and Cmax are the costs of the cheapest and most expensive models in the pool; mean cost at any operating point cannot fall outside [Cmin , Cmax ]. acc floor is the accuracy of the cheapest model and acc ceil is the maximum across all models and the oracle. Normalising the cost axis using pool-model prices removes dependence on the absolute price scale, making P-AUCCC comparable across pools with different model pricing. Normalising the accuracy axis anchors the floor to the trivial baseline (always pick the cheapest model) and the ceiling to the best achievable, so the metric measures routing gain rather than raw accuracy — a router that merely matches the cheapest model scores near zero, while one that 6Preprint tracks the oracle scores near one. The curve is left-padded: accuracy is held at the curve’s leftmost value for inverse-cost regions not reached by the router, penalising solutions that fail to cover the high-cost end of the sweep. P-AUCCC is the trapezoidal area under this curve, in [0, 1 ] (higher is better). 
+
+P-AUCCC(models) is the Model-Only Pareto, treating each model as a fixed operating point—the best achievable by static model selection, and the practical lower bound for any routing solution. 
+
+Model Delta Padded AUCCC (MDP-AUCCC). 
+
+MDP-AUCCC = P-AUCCC (router ) − P-AUCCC (models ) (9) Directly quantifies the routing gain over static model selection. 
+
+Router efficacy. Mean Euclidean distance from each routing-curve point to the oracle in normalized space (lower is better): Efficacy = 1
+
+N ∑
+
+> i
+
+q invcost norm  
+
+> i
+
+− invcost norm oracle 
+
+2 +  acc norm  
+
+> i
+
+− acc norm oracle 
+
+2 (10) All three metrics — P-AUCCC, MDP-AUCCC, and Router Efficacy — operate on the same underlying inverse-cost normalised curve. P-AUCCC summarises it as a single area; MDP-AUCCC isolates the router’s contribution by subtracting the static-model baseline area; and Router Efficacy measures point-wise proximity to the oracle corner of that same space. Together they provide complementary views of the same routing behaviour. 
+
+6 Experimentation & results 
+
+6.1 Dataset — model pool selection 
+
+We start with LLMRouterBench, covering 20+ benchmarks across 30 models in two tiers: a 
+
+Small pool of 20 models (7B–9B; 13,988 entries/model across 18 benchmarks) and a Fron-tier/Large pool of 11 models (9,662 entries/model across 10 benchmarks). The intersection of these tiers yields only 2,434 entries/model—insufficient to showcase a mixed-tier router. We therefore collect a mixed-tier pool spanning: Claude Opus 4.6, OpenAI GPT-5.4, OpenAI GPT-5.2, Qwen 3.5 122B, GPT OSS 120B, Nemotron Super v3 120B, Nemotron Nano v3 30B, Qwen 3.5 35B, and GPT OSS 20B. This pool purposely spans different costs and scales. Data is collected across MMLU-Pro, LiveCodeBench, and HLE using the harness from section 4.1, yielding 14,469 entries/model. Table 1 summarizes the three pools. 
+
+Dataset All correct All fail Model disagreement Oracle accuracy 
+
+Frontier pool 2,344 (24.36%) 1,374 (14.22%) 5,944 (61.52%) 89.31% Small pool 816 (5.83%) 1,149 (8.21%) 12,023 (85.95%) 91.97% Mixed pool 7,596 (52.50%) 1,853 (12.81%) 5,020 (34.69%) 89.35% Table 1: Dataset statistics. Model disagreement is the primary indicator of routing opportu-nity. Oracle accuracy is the accuracy ceiling of the pool. Data is stratified into an 85–15 train/test split, with calibration experiments using a 75-10-15 train/calibration/test split. Stratifying by both model agreement and benchmark domain ensures proportional task representation and robust in-domain evaluation. 7Preprint 
+
+6.2 Evaluation results 
+
+6.2.1 Encoder-Target sweeps 
+
+Frontier Pool Table 2 reports per-target AUC for each encoder. Qwen3.5-122B achieves the highest AUC on every target, confirming that large-scale open-weight encoders serve as superior predictors even for closed-source targets.                                                                   
+
+> Target Encoder
+> claude-sonnet-4
+> deepseek-r1
+> deepseek-v3
+> gemini-2.5-flash
+> gemini-2.5-pro
+> glm-4.6
+> gpt-5
+> gpt-5-chat
+> kimi-k2
+> openrouter
+> qwen3-235b
+> Nemotron-Nano-30B 0.8501 0.8154 0.7827 0.7922 0.7350 0.7941 0.7872 0.7788 0.7931 0.8092 0.7548 gpt-oss-20b 0.8586 0.8248 0.7910 0.7986 0.7386 0.8045 0.7928 0.7899 0.8038 0.8225 0.7551 Qwen3.5-35B 0.9011 0.8671 0.8333 0.8398 0.7855 0.8474 0.8370 0.8366 0.8440 0.8606 0.8135
+> Qwen3.5-122B 0.9059 0.8757 0.8427 0.8460 0.7978 0.8536 0.8437 0.8488 0.8511 0.8620 0.8252
+> gpt-oss-120b 0.8652 0.8324 0.8002 0.8018 0.7475 0.8145 0.8036 0.7907 0.8076 0.8239 0.7681 Nemotron-Super-120B 0.8991 0.8646 0.8311 0.8343 0.7750 0.8418 0.8272 0.8291 0.8409 0.8577 0.7984
+
+Table 2: Frontier pool: per-target AUC across encoders. Layer selected by Fisher Separability (J); PCA=100, last-token mode. Bold = highest AUC per target. 
+
+Small Pool Table 6 (Appendix A) reports results for the 20-model small pool. Qwen3.5-35B and Qwen3.5-122B again dominate, achieving the highest AUC on nearly every small-model target. 
+
+Mixed Pool Table 7 (Appendix A) reports per-target AUC for the mixed-tier pool, spanning frontier and small models. As with the other pools, Qwen3.5 encoders consistently rank among the strongest predictors across heterogeneous target architectures. 
+
+6.2.2 Mechanistic interpretation (per LLM) 
+
+To understand how each confidence-predictor backbone generalises across its target models, we aggregate per-model correctness-probability statistics over the frontier, small, and mixed pools. For each pool we report: the mean per-model AUC; the mean per-model Brier score (lower is better); and the weighted-mean accuracy on queries that were routed to that model, computed under arg max routing at λ=1 (confidence-only, no cost penalty; see equation 3). Weights are proportional to query volume. 8Preprint    
+
+> Pool Architecture Mean per-model AUC
+
+↑ Mean Brier ↓ Wtd. Acc (to) ↑                                                      
+
+> Frontier SharedTrunkNet 0.8560 0.1509 0.7611
+> [qwen-0.6] U emb MT 0.7983 0.1764 0.7338 [qwen-0.6] 5 emb MT 0.7984 0.1770 0.7325 [nv-embed-v2] U emb MT 0.8040 0.1756 0.7345 [nv-embed-v2] 5 emb MT 0.8001 0.1874 0.6801 [deberta] U emb MT 0.7980 0.1777 0.7427 Small SharedTrunkNet 0.8260 0.1642 0.7525
+> [qwen-0.6] U emb MT 0.7598 0.1912 0.7417 [qwen-0.6] 5 emb MT 0.7558 0.1922 0.7252 [nv-embed-v2] U emb MT 0.7595 0.1912 0.7393 [nv-embed-v2] 5 emb MT 0.7553 0.1925 0.7384 [deberta] U emb MT 0.7619 0.1904 0.7398 Mixed SharedTrunkNet 0.8817 0.1111 0.8336
+> [qwen-0.6] U emb MT 0.8046 0.1380 0.8253 [qwen-0.6] 5 emb MT 0.7999 0.1397 0.8129 [nv-embed-v2] U emb MT 0.8069 0.1354 0.8304 [nv-embed-v2] 5 emb MT 0.8023 0.2155 0.7627 [deberta] U emb MT 0.7955 0.1377 0.8318
+
+Table 3: Per-backbone aggregated routing metrics for proposed SharedTrunkNet and other Semantic Backbones across the three model pools. Wtd. Acc (to) : weighted-mean accuracy on queries routed to that model (router predicted correct). Lower Brier is better; higher AUC and Wtd. Acc (to) are better. SharedTrunkNet leads on every metric — highest AUC, lowest Brier, and highest routed-to accuracy — reflecting the benefit of joint multi-target optimisation and cross-model context in its shared trunk. The semantic backbones have similar performance with no single backbone clearly dominating the others. 
+
+6.2.3 Global Router Evaluation 
+
+To evaluate the global efficacy of each encoder backbone, we sweep the accuracy–cost trade-off parameter λ and plot the resulting operating points in both raw total cost space (Figure 2) and normalised inverse-cost space (Figure 3). Across all pools, SharedTrunkNet consistently dominates the Pareto frontier, achieving the highest P-AUCCC and MDP-AUCCC and the lowest Efficacy distance to the oracle — confirming that internal activation geometry provides a substantially stronger routing signal than any evaluated semantic backbone. 
+
+Figure 2: Frontier pool: raw accuracy vs. total cost ($). SharedTrunkNet consistently achieves higher accu-racy at lower cost than all semantic backbones, dom-inating the model-only baseline across the full cost range. 
+
+Figure 3: Frontier pool: normal-ized accuracy vs. normalized in-verse cost. Axes anchored to pool price bounds for cross-pool compa-rability. 9Preprint                                                                
+
+> Pool Experiment Oracle Acc. Best Model Acc. Router Acc. Gain ↑Headroom Captured ↑Cost Savings ↑
+> Frontier SharedTrunkNet 89.3% 65.4%
+> +10.9pp 45.6% 74.3% [qwen-0.6] U emb MT +8.0pp 33.3% 59.2% [qwen-0.6] 5 emb MT platt +8.0pp 33.6% 68.5% [nv-embed-v2] U emb MT +8.3pp 34.8% 69.5% [nv-embed-v2] 5 emb MT percentile +2.7pp 11.1% 76.7% [deberta] U emb MT +9.4pp 39.3% 62.7% Small SharedTrunkNet 92.0% 71.2%
+> +4.2pp 20.4% 64.2% [qwen-0.6] U emb MT +3.2pp 15.4% 47.8% [qwen-0.6] 5 emb MT platt +1.6pp 7.7% 73.3% [nv-embed-v2] U emb MT +2.7pp 13.1% 49.0% [nv-embed-v2] 5 emb MT platt +2.8pp 13.3% 53.7% [deberta] U emb MT +3.2pp 15.2% 55.5% Mixed SharedTrunkNet 89.4% 82.2%
+> +1.2pp 17.3% 29.3% [qwen-0.6] U emb MT +0.5pp 6.4% 13.0% [qwen-0.6] 5 emb MT platt −0.9pp −12.2% 33.3% [nv-embed-v2] U emb MT +1.1pp 15.4% 16.4% [nv-embed-v2] 5 emb MT percentile −5.9pp −82.1% 63.8% [deberta] U emb MT +1.0pp 14.1% 17.5%
+
+Table 4: Per-pool accuracy and cost summary. Oracle Acc. is the theoretical upper bound; Router Acc. Gain is reported in percentage points (pp) over the best single model; Headroom Captured is the fraction of the oracle–best-model gap closed by the router. 
+
+Pool Experiment P-AUCCC ↑ MDP-AUCCC ↑ Efficacy ↓ ∆ Efficacy ↑
+
+Frontier Model-only Pareto 0.3817 — 0.7411 —SharedTrunkNet 0.4377 +0.0560 0.3437 +0.3973 
+
+[qwen-0.6] U emb MT 0.4188 +0.0372 0.4295 +0.3116 [qwen-0.6] 5 emb MT 0.4249 +0.0433 0.4032 +0.3378 [nv-embed-v2] U emb MT 0.4196 +0.0379 0.4102 +0.3308 [nv-embed-v2] 5 emb MT 0.3682 -0.0135 0.5378 +0.2033 [deberta] U emb MT 0.4232 +0.0415 0.3801 +0.3610 Small Model-only Pareto 0.3797 — 0.6187 —SharedTrunkNet 0.5472 +0.1674 0.3951 +0.2236 
+
+[qwen-0.6] U emb MT 0.5367 +0.1570 0.4008 +0.2179 [qwen-0.6] 5 emb MT 0.4987 +0.1190 0.4184 +0.2003 [nv-embed-v2] U emb MT 0.5282 +0.1485 0.4111 +0.2076 [nv-embed-v2] 5 emb MT 0.5115 +0.1318 0.4132 +0.2055 [deberta] U emb MT 0.5310 +0.1512 0.4097 +0.2090 Mixed Model-only Pareto 0.1306 — 0.6807 —SharedTrunkNet 0.2323 +0.1017 0.3310 +0.3497 
+
+[qwen-0.6] U emb MT 0.1949 +0.0644 0.3501 +0.3306 [qwen-0.6] 5 emb MT 0.1783 +0.0477 0.4120 +0.2687 [nv-embed-v2] U emb MT 0.1862 +0.0556 0.3484 +0.3324 [nv-embed-v2] 5 emb MT 0.1521 +0.0215 0.6059 +0.0748 [deberta] U emb MT 0.2149 +0.0843 0.3426 +0.3381 
+
+Table 5: Global routing evaluation across pools. P-AUCCC and MDP-AUCCC are higher-is-better; Efficacy is lower-is-better. ∆ Efficacy is the reduction in mean oracle distance relative to the Model-only Pareto. Bold = best router per pool. Model-only Pareto is the static baseline and is excluded from bolding. SharedTrunkNet achieves the best P-AUCCC, MDP-AUCCC, and Efficacy in every pool, confirming that activation geometry provides a stronger routing signal than any semantic backbone. 
+
+7 Foundations for prefill signals 
+
+A significant empirical finding is that “foreign” encoders (e.g., Qwen-35B/122B) consistently outperform a target model’s own internal states in predicting its correctness. To understand why, we evaluate encoder hidden states across three geometric dimensions. We hypothesize that a robust predictive signal requires high dimensionality, isotropy, and linear separability, quantified as follows: 10 Preprint • Effective dimensionality ( deff ): The participation ratio of the covariance eigenval-ues σi:
+
+deff = (∑i σi)2
+
+∑i σ2
+
+> i
+
+(11) A higher deff indicates information is widely distributed, mitigating PCA informa-tion loss. • Representational anisotropy ( α): Mean pairwise cosine similarity across hidden-state vectors: 
+
+α = 2
+
+n(n − 1) ∑
+
+> i<j
+
+cos (hi, hj) (12) Lower α (higher isotropy) prevents the “narrow cone” pathology where outlier dimensions dominate and collapse class-discriminative differences. • Fisher Separability ( J): Multivariate Fisher criterion on PCA-reduced features: 
+
+J = ∥μ1 − μ0∥2
+
+tr (Σ0) + tr (Σ1) (13) where classes 1 and 0 represent correct and incorrect responses. Unlike deff and α,which are label-free preconditions, J is a target-dependent measure of task-specific separability. Fisher J-based layer selection perfectly conforms to empirical probe sweeps, providing an explainable foundation for our results. While deff and α often peak at different transformer layers, those layers do not exhibit clear target-level separation. Concatenating layers by individual metric peaks yielded no material AUC boost. We therefore propose Fisher J-based layer selection as an efficient, model-free mathematical probe for identifying the most separable layer. Replacing logistic regression with an MLP as the probe also yielded no sig-nificant AUC improvement, indicating that boosting performance requires a fundamentally better encoder, not a more complex probe. 
+
+8 Conclusion 
+
+This work establishes a mechanistic paradigm for LLM routing, moving beyond fragile semantic signals to leverage transformer activation geometry. By introducing Encoder-Target Decoupling, we provide a scalable pathway for routing to proprietary APIs using only the prefill activations of lightweight local models. We ground this approach mathematically using Fisher Separability ( J) and Effective Dimen-sionality ( deff ) as geometric probes, enabling principled identification of optimal, separable transformer layers. Our SharedTrunkNet architecture leverages this geometry to deliver cross-model context and calibrated simultaneous correctness probabilities. Our evaluation spans three model tiers: • Frontier pool: 10 high-parameter models (e.g., GPT-5, Claude 4.6) across 10 bench-marks. • Small pool: 20 lightweight models (7B–9B) across 18 benchmarks. • Mixed pool: A tier spanning frontier and small models designed to test routing’s ability to offload easy tasks to cheaper architectures. SharedTrunkNet closed 45.58% of the accuracy gap between the strongest standalone model and the theoretical Oracle, while achieving 74.31% cost savings relative to the highest-cost model. Our approach also yielded a 53.62% improvement in Router Efficacy and a 14.67% increase in P-AUCCC over the model-only Pareto frontier, confirming that mechanistic rout-ing provides a robust, cost-effective, and theoretically grounded foundation for collaborative LLM systems. 11 Preprint 
+
+References 
+
+Luis Cencerrado et al. No answer needed: Predicting LLM answer accuracy from question-only linear probes. arXiv preprint arXiv:2509.10625 , 2025. URL https://arxiv.org/abs/ 2509.10625 .Lingjiao Chen, Matei Zaharia, and Ion Stoica. FrugalGPT: How to use large language models while reducing cost and improving performance. arXiv preprint arXiv:2305.05176 , 2023. URL https://arxiv.org/abs/2305.05176 .Nuo Chen, Zhiyuan Yang, and Soufiane Hayou. Fast intent classification for LLM routing via statistical analysis of representations. In Proceedings of the 39th Conference on Neural Information Processing Systems (NeurIPS 2025) , 2025. URL https://openreview.net/forum? id=UMuVvvIEvA .Tianqi Chen and Carlos Guestrin. XGBoost: A scalable tree boosting system. In Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining ,pp. 785–794. ACM, 2016. doi: 10.1145/2939672.2939785. URL http://arxiv.org/abs/ 1603.02754 . arXiv:1603.02754. Susan E. Embretson and Steven P. Reise. Item Response Theory for Psychologists . Lawrence Erlbaum Associates, Mahwah, NJ, 2000. T. Feng, Y. Shen, and J. You. GraphRouter: A graph-based router for LLM selections. arXiv preprint arXiv:2410.03834 , 2025. Pengcheng He, Jianfeng Gao, and Weizhu Chen. Debertav3: Improving deberta using ELECTRA-style pre-training with gradient-disentangled embedding sharing. arXiv preprint , arXiv:2111.09543, 2021. URL https://arxiv.org/abs/2111.09543 .Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Lu Wang, and Weizhu Chen. LoRA: Low-rank adaptation of large language models. arXiv preprint ,arXiv:2106.09685, 2021. URL https://arxiv.org/abs/2106.09685 .Jeff Johnson, Matthijs Douze, and Herv ´e J ´egou. Faiss: A library for efficient similarity search. https://engineering.fb.com/2017/03/28/data-infrastructure/ faiss-a-library-for-efficient-similarity-search/ , 2019. Facebook AI Similarity Search library. Young Jin Lee, Aurko Roy, Saurabh Nag, Peng Xu, Izzeddin Sagop, Mingyang Sun, Shih-Cheng Chen, Jing Lin, Chuhan Wu, et al. NV-Embed: Improved techniques for training LLMs as generalist embedding models. In Proceedings of the 39th Conference on Neural Information Processing Systems (NeurIPS 2025) , 2025. URL https://arxiv.org/abs/2405. 17428 . arXiv:2405.17428. Tianshi Lin et al. Avengers: Ensemble of large language models via multi-agent routing. 
+
+arXiv preprint arXiv:2407.03512 , 2024. URL https://arxiv.org/abs/2407.03512 .William Lugoloobi, Thomas Foster, William Bankes, and Craig Russell. LLMs en-code their failures: Predicting success from pre-generation activations. arXiv preprint arXiv:2602.09924 , 2026. URL https://arxiv.org/abs/2602.09924 .Benjamin Ong et al. RouteLLM: Learning to route LLMs with human preferences. arXiv preprint arXiv:2406.18665 , 2024. URL https://arxiv.org/abs/2406.18665 .Zhiyuan Pan, Kaicheng Zhang, Yanchen Zhao, and Yue Han. Route to reason: Adaptive routing for LLM and reasoning strategy selection. arXiv preprint arXiv:2505.19435 , 2025. URL https://arxiv.org/abs/2505.19435 .Alec Radford, Jeff Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. Language models are unsupervised multitask learners. Technical report, OpenAI, 2019. Yuanhao Shao et al. K-Nearest Neighbors is all you need for LLM routing. arXiv preprint arXiv:2403.12041 , 2024. URL https://arxiv.org/abs/2403.12041 .12 Preprint Dimitris Stripelis, Zhenheng Hu, Jipeng Zhang, Zhaozhuo Xu, Aman D. Shah, Hongyi Jin, Yuan Yao, Salman Avestimehr, and Chaoyang He. TensorOpera router: A multi-model router for efficient LLM inference. arXiv preprint arXiv:2408.12320 , 2024. URL 
+
+https://arxiv.org/abs/2408.12320 .Xin Xu, Yue Xu, et al. FusionFactory: Fusing LLM capabilities with multi-LLM log data. 
+
+arXiv preprint arXiv:2507.10540 , 2025. URL https://arxiv.org/abs/2507.10540 .Rui Zhu et al. Graph router: Learning to route queries via bipartite graph neural networks. 
+
+arXiv preprint arXiv:2401.05210 , 2024. URL https://arxiv.org/abs/2401.05210 .
+
+A Encoder Target Sweeps 
+
+A.1 Small Pool 
+
+Model 
+
+Nemo Nano 30B gpt oss 20b Qwen 3.5 35B Qwen 3.5 122B gpt oss 120b Nemo Super 120B DeepHermes-3-8B 0.7744 0.7550 0.7926 0.7928 0.7527 0.7823 DS-R1-Qwen3-8B 0.8047 0.7853 0.8290 0.8260 0.7848 0.8140 DS-R1D-Qwen-7B 0.7817 0.7563 0.8002 0.7991 0.7552 0.7918 Fin-R1 0.8143 0.7981 0.8277 0.8292 0.7950 0.8215 GLM-Z1-9B 0.7923 0.7706 0.8141 0.8113 0.7619 0.8020 Intern-S1-mini 0.7776 0.7610 0.8036 0.8012 0.7594 0.7917 Llama-8B-Inst 0.7884 0.7701 0.8064 0.8085 0.7659 0.7974 Llama-8B-Med 0.7908 0.7742 0.8066 0.8068 0.7691 0.8019 Llama-Nemo-8B 0.7626 0.7470 0.7803 0.7795 0.7409 0.7753 MiMo-7B-RL 0.8462 0.8222 0.8667 0.8632 0.8231 0.8542 MiniCPM-4.1-8B 0.7957 0.7798 0.8153 0.8136 0.7789 0.8030 Nemo-Nano-9B 0.7937 0.7708 0.8165 0.8175 0.7728 0.8022 OpenThinker-3-7B 0.7911 0.7766 0.8014 0.8006 0.7757 0.7972 Qwen2.5-Coder-7B 0.7783 0.7584 0.7954 0.7939 0.7568 0.7870 Qwen3-8B 0.7696 0.7534 0.7936 0.7956 0.7534 0.7822 cogito-8B 0.7782 0.7655 0.8026 0.8026 0.7593 0.7903 gemma2-9b 0.7997 0.7792 0.8212 0.8217 0.7792 0.8115 glm-4-9b 0.8053 0.7914 0.8220 0.8219 0.7885 0.8122 granite-3.3-8b 0.7795 0.7638 0.7927 0.7971 0.7627 0.7896 intlm3-8b 0.7797 0.7643 0.8000 0.8015 0.7589 0.7895 
+
+Table 6: Small pool: per-target AUC across encoders. Layer selected by Fisher Separability (J); PCA=100, last-token mode. Bold = highest AUC per target. 
+
+A.2 Mixed Pool 
+
+13 Preprint 
+
+Encoder 
+
+> Claude Opus 4.6
+> GPT-5.2
+> GPT-5.4
+> GPT-OSS 120B
+> GPT-OSS 20B
+> Nemotron Nano 30B
+> Nemotron Super 120B
+> Qwen 3.5 122B
+> Qwen 3.5 35B
+
+Nemotron-Nano-30B 0.7569 0.7366 0.7345 0.7357 0.7458 0.7502 0.7487 0.7592 0.7648 gpt-oss-20b 0.8313 0.8050 0.8017 0.8063 0.8264 0.8316 0.8228 0.8404 0.8452 Qwen3.5-35B 0.8636 0.8545 0.8437 0.8562 0.8789 0.8817 0.8724 0.8825 0.8898 
+
+Qwen3.5-122B 0.8644 0.8590 0.8516 0.8616 0.8859 0.8828 0.8769 0.8858 0.8924 
+
+gpt-oss-120b 0.8260 0.7994 0.7990 0.8039 0.8305 0.8317 0.8233 0.8382 0.8428 Nemotron-Super-120B 0.8470 0.8343 0.8265 0.8378 0.8672 0.8640 0.8563 0.8626 0.8737 Table 7: Mixed pool: per-target AUC across encoders. Layer selected by Fisher Separability (J); PCA=100, last-token mode. Bold = highest AUC per target. 
+
+B Top-3 and Bottom-3 Experiments per-Model AUC and Brier Score 
+
+B.1 Frontier Pool Experiment Mean sonnet-4 ds-r1 ds-v3 g-flash g-pro glm-4.6 gpt-5 gpt-5c kimi openrt q-235b #1 [nv-embed-v2] U emb MT (raw) 0.8040 0.8653 0.8385 0.8049 0.8137 0.7585 0.7940 0.7917 0.7804 0.7991 0.8263 0.7714 #2 [nv-embed-v2] 5 emb MT (percentile) 0.8001 0.8633 0.8363 0.8024 0.8099 0.7522 0.7880 0.7875 0.7791 0.7924 0.8196 0.7703 #3 [qwen-0.6] 5 emb MT (platt) 0.7984 0.8553 0.8329 0.8134 0.8081 0.7335 0.7875 0.7861 0.7791 0.7969 0.8190 0.7702 #(last-2) [deberta] X gnn (platt) 0.7669 0.8316 0.8120 0.7798 0.7719 0.6963 0.7540 0.7634 0.7457 0.7618 0.7924 0.7269 #(last-1) [deberta] 1 vote k25 (platt) 0.7692 0.8292 0.8103 0.7784 0.7902 0.7087 0.7570 0.7711 0.7508 0.7708 0.7670 0.7281 #(last) [mpnet] X mirt 2PL D10 0.7561 0.8051 0.7989 0.7713 0.7789 0.7206 0.7642 0.7576 0.7401 0.7756 0.6956 0.7097 
+
+Table 8: Frontier pool — top 3 and bottom 3 by mean per-model AUC. 
+
+Experiment Mean sonnet-4 ds-r1 ds-v3 g-flash g-pro glm-4.6 gpt-5 gpt-5c kimi openrt q-235b #1 [nv-embed-v2] U emb MT (raw) 0.1756 0.1459 0.1593 0.1803 0.1758 0.1855 0.1830 0.1746 0.1919 0.1838 0.1640 0.1873 #2 [qwen-0.6] 5 emb MT (platt) 0.1770 0.1517 0.1616 0.1771 0.1786 0.1946 0.1816 0.1767 0.1901 0.1826 0.1671 0.1857 #3 [nv-embed-v2] 5 emb MT (percentile) 0.1874 0.1548 0.1661 0.1826 0.1788 0.2205 0.1899 0.2022 0.1944 0.1867 0.1785 0.2068 #(last-2) [deberta] X gnn (platt) 0.1960 0.1734 0.1802 0.1986 0.2001 0.2061 0.2076 0.1871 0.2066 0.2058 0.1863 0.2036 #(last-1) [deberta] 1 vote k25 (platt) 0.1882 0.1624 0.1687 0.1912 0.1857 0.1994 0.1938 0.1822 0.2010 0.1917 0.1914 0.2022 #(last) [mpnet] X mirt 2PL D10 0.1939 0.1727 0.1793 0.1948 0.1899 0.1969 0.1951 0.1858 0.2042 0.1918 0.2137 0.2084 Table 9: Frontier pool — top 3 and bottom 3 by mean per-model Brier score (lower is better). 
+
+B.2 Small Pool 
+
+14 Preprint 
+
+Model #1 [deberta] U emb MT #2 [qwen-0.6] U emb MT #3 [nv-embed-v2] U emb MT last [mpnet] 1 vote k50 last-1 [deberta] 1 vote k25 last-2 [qwen-0.6] 7 deberta DeepHermes-3-8B 0.7313 0.7348 0.7390 0.6837 0.6892 0.7057 DS-R1-Qwen3-8B 0.7770 0.7628 0.7709 0.7200 0.7150 0.6995 DS-R1D-Qwen-7B 0.7455 0.7553 0.7532 0.7082 0.7001 0.6713 Fin-R1 0.7881 0.7870 0.7932 0.7372 0.7507 0.7527 GLM-Z1-9B 0.7662 0.7657 0.7698 0.7198 0.7198 0.7009 Intern-S1-mini 0.7570 0.7580 0.7482 0.7185 0.6856 0.6886 Llama-8B-Inst 0.7668 0.7602 0.7552 0.7121 0.7117 0.7246 Llama-8B-Med 0.7624 0.7614 0.7538 0.7174 0.7299 0.7087 Llama-Nemo-8B 0.7463 0.7370 0.7402 0.6870 0.6967 0.6311 MiMo-7B-RL 0.8030 0.8015 0.7919 0.7754 0.7733 0.7448 MiniCPM-4.1-8B 0.7702 0.7662 0.7715 0.7223 0.7086 0.6862 Nemo-Nano-9B 0.7567 0.7490 0.7580 0.7013 0.6922 0.6814 OpenThinker-3-7B 0.7509 0.7569 0.7599 0.7328 0.7165 0.6990 Qwen2.5-Coder-7B 0.7531 0.7460 0.7430 0.6990 0.6987 0.7029 Qwen3-8B 0.7469 0.7400 0.7474 0.6966 0.6825 0.6832 cogito-8B 0.7607 0.7579 0.7534 0.6977 0.7000 0.7307 gemma2-9b 0.7610 0.7654 0.7615 0.7200 0.7187 0.7316 glm-4-9b 0.7787 0.7742 0.7722 0.7338 0.7347 0.7355 granite-3.3-8b 0.7599 0.7569 0.7615 0.7183 0.7220 0.7225 intlm3-8b 0.7572 0.7591 0.7470 0.7067 0.7147 0.7237 
+
+Mean 0.7619 0.7598 0.7595 0.7154 0.7130 0.7062 Table 10: Small pool — top 3 and bottom 3 experiments by mean per-model AUC. Bold =best experiment per model among top-3. 
+
+Model #1 [deberta] U emb MT #2 [qwen-0.6] U emb MT #3 [nv-embed-v2] U emb MT last [mpnet] 1 vote k50 last-1 [deberta] 1 vote k25 last-2 [qwen-0.6] 7 deberta DeepHermes-3-8B 0.2080 0.2071 0.2041 0.2203 0.2194 0.2160 DS-R1-Qwen3-8B 0.1712 0.1742 0.1714 0.1859 0.1874 0.1911 DS-R1D-Qwen-7B 0.2036 0.1996 0.2013 0.2161 0.2191 0.2288 Fin-R1 0.1838 0.1863 0.1838 0.2032 0.2004 0.1993 GLM-Z1-9B 0.1775 0.1761 0.1743 0.1883 0.1891 0.1938 Intern-S1-mini 0.1884 0.1878 0.1906 0.2009 0.2093 0.2095 Llama-8B-Inst 0.1964 0.1996 0.2013 0.2154 0.2161 0.2127 Llama-8B-Med 0.1954 0.1966 0.2011 0.2113 0.2077 0.2156 Llama-Nemo-8B 0.2009 0.2060 0.2039 0.2195 0.2170 0.2330 MiMo-7B-RL 0.1714 0.1711 0.1759 0.1796 0.1814 0.1902 MiniCPM-4.1-8B 0.1816 0.1810 0.1787 0.1950 0.1984 0.2070 Nemo-Nano-9B 0.1773 0.1791 0.1752 0.1887 0.1913 0.1951 OpenThinker-3-7B 0.2001 0.1975 0.1983 0.2051 0.2108 0.2174 Qwen2.5-Coder-7B 0.2011 0.2035 0.2049 0.2176 0.2189 0.2172 Qwen3-8B 0.1721 0.1739 0.1711 0.1824 0.1860 0.1878 cogito-8B 0.1954 0.1974 0.1988 0.2165 0.2160 0.2090 gemma2-9b 0.1967 0.1970 0.1966 0.2099 0.2116 0.2084 glm-4-9b 0.1894 0.1926 0.1931 0.2071 0.2069 0.2066 granite-3.3-8b 0.1995 0.2005 0.1991 0.2133 0.2134 0.2147 intlm3-8b 0.1976 0.1969 0.2007 0.2132 0.2123 0.2094 
+
+Mean 0.1904 0.1912 0.1912 0.2045 0.2056 0.2081 Table 11: Small pool — top 3 and bottom 3 experiments by mean per-model Brier score (lower is better). Bold = best (lowest) experiment per model among top-3. 
+
+B.3 Mixed Pool Experiment Mean opus gpt5-2 gpt5-4 oss-120b oss-20b nano super q-122b q-35b #1 [nv-embed-v2] U emb MT (raw) 0.8069 0.8226 0.7863 0.7808 0.7912 0.8070 0.7990 0.8108 0.8258 0.8390 #2 [qwen-0.6] U emb MT (raw) 0.8046 0.8127 0.7789 0.7803 0.7832 0.8094 0.8059 0.8126 0.8231 0.8353 #3 [nv-embed-v2] 5 emb MT (percentile) 0.8023 0.8115 0.7769 0.7726 0.7804 0.8118 0.8017 0.8046 0.8222 0.8386 #(last-2) [mpnet] 3 knn MT (percentile) 0.7440 0.7445 0.7321 0.7032 0.7263 0.7530 0.7505 0.7522 0.7643 0.7701 #(last-1) [mpnet] X lam0.1 (platt) 0.7453 0.7462 0.7291 0.7057 0.7285 0.7561 0.7525 0.7493 0.7679 0.7719 #(last) [mpnet] 1 vote k50 (platt) 0.7261 0.7363 0.7070 0.6871 0.7119 0.7224 0.7153 0.7364 0.7544 0.7635 
+
+Table 12: Mixed pool — top 3 and bottom 3 by mean per-model AUC. 15 Preprint 
+
+Experiment Mean opus gpt5-2 gpt5-4 oss-120b oss-20b nano super q-122b q-35b #1 [nv-embed-v2] U emb MT (raw) 0.1354 0.1028 0.1337 0.1257 0.1559 0.1591 0.1553 0.1455 0.1202 0.1200 #2 [qwen-0.6] U emb MT (raw) 0.1380 0.1071 0.1377 0.1285 0.1597 0.1601 0.1554 0.1453 0.1246 0.1235 #3 [nv-embed-v2] 5 emb MT (percentile) 0.2155 0.2389 0.2345 0.2440 0.2107 0.1895 0.1997 0.2033 0.2176 0.2013 #(last-2) [mpnet] 3 knn MT (percentile) 0.2354 0.2603 0.2458 0.2610 0.2261 0.2135 0.2197 0.2235 0.2374 0.2311 #(last-1) [mpnet] X lam0.1 (platt) 0.1605 0.1254 0.1521 0.1472 0.1847 0.1866 0.1807 0.1716 0.1460 0.1500 #(last) [mpnet] 1 vote k50 (platt) 0.1657 0.1266 0.1559 0.1469 0.1914 0.1969 0.1912 0.1779 0.1491 0.1554 Table 13: Mixed pool — top 3 and bottom 3 by mean per-model Brier score (lower is better). 
+
+C Accuracy–Cost Curves 
+
+C.1 Small Pool 
+
+Figure 4: Small pool: raw accuracy vs. total cost ($). Figure 5: Small pool: normalized accuracy vs. normalized inverse cost. 
+
+C.2 Mixed Pool 
+
+Figure 6: Mixed pool: raw accuracy vs. total cost ($). Figure 7: Mixed pool: normalized accuracy vs. normalized inverse cost. 16

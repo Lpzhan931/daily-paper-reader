@@ -6,73 +6,64 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-24
-- 运行时间：2026-03-24 19:55:23 UTC
+- 最新运行日期：2026-03-25
+- 运行时间：2026-03-25 19:42:10 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：9
-- 速读区：8
+- 本次总论文数：14
+- 精读区：7
+- 速读区：7
 
 ### 今日简报（AI）
-今日深度解析 17 篇 AI 论文，重点攻克大模型推理效率瓶颈，两篇 10 分满分神作领衔 KV Cache 与自适应架构革新。
-核心结论指出 KV Cache 优化与 AE-LLM 框架是实现长文本高效推理的关键，而云边端协同路由则为多设备部署提供了新思路。
-建议开发者优先研读满分论文以掌握模型降本增效的底层逻辑，并关注 vLLM 语义路由等前沿工程实践。
-- 详情：[/202603/24/README](/202603/24/README)
+今日聚焦长文本推理与 KV 缓存压缩，深度解析 14 篇前沿论文，探索大模型效率极限。
+MKA 内存键注意力与 EchoKV 相似性重构技术，为解决长上下文推理的显存瓶颈提供了满分级的高效方案。
+建议优先关注 KV 缓存优化及动态稀疏交互技术，这是提升大模型端侧部署与长文本处理能力的关键。
+- 详情：[/202603/25/README](/202603/25/README)
 
 ### 精读区论文标签
-1. [KV Cache Optimization Strategies for Scalable and Efficient LLM Inference](/202603/24/2603.20397v1-kv-cache-optimization-strategies-for-scalable-and-efficient-llm-inference)  
+1. [MKA: Memory-Keyed Attention for Efficient Long-Context Reasoning](/202603/25/2603.20586v2-mka-memory-keyed-attention-for-efficient-long-context-reasoning)  
    标签：评分：10.0/10、query:llm
-   evidence：KV缓存优化技术的系统性综述
-2. [AE-LLM: Adaptive Efficiency Optimization for Large Language Models](/202603/24/2603.20492v1-ae-llm-adaptive-efficiency-optimization-for-large-language-models)  
+   evidence：多级KV缓存的分层注意力机制
+2. [EchoKV: Efficient KV Cache Compression via Similarity-Based Reconstruction](/202603/25/2603.22910v1-echokv-efficient-kv-cache-compression-via-similarity-based-reconstruction)  
    标签：评分：10.0/10、query:llm
-   evidence：自动选择和组合LLM效率优化技术的统一框架
-3. [MKA: Memory-Keyed Attention for Efficient Long-Context Reasoning](/202603/24/2603.20586v1-mka-memory-keyed-attention-for-efficient-long-context-reasoning)  
+   evidence：基于相似性重构的可扩展KV缓存压缩
+3. [PCR: A Prefetch-Enhanced Cache Reuse System for Low-Latency RAG Serving](/202603/25/2603.23049v1-pcr-a-prefetch-enhanced-cache-reuse-system-for-low-latency-rag-serving)  
    标签：评分：10.0/10、query:llm
-   evidence：提出分层KV缓存管理和路由机制，用于高效长文本推理
-4. [Beyond Token Eviction: Mixed-Dimension Budget Allocation for Efficient KV Cache Compression](/202603/24/2603.20616v1-beyond-token-eviction-mixed-dimension-budget-allocation-for-efficient-kv-cache-compression)  
+   evidence：RAG场景下共享输入前缀的KV缓存复用
+4. [Sparser, Faster, Lighter Transformer Language Models](/202603/25/2603.23198v1-sparser-faster-lighter-transformer-language-models)  
    标签：评分：10.0/10、query:llm
-   evidence：混合维度KV缓存压缩
-5. [ParallelVLM: Lossless Video-LLM Acceleration with Visual Alignment Aware Parallel Speculative Decoding](/202603/24/2603.19610v2-parallelvlm-lossless-video-llm-acceleration-with-visual-alignment-aware-parallel-speculative-decoding)  
+   evidence：非结构化稀疏和CUDA内核用于高效大模型推理
+5. [Scaling Attention via Feature Sparsity](/202603/25/2603.22300v1-scaling-attention-via-feature-sparsity)  
    标签：评分：9.0/10、query:llm
-   evidence：并行投机解码与视觉标记剪枝
-6. [CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands](/202603/24/2603.21257v1-calvo-improve-serving-efficiency-for-llm-inferences-with-intense-network-demands)  
+   evidence：扩展FlashAttention的FlashSFA内核用于稀疏特征
+6. [Characterizing CPU-Induced Slowdowns in Multi-GPU LLM Inference](/202603/25/2603.22774v1-characterizing-cpu-induced-slowdowns-in-multi-gpu-llm-inference)  
    标签：评分：9.0/10、query:llm
-   evidence：分布式前缀缓存与KV缓存加载优化
-7. [TIDE: Token-Informed Depth Execution for Per-Token Early Exit in LLM Inference](/202603/24/2603.21365v1-tide-token-informed-depth-execution-for-per-token-early-exit-in-llm-inference)  
+   evidence：分析LLM服务负载中的CPU瓶颈
+7. [SpecEyes: Accelerating Agentic Multimodal LLMs via Speculative Perception and Planning](/202603/25/2603.23483v1-speceyes-accelerating-agentic-multimodal-llms-via-speculative-perception-and-planning)  
    标签：评分：9.0/10、query:llm
-   evidence：逐Token早退机制加速推理
-8. [PRISM: Breaking the O(n) Memory Wall in Long-Context LLM Inference via O(1) Photonic Block Selection](/202603/24/2603.21576v1-prism-breaking-the-on-memory-wall-in-long-context-llm-inference-via-o1-photonic-block-selection)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于KV缓存获取的O(1)光子块选择技术
-9. [Chimera: Latency- and Performance-Aware Multi-agent Serving for Heterogeneous LLMs](/202603/24/2603.22206v1-chimera-latency--and-performance-aware-multi-agent-serving-for-heterogeneous-llms)  
-   标签：评分：9.0/10、query:llm
-   evidence：异构集群多智能体服务的预测性调度
+   evidence：智能体级投机加速框架，打破顺序执行瓶颈
 
 ### 速读区论文标签
-1. [ResPrune: Text-Conditioned Subspace Reconstruction for Visual Token Pruning in Large Vision-Language Models](/202603/24/2603.21105v1-resprune-text-conditioned-subspace-reconstruction-for-visual-token-pruning-in-large-vision-language-models)  
+1. [SIMPLER: Efficient Foundation Model Adaptation via Similarity-Guided Layer Pruning for Earth Observation](/202603/25/2603.19873v1-simpler-efficient-foundation-model-adaptation-via-similarity-guided-layer-pruning-for-earth-observation)  
    标签：评分：8.0/10、query:llm
-   evidence：用于高效推理的视觉标记剪枝
-2. [ConsRoute:Consistency-Aware Adaptive Query Routing for Cloud-Edge-Device Large Language Models](/202603/24/2603.21237v1-consrouteconsistency-aware-adaptive-query-routing-for-cloud-edge-device-large-language-models)  
+   evidence：基于相似度引导的层剪枝以实现高效基础模型
+2. [VISion On Request: Enhanced VLLM efficiency with sparse, dynamically selected, vision-language interactions](/202603/25/2603.23495v1-vision-on-request-enhanced-vllm-efficiency-with-sparse-dynamically-selected-vision-language-interactions)  
    标签：评分：8.0/10、query:llm
-   evidence：用于提高推理效率的自适应查询路由
-3. [The Workload-Router-Pool Architecture for LLM Inference Optimization: A Vision Paper from the vLLM Semantic Router Project](/202603/24/2603.21354v1-the-workload-router-pool-architecture-for-llm-inference-optimization-a-vision-paper-from-the-vllm-semantic-router-project)  
-   标签：评分：8.0/10、query:llm
-   evidence：vLLM语义路由推理优化与集群配置
-4. [Memori: A Persistent Memory Layer for Efficient, Context-Aware LLM Agents](/202603/24/2603.19935v1-memori-a-persistent-memory-layer-for-efficient-context-aware-llm-agents)  
+   evidence：通过稀疏化视觉-语言交互降低推理成本
+3. [LLM Router: Prefill is All You Need](/202603/25/2603.20895v1-llm-router-prefill-is-all-you-need)  
    标签：评分：7.0/10、query:llm
-   evidence：LLM智能体的高效上下文感知记忆层
-5. [WWW.Serve: Interconnecting Global LLM Services through Decentralization](/202603/24/2603.20661v1-wwwserve-interconnecting-global-llm-services-through-decentralization)  
+   evidence：利用Prefill激活进行高效路由
+4. [Demystifying Low-Rank Knowledge Distillation in Large Language Models: Convergence, Generalization, and Information-Theoretic Guarantees](/202603/25/2603.22355v1-demystifying-low-rank-knowledge-distillation-in-large-language-models-convergence-generalization-and-information-theoretic-guarantees)  
    标签：评分：7.0/10、query:llm
-   evidence：互联LLM服务的去中心化框架
-6. [Task-Specific Efficiency Analysis: When Small Language Models Outperform Large Language Models](/202603/24/2603.21389v1-task-specific-efficiency-analysis-when-small-language-models-outperform-large-language-models)  
+   evidence：通过知识蒸馏将LLM压缩为高效架构
+5. [Tiny Inference-Time Scaling with Latent Verifiers](/202603/25/2603.22492v1-tiny-inference-time-scaling-with-latent-verifiers)  
    标签：评分：7.0/10、query:llm
-   evidence：吞吐量与延迟的效率分析
-7. [Dual-Space Knowledge Distillation with Key-Query Matching for Large Language Models with Vocabulary Mismatch](/202603/24/2603.22056v1-dual-space-knowledge-distillation-with-key-query-matching-for-large-language-models-with-vocabulary-mismatch)  
-   标签：评分：7.0/10、query:llm
-   evidence：通过知识蒸馏训练更小且高效的学生模型
-8. [Nudging Hidden States: Training-Free Model Steering for Chain-of-Thought Reasoning in Large Audio-Language Models](/202603/24/2603.14636v1-nudging-hidden-states-training-free-model-steering-for-chain-of-thought-reasoning-in-large-audio-language-models)  
+   evidence：利用潜空间验证器进行推理时缩放以减少计算量
+6. [WWW.Serve: Interconnecting Global LLM Services through Decentralization](/202603/25/2603.20661v2-wwwserve-interconnecting-global-llm-services-through-decentralization)  
    标签：评分：6.0/10、query:llm
-   evidence：推理阶段的模型引导以提升推理效率
+   evidence：互联大模型服务的去中心化框架
+7. [SparseDVFS: Sparse-Aware DVFS for Energy-Efficient Edge Inference](/202603/25/2603.21908v1-sparsedvfs-sparse-aware-dvfs-for-energy-efficient-edge-inference)  
+   标签：评分：6.0/10、query:llm
+   evidence：通过稀疏感知的DVFS实现能效边缘推理
 
 
 <div class="dpr-home-promo-card">
