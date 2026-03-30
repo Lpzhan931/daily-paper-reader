@@ -1,0 +1,396 @@
+Title: TurboESM: Ultra-Efficient 3-Bit KV Cache Quantization for Protein Language Models with Orthogonal Rotation and QJL Correction
+
+URL Source: https://arxiv.org/pdf/2603.26110v1
+
+Published Time: Mon, 30 Mar 2026 00:33:49 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# TurboESM: Ultra-Efficient 3-Bit KV Cache Quantization for Protein Language Models with Orthogonal Rotation and QJL Correction 
+
+## Yue Hu 1 Junqing Wang 1 Yingchao Liu 2
+
+> 1
+
+School of Bioengineering, Qilu University of Technology (Shandong Academy of Sciences), No. 3501 Daxue Road, Jinan, Shandong, China 
+
+> 2
+
+Shandong Provincial Hospital, Shandong First Medical University 
+
+https://github.com/YueHuLab/TurboESM 
+
+## March 30, 2026 
+
+Abstract 
+
+The rapid scaling of Protein Language Models (PLMs) has unlocked unprecedented accuracy in protein structure prediction and design, but the quadratic memory growth of the Key-Value (KV) cache during inference remains a prohibitive barrier for single-GPU deployment and high-throughput generation. While 8-bit quantization is now standard, 3-bit quantization remains elusive due to severe numerical outliers in activations. This paper presents TurboESM , an adap-tation of Google’s TurboQuant to the PLM domain. We solve the fundamental incompatibility between Rotary Position Embeddings (RoPE) and orthogonal transformations by deriving a RoPE-first rotation pipeline. We introduce a head-wise SVD calibration method tailored to the amino acid activation manifold, a dual look-up table (LUT) strategy for asymmetric K/V distributions, and a 1-bit Quantized Johnson-Lindenstrauss (QJL) residual correction. All ex-periments are conducted on ESM-2 650M, where our implementation achieves a 7.1 × memory reduction (330 MB → 47 MB) while maintaining cosine similarity > 0.96 in autoregressive de-coding across diverse protein families including short peptides, transmembrane helices, enzyme active site fragments, and intrinsically disordered regions. We further implement a Triton-based fused decode attention kernel that eliminates intermediate dequantization memory allocations, achieving a 1.96 × speedup over the PyTorch two-step path for the KV fetch operation alone; however, TurboESM incurs a prefill overhead of 21–27 ms relative to the original model due to KV quantization and packing, making it most suitable for memory-bound scenarios rather than latency-critical short-sequence workloads. Analysis reveals that PLMs exhibit sharper outlier profiles than large language models (LLMs) due to amino acid vocabulary sparsity, and our method effectively addresses these distributions. 
+
+1
+
+> arXiv:2603.26110v1 [q-bio.QM] 27 Mar 2026
+
+# 1 Introduction 
+
+Protein Language Models (PLMs) have revolutionized the field of computational biology by learning the “grammar” of life directly from amino acid sequence data. ESM-2, developed by Meta FAIR [ 1 ], has become the industry standard for generating high-quality protein embeddings, supporting downstream tasks ranging from secondary structure prediction to protein–protein interaction docking. As these models scale to tens of billions of parameters, deployment efficiency becomes a first-class research concern alongside accuracy. During autoregressive generation or long-sequence processing, the Key-Value (KV) cache stores the attention states computed at each layer for all past tokens, allowing them to be reused without recomputation. This mechanism is essential for efficient inference, but its memory footprint grows quadratically with context length, making large-scale PLM deployment increasingly challenging as model size grows. Quantization is the natural solution to this memory pressure. By representing activations in fewer bits, the KV cache size can be reduced proportionally. 8-bit (INT8) quantization is now widely adopted with minimal accuracy degradation. However, 3-bit quantization—which would yield a theoretical ∼10 × compression—remains elusive for Transformer models because their activations are far from uniformly distributed. They contain “outlier” dimensions with values several orders of magnitude larger than the mean, which consume the entire dynamic range of a coarse quantizer and force the remaining 99% of values into a tiny cluster of quantization bins, effectively destroying the information they carry. In PLMs, these outliers are even more pronounced than in natural language LLMs. The amino acid vocabulary contains only 20 standard residues (compared to >32,000 tokens in typical LLMs). This sparsity produces “spiky” activation patterns where certain channels consistently encode biologically critical features—conserved motifs, hydrophobic patches, or global sequence properties such as overall charge or length. Quantizing over such distributions without special treatment inevitably leads to catastrophic information loss at critical biological loci. Google recently introduced TurboQuant [ 2], which addresses the outlier problem using an orthogonal matrix Π to rotate the activation space. This transformation spreads the energy of outliers uniformly across all dimensions, resulting in a distribution that closely approximates an isotropic Gaussian—the ideal target for any fixed-point quantizer. However, PLMs like ESM-2 use Rotary Position Embeddings (RoPE) [ 3], which encode positional information by applying a position-dependent rotation Rθ,i to each query-key pair before computing attention scores. The interplay between RoPE’s position-dependent rotation and TurboQuant’s data-driven feature rotation creates a non-trivial mathematical compatibility problem that, to our knowledge, has not been previously addressed. In this paper, we present TurboESM , which makes the following concrete contributions: 1. RoPE-invariant orthogonal transformation : We derive the correct operation ordering (RoPE before Π) and prove that it preserves exact attention equivalence via the inner-product invariance of orthogonal matrices. 2. Head-wise SVD calibration : We compute a unique Π matrix per layer per attention head using SVD on real protein activations, capturing the distinct biological features encoded by each head. 23. Dual K/V LUT design : We calibrate independent 8-point Lloyd-Max look-up tables for keys (in the rotated space) and values (in the original space), recovering 1.2 dB of SNR over a shared LUT. 4. QJL 1-bit residual correction : We store the sign of the quantization residual (1 bit per element) and apply a first-order correction at decode time, reaching 4-bit-equivalent accuracy at 3.125-bit effective cost. 5. Triton fused decode kernel : We implement and validate a single CUDA kernel that merges 3-bit unpacking, QJL residual correction, and Flash-Attention-style online softmax into one pass, achieving a 1.96 × speedup over PyTorch for the KV fetch operation. We note that TurboESM adds prefill latency overhead of 21–27 ms and is primarily beneficial in memory-bound, not latency-bound, settings. 6. Comprehensive empirical validation : We provide end-to-end accuracy measurements across six biologically diverse protein families on both Mac MPS (CPU-compatible) and NVIDIA GPU (CUDA) platforms, with cosine similarity consistently exceeding 0.96 at decode. The remainder of this paper is organized as follows. Section 2 reviews background on ESM-2 and the outlier problem in protein activations. Section 3 details the TurboESM methodology. Section 4 describes implementation details including vectorized quantization and the Triton kernel. Section 5 presents experimental results. Section 6 discusses the broader implications and differences between PLMs and LLMs. Section 7 concludes with future directions. 
+
+# 2 Background and Motivation 
+
+## 2.1 The ESM-2 Architecture 
+
+ESM-2 [ 1] is a family of protein language models trained on the UniRef50 and UniRef90 databases using a masked language modeling objective. The models range from 8M to 15B parameters and follow the standard Transformer encoder architecture with a key modification: Rotary Position Embeddings (RoPE) replace the conventional learned absolute position embeddings. In this work we focus on ESM-2 650M as our experimental platform. In RoPE, the query vector qi and key vector kj at positions i and j, respectively, are transformed by position-dependent rotation matrices before computing attention: Attention (qi, k j ) = (Rθ,i qi)T (Rθ,j kj )
+
+√dk
+
+(1) where Rθ,i is a block-diagonal matrix composed of 2 × 2 rotation blocks parameterized by frequency θ and position i:
+
+Rθ,i = diag 
+
+ cos iθ 1 − sin iθ 1
+
+sin iθ 1 cos iθ 1
+
+
+
+, . . . , 
+
+cos iθ d/ 2 − sin iθ d/ 2
+
+sin iθ d/ 2 cos iθ d/ 2
+
+ 
+
+(2) The key mathematical property exploited by RoPE is that the inner product (Rθ,i qi)T (Rθ,j kj ) = 
+
+qTi RTθ,i Rθ,j kj depends only on the relative position j − i, providing translational equivariance. Any 3quantization scheme that modifies the KV cache must preserve this property to maintain fidelity in long-sequence scenarios. For ESM-2 650M (33 transformer layers, 20 attention heads of dimension 64, total hidden dimension 1280), the FP32 KV cache for a single sequence of 1024 tokens occupies: KV cache size = 2 × 33 × 20 × 64 × 1024 × 4 bytes ≈ 330 MB (3) This footprint, while manageable for a single sequence, grows linearly with batch size and quadratically with sequence length, motivating aggressive compression for high-throughput work-loads. 
+
+## 2.2 Outliers in Protein Activations 
+
+Unlike natural language processing, where the vocabulary size typically exceeds 32,000 tokens with relatively smooth frequency distributions, PLMs operate on a vocabulary of only 20 standard amino acids plus a handful of special tokens. This severe sparsity has a profound effect on the statistical properties of internal activations. Our analysis of ESM-2 650M activations reveals several characteristic outlier patterns (qualita-tively consistent with what has been reported for other large PLMs, and expected to intensify with model scale): 
+
+Channel-wise outliers : Certain embedding dimensions consistently exhibit values 10–100 ×
+
+larger than the median across all sequences and positions. These “anchor” channels appear to encode global sequence properties such as overall hydrophobicity, charge, or predicted structural class. 
+
+Motif-specific spikes : Biologically critical subsequences—disulfide bond-forming cysteines, catalytic triad residues in enzymes, conserved hydrophobic cores—produce localized activation spikes that are extremely high in magnitude relative to the background. 
+
+Layer-dependent profiles : Outlier severity increases with model depth. In ESM-2 650M, early layers exhibit relatively mild outliers, while later layers (especially layers 25–33) show substantially elevated outlier-to-median ratios, motivating the need for distribution-shaping prior to quantization. The consequence for 3-bit quantization is severe. With only 23 = 8 quantization levels, a linear quantizer must span the entire range from minimum to maximum value. When this range is dominated by a handful of outliers at ±50 σ while 99% of values cluster within ±2σ, the effective resolution for the main distribution drops below 1 bit—essentially random quantization noise. This analysis motivates the need for a distribution-shaping step prior to quantization. Rotation by an orthogonal matrix Π is mathematically ideal because it: (i) preserves inner products, so attention scores are unaffected; (ii) redistributes variance uniformly across dimensions, converting heavy-tailed distributions to approximate Gaussians; (iii) requires no scaling or normalization, avoiding additional hyperparameters. 
+
+## 2.3 Related Work 
+
+KV cache compression for LLMs : Several methods have been proposed to reduce KV cache mem-ory in large language models. GPTQ [ 5] applies group-wise quantization with second-order error correction. KVQuant [ 6] explores mixed-precision quantization with outlier handling. QuIP# [ 7]uses incoherence processing with Hadamard rotations. TurboQuant [ 2 ] introduces SVD-based 4orthogonal rotations with Lloyd-Max quantization. To our knowledge, TurboESM is the first adaptation of rotation-based KV quantization to the PLM domain. 
+
+PLM inference efficiency : StreamingLLM [ 8 ] and H 2O [ 9] propose token eviction strategies, which are complementary to compression. SpecInfer [ 10 ] uses speculative decoding. None of these address the fundamental memory footprint of the stored KV states at sub-4-bit precision. 
+
+Protein-specific quantization : Quantization of PLMs has primarily focused on weight compres-sion rather than KV cache. SparseGPT-style magnitude pruning has been applied to ESM-2 weights, but again does not address the inference-time KV cache bottleneck. 
+
+# 3 TurboESM Methodology 
+
+## 3.1 RoPE-Invariant Orthogonal Transformation 
+
+The central technical challenge of TurboESM is combining the learnable orthogonal rotation Π
+
+with the position-dependent RoPE rotation Rθ,i in a way that (a) effectively smooths the activation distribution and (b) preserves the attention score invariance required for correct decoding. 
+
+The incompatibility problem : If we apply Π before RoPE, the rotation mixes the dimension pairs that RoPE expects to operate on independently. Specifically, RoPE applies a 2 × 2 rotation to dimensions (2 m, 2m + 1) for m = 0 , 1, . . . , d/ 2 − 1. After a general orthogonal transformation Π,these pairs are scrambled, and the positional encoding is destroyed. Conversely, if we apply Π after RoPE, both rotations act on the same vector but in a compatible sequence. The crucial observation is the following identity: 
+
+(Π Rθ,i qi)T (Π Rθ,j kj ) = qTi RTθ,i ΠT Π| {z } 
+
+> =I
+
+Rθ,j kj = qTi RTθ,i Rθ,j kj (4) Since Π is orthogonal ( ΠT Π = I), the attention score is exactly preserved regardless of the choice of Π. This identity is the mathematical foundation of TurboESM. 
+
+Operational pipeline : During the prefill stage (processing the full input sequence), we compute: 1. Apply RoPE to queries and keys: q′ 
+
+> i
+
+= Rθ,i qi, k′ 
+
+> j
+
+= Rθ,j kj
+
+2. Compute attention in full precision using q′ 
+
+> i
+
+and k′ 
+
+> j
+
+: the prefill output is identical to the original model (cosine similarity = 1.0000) 3. Apply Π to keys for cache storage: ˆkj = Π k′
+
+> j
+
+4. Quantize and pack ˆkj into the 3-bit KV cache During the decode stage (generating one token at a time): 1. Unpack and dequantize ˆkj from the 3-bit cache 2. Apply QJL residual correction to ˆkj
+
+3. Apply ΠT to reconstruct k′ 
+
+> j
+
+≈ ΠT ˆkj
+
+54. Compute attention between the current (full-precision, RoPE-applied) query and the recon-structed keys This pipeline guarantees zero-loss prefill and minimizes decode error through the combination of optimal quantization and residual correction described in subsequent sections. 
+
+## 3.2 Head-Wise SVD Calibration 
+
+Rather than using a single global rotation matrix or a random Hadamard matrix (as in QuIP#), TurboESM derives Π from the actual data distribution using Singular Value Decomposition (SVD). This data-driven approach is critical because different attention heads in ESM-2 specialize in different biological functions and therefore have distinct activation statistics. 
+
+Calibration procedure : For each layer l ∈ { 1, . . . , L } and each attention head h ∈ { 1, . . . , H }:1. Run a forward pass on a calibration set of protein sequences covering diverse structural classes (alpha helices, beta sheets, disordered regions, transmembrane segments) 2. Collect the post-RoPE key activations Xl,h ∈ RNcal ×dk , where Ncal is the total number of tokens in the calibration set 3. Compute the SVD: Xl,h = U ΣV T
+
+4. Set Πl,h = V T
+
+The matrix V contains the right singular vectors of Xl,h , which are the principal directions of variation in the key activation space. By choosing Πl,h = V T , we perform a change of basis that aligns the coordinate system with the principal components of the data. After this rotation, the variance along each dimension is equalized: the resulting distribution Πl,h Xl,h is approximately isotropic, with variance σ2/d k per dimension (where σ2 is the total variance). The reason for per-head calibration is well-motivated by the known specialization of attention heads in protein models. Empirical studies have shown that in ESM-2, certain heads attend to local secondary structure patterns (helices, sheets), others to global properties (hydrophobicity profiles, contact maps), and others to positional patterns. These functionally distinct heads naturally have different activation covariance structures, and a single global Π would be suboptimal for all of them. Calibration on the ESM-2 650M model (33 layers, 20 heads) takes approximately 2–5 minutes on a standard GPU and produces a checkpoint file of approximately 200 MB containing all L × H
+
+rotation matrices, dual LUTs, and residual scales. 
+
+## 3.3 3-Bit Lloyd-Max Quantization with Dual Look-Up Tables 
+
+Standard uniform (linear) quantization places quantization levels at equal intervals across the input range. For Gaussian distributions, this is known to be suboptimal: levels in the tails are wasted because they rarely represent actual values, while the central region has insufficient resolution. The Lloyd-Max algorithm [ 4] solves this by iteratively optimizing the placement of quantization levels to minimize mean squared reconstruction error: 6min  
+
+> {c1,...,c 2b},{t1,...,t 2b−1}
+
+X
+
+> i
+
+E
+
+h x − cbin (x)
+
+2i
+
+(5) where ck are the reconstruction levels (LUT entries), tk are the decision thresholds, and bin (x)
+
+maps each input to its nearest quantization bin. For b = 3 bits, this yields 8 optimally placed levels for a Gaussian distribution. 
+
+Dual LUT design : A critical empirical finding of TurboESM is that the key (K) and value (V) matrices in ESM-2 have significantly different statistical distributions, even after the Π rotation: • Key distribution (post-rotation) : After applying Π, the K activations approximate an isotropic Gaussian with moderate variance. The distribution remains slightly heavy-tailed due to residual outliers not fully captured by the rotation. • Value distribution (original space) : The V activations are substantially “colder” (lower variance, kurtosis near 3.0) than the K activations. V matrices in transformers tend to encode diffuse, aggregated information, while K matrices encode sharp discriminative features. Using a shared LUT for both K and V (as would be natural in a uniform quantization scheme) forces a compromise that degrades SNR by approximately 1.2 dB compared to calibrating separate LUTs. TurboESM therefore maintains two distinct 8-entry LUTs: • lut k : calibrated on post-rotation key activations Πk′
+
+• lut v : calibrated on original value activations v (no rotation applied to V) The LUT indices (3-bit integers) are stored in the packed cache format, and the actual floating-point reconstruction values are kept in a small lookup table of 8 entries per head, totaling negligible memory overhead. 
+
+## 3.4 QJL 1-Bit Residual Correction 
+
+Even with optimal Lloyd-Max quantization, a 3-bit quantizer introduces non-negligible reconstruc-tion error, particularly for token positions that fall in high-gradient regions of the activation space. To recover accuracy without significantly increasing memory cost, we implement a Quantized Johnson-Lindenstrauss (QJL) residual correction scheme. 
+
+Principle : For each stored activation value x with LUT reconstruction ˆx, we define the residual 
+
+e = x − ˆx. Rather than storing the residual at full precision (which would double the memory cost), we store only its sign: 
+
+s = sign (x − ˆx) ∈ {− 1, +1 } (6) At reconstruction time, we apply a correction: 
+
+˜x = ˆ x + s · ¯e (7) where ¯e is the pre-calibrated mean absolute residual magnitude for each head, stored as a scalar per head (negligible memory). This first-order correction effectively biases the reconstruction in the correct direction, reducing the expected squared error by approximately ¯e2 per element. 7Memory analysis : The sign bits are packed 32 per INT32, contributing 1 bit per element. Combined with the 3-bit quantized index, the total effective bit-width is 3.125 bits per element. This compares favorably to 4-bit quantization (which would require 2× more LUT entries and still have higher error than our corrected 3-bit scheme for Gaussian distributions). 
+
+Correctness validation : We validated the QJL correction across all 33 layers of ESM-2 650M on a Mac MPS platform, confirming that the correction is monotonically beneficial: removing it consistently drops cosine similarity by 0.01–0.02 across tested sequences. 
+
+# 4 Implementation Details 
+
+## 4.1 Software Architecture 
+
+TurboESM is implemented as a standalone Python package ( esm turbo ) built on top of Hugging-Face Transformers. The key modules are: • modeling esm turbo.py : Modified ESM-2 self-attention module ( TurboEsmSelf-Attention ) that applies the Π rotation after RoPE and dispatches to either the PyTorch or Triton decode path. • kv cache.py : 3-bit KV cache management with vectorized packing/unpacking and QJL sign storage. • calibrate.py : SVD + K-means calibration pipeline producing Π matrices and dual LUTs. • triton kernels.py : Triton CUDA kernel for fused dequantization and decode attention. • turbo esm.py : Unified inference entry point. The design prioritizes portability: all operations have a pure PyTorch fallback path (for Mac MPS or CPU environments) and an accelerated Triton path (for CUDA environments). The Triton path is enabled automatically via a runtime device check. 
+
+## 4.2 Vectorized 3-Bit Packing 
+
+The original implementation used Python for-loops to pack 3-bit indices into INT32 containers, which introduced substantial overhead ( ∼63 ms per prefill for a 33-layer model on a 143-token sequence). We rewrote the packing and unpacking operations as vectorized PyTorch operations using torch.arange and broadcast bitshift:                           
+
+> 1#Vectorized pack: 8 indices per INT32
+> 2#idx: [N, 8], each value in [0, 7]
+> 3shifts =torch.arange(8, device=idx.device) *3 # [8]
+> 4packed =(idx << shifts).sum(dim=-1) # [N]
+> 56#Vectorized unpack
+> 7shifts =torch.arange(8, device=packed.device) *3
+> 8idx =(packed.unsqueeze(-1) >> shifts) & 0x7 # [N, 8]
+
+8This vectorized implementation reduces prefill quantization overhead from ∼63 ms to ∼21 ms for a 33-layer, 143-token sequence—a 3 × speedup achieved purely through better use of PyTorch’s native CUDA kernels. Additionally, we merged the quantization (argmin against LUT) and residual sign computation into a single forward pass, eliminating redundant distance computations that previously doubled the floating-point operations. 
+
+## 4.3 Triton Fused Decode Attention Kernel 
+
+The decode stage is fundamentally memory-bandwidth bound: the bottleneck is loading the large KV cache from GPU global memory. Standard PyTorch implementations dequantize the entire KV cache into FP16 tensors before computing attention, requiring two full passes over global memory (one for dequantization, one for attention). Our Triton kernel fuses these operations into a single pass using the following structure: 
+
+Algorithm 1 TurboESM Fused Decode Kernel (per layer, per head)  
+
+> 1:
+
+Load current query q (full precision)  
+
+> 2:
+
+Initialize online softmax accumulators: m = −∞ , s = 0 , o = 0 
+
+> 3:
+
+for each block of cached tokens do  
+
+> 4:
+
+Load packed 3-bit K block from global memory  
+
+> 5:
+
+Load QJL sign bits for K block  
+
+> 6:
+
+Dequantize: ˆk = LUT K [idx ] + sign · ¯ek (in registers)  
+
+> 7:
+
+Apply ΠT : k = Π T ˆk (in registers)  
+
+> 8:
+
+Compute attention logit: a = qT k/ √dk 
+
+> 9:
+
+Update online softmax: (m, s, o ) ← update (m, s, o, a, v ) 
+
+> 10:
+
+Load packed 3-bit V block, dequantize V: v = LUT V [idx v] + sign v · ¯ev 
+
+> 11:
+
+Accumulate: o += softmax (a) · v 
+
+> 12:
+
+end for  
+
+> 13:
+
+Return o/s (normalized output) The key optimization is that the dequantized K and V tensors are computed in CUDA registers and never written to global memory. This “streaming dequantization” approach eliminates the intermediate memory allocation of approximately 2 × dk × Tctx × 2 bytes (FP16) per head per decode step, where Tctx is the current context length. We validated this kernel against the PyTorch two-step reference implementation across all 33 layers of ESM-2 650M on an NVIDIA GPU. The maximum absolute error was below 10 −6 (at the FP32 precision floor), confirming numerical equivalence. 
+
+## 4.4 Compatibility and Deployment 
+
+TurboESM supports two deployment modes: 
+
+Mac MPS / CPU mode : All operations use pure PyTorch with MPS acceleration where available. This mode enables development and validation on Apple Silicon hardware without requiring a CUDA environment. Functional correctness is fully verified in this mode. 9CUDA mode : The Triton kernel path is enabled automatically. This mode is recommended for production deployment and provides the benchmark results reported in Section 5. Installation requires only torch , transformers , and scipy . The Triton package is op-tional and only needed for the CUDA acceleration path. 
+
+# 5 Experimental Results 
+
+## 5.1 Accuracy: Prefill and Decode Similarity 
+
+We evaluate TurboESM’s accuracy by comparing its output to the original ESM-2 650M model using cosine similarity of the final hidden states. We test on six biologically diverse sequences spanning different structural and compositional categories. 
+
+5.1.1 Results on Mac MPS Platform 
+
+Table 1 summarizes the accuracy results on Mac MPS. Table 1: Cosine similarity on Mac MPS (ESM-2 650M). Prefill similarity is 1.0000 for all sequences (exact match with original model). Decode target: > 0.95 .
+
+Sequence Type Example Length Prefill Decode 
+
+Short peptide Insulin B-chain 32 1.0000 0.9603 Medium globular Hemoglobin α 143 1.0000 0.9639 Hydrophobic transmembrane TM helix 39 1.0000 0.9710 Low-complexity repeat poly-A/G repeat 38 1.0000 0.9735 Enzyme active site fragment Serine protease 51 1.0000 0.9641 IDR disordered long sequence FUS/TLS IDR 165 1.0000 0.9757 
+
+Average 1.0000 0.9681 
+
+Key observations: • Prefill similarity is exactly 1.0000 for all sequences . This confirms that the RoPE-invariant pipeline introduces zero error in the prefill stage, since attention is computed with full-precision KV before quantization. • Decode similarity exceeds 0.96 for all tested sequences , comfortably above our target of 0.95. The average is 0.968. • The intrinsically disordered region (IDR) sequence achieves the highest decode similarity (0.9757) despite being the longest sequence (165 tokens), which is somewhat counterintuitive. This may reflect that disordered sequences have smoother activation distributions compared to structured proteins with sharp motif-specific spikes. • Hydrophobic transmembrane helices, which one might expect to be challenging due to their extreme hydrophobic composition, achieve 0.9710—well within target. 10 5.1.2 Results on NVIDIA GPU (Colab CUDA) 
+
+Table 2 shows CUDA validation results. Table 2: Prefill cosine similarity on NVIDIA GPU (ESM-2 650M, CUDA). All sequences achieve exact prefill match. 
+
+Sequence Type Length Prefill Similarity 
+
+Short peptide (Insulin B-chain) 32 1.000000 
+
+Medium globular (Hemoglobin α) 143 1.000000 
+
+Long sequence (IDR disordered) 165 1.000000 5.1.3 Triton Kernel Correctness Validation 
+
+Table 3 shows the layer-wise validation of the Triton fused kernel against the PyTorch reference across all 33 layers. Table 3: Triton fused decode attention kernel validation (ESM-2 650M, 33 layers, CUDA). 
+
+Metric Value 
+
+Mean cosine similarity (all layers) 1.000000 Max absolute error < 10 −6
+
+Layers validated 33 / 33 The maximum absolute error of < 10 −6 is at the FP32 arithmetic precision floor, confirming that the Triton kernel is numerically equivalent to the PyTorch reference implementation. 
+
+## 5.2 Memory Compression 
+
+5.2.1 ESM-2 650M (33 layers, 20 heads, dk = 64 )
+
+Table 4 shows the detailed memory breakdown for ESM-2 650M with maximum sequence length 1024. Table 4: KV cache memory breakdown for ESM-2 650M (max seq=1024, CUDA). 
+
+Component Memory 
+
+FP32 KV cache (baseline) 330.0 MB 3-bit packed K + V 41.2 MB 1-bit QJL signs 5.2 MB LUT + Π matrices <0.2 MB 
+
+TurboESM total 46.6 MB Actual compression ratio 7.1 ×
+
+11 The 7.1 × compression ratio slightly exceeds the theoretical 32 /4.5 ≈ 7.1× (FP32 to 3.125-bit effective), confirming that the implementation correctly achieves the theoretical bound. 
+
+## 5.3 Latency Performance 
+
+5.3.1 Prefill Latency 
+
+Table 5 shows prefill latency for TurboESM versus the original ESM-2 650M on NVIDIA GPU. Table 5: Prefill latency comparison (ESM-2 650M, NVIDIA GPU). 
+
+Sequence Tokens Original TurboESM Overhead 
+
+Short peptide 32 31 ms 57 ms +26 ms Medium globular 143 77 ms 104 ms +27 ms Long IDR 165 82 ms 103 ms +21 ms The prefill overhead of ∼21–27 ms is due to the additional KV quantization and packing step across 33 layers. The Π rotation and attention computation add only ∼2 ms (negligible). Importantly, TurboESM is slower than the original model during prefill across all tested sequence lengths; the overhead fraction decreases with sequence length but does not disappear. For PLM workloads dominated by embedding extraction (prefill-only), this overhead is a real cost that practitioners should weigh against the memory savings. 
+
+5.3.2 Triton Decode Kernel Speedup 
+
+Table 6 shows the performance comparison between the PyTorch and Triton decode paths. Table 6: Decode stage performance: PyTorch vs. Triton fused kernel (ESM-2 650M, 143-token context). 
+
+Operation PyTorch Triton Speedup 
+
+fetch unpacked (143 tokens) 1.19 ms 0.61 ms 1.96 ×
+
+Full decode attention two-step single fused eliminates intermediate memory The 1.96 × speedup applies specifically to the fetch unpacked operation (KV dequantization and ΠT rotation). This is a partial, not end-to-end, speedup: the overall decode step also includes full-precision attention computation and feed-forward layers that are unchanged. For the short protein sequences typical in ESM-2 workloads (32–165 tokens), the KV fetch is not the dominant cost, so the practical end-to-end benefit is limited. The primary value of the Triton kernel is the elimination of intermediate FP16 tensor allocations ( ∼2dkTctx floats per head per step), which reduces peak memory pressure during decoding. 
+
+## 5.4 Ablation Study: Contribution of Each Component 
+
+Table 7 presents an ablation study measuring the contribution of each TurboESM component to decode cosine similarity on the hemoglobin α sequence (143 tokens). 12 Table 7: Ablation study on ESM-2 650M (Hemoglobin α, 143 tokens, Mac MPS). 
+
+Configuration Decode Similarity ∆ vs. Full 
+
+Full TurboESM 0.9639 —No QJL correction ∼0.950 −0.014 
+
+Shared K/V LUT ∼0.952 −0.012 
+
+No Π rotation ∼0.780 −0.184 
+
+No Π, no QJL ∼0.740 −0.224 
+
+The most impactful component is the Π rotation: removing it causes a dramatic drop from 0.964 to 0.780 cosine similarity. This confirms our theoretical analysis that outlier suppression through orthogonal rotation is the fundamental enabler of 3-bit quantization quality. The QJL correction and dual LUT each contribute approximately 1–1.5 percentage points, which may seem small but is significant in the context of biological validity—a 0.014 similarity improvement can correspond to the difference between correct and incorrect predicted contact maps for structured proteins. 
+
+# 6 Discussion 
+
+## 6.1 PLMs vs. LLMs: Structural Differences in Activation Distributions 
+
+While 3-bit KV cache quantization has been explored in the LLM domain (e.g., for Llama-3 and Mistral models), PLMs present qualitatively different challenges that motivate the specific design choices in TurboESM. 
+
+Vocabulary sparsity : LLMs operate on vocabularies of 32,000–200,000 tokens, leading to relatively smooth token frequency distributions and accordingly smoother activation statistics. PLMs use only 20 amino acids, producing extremely concentrated, bimodal, or multimodal activation distributions. In our ESM-2 650M measurements, outlier-to-median ratios for key activations in later layers reach 50–200 ×, compared to typical values of 10–50 × in LLMs. 
+
+Structural encoding : ESM-2’s internal representations explicitly encode protein structure through mechanisms like contact prediction attention heads. These structural heads have particularly sharp outlier profiles because they must distinguish between “contacts” and “non-contacts” with high specificity. Quantization errors in these heads propagate to downstream structure predictions. 
+
+Π matrix stability : We found empirically that the optimal Π matrices in PLMs are more sensitive to calibration data selection than in LLMs. Specifically: • Calibrating on only α-helical proteins and then applying to β-sheet proteins drops decode similarity by ∼0.02 • A mixture of sequences from different SCOP (Structural Classification of Proteins) classes achieves the best generalization • Layer-to-layer variation in Π quality is larger in PLMs: later layers require more calibration samples to converge. In our 650M experiments, layers beyond layer 25 showed notably higher sensitivity to calibration set composition. 13 We recommend using at least 500 sequences covering all major SCOP classes for calibration, with overrepresentation of rare structural topologies (TIM barrels, beta-propellers) to ensure robustness. 
+
+Biological sensitivity of errors : In natural language, a quantization error that corrupts a word embedding slightly degrades fluency but rarely changes the semantic content dramatically. In proteins, a quantization error at a catalytic residue or a cysteine involved in a disulfide bond can shift the entire attention pattern in structure-encoding heads, potentially causing the model to produce embeddings that incorrectly represent the protein’s fold. This motivates maintaining higher accuracy (cosine similarity >0.96) than might be acceptable for LLMs. 
+
+## 6.2 Use Case Analysis 
+
+Table 8 summarizes recommended use cases for TurboESM based on our experimental findings. Table 8: TurboESM use case recommendations. 
+
+Scenario Recommendation Notes 
+
+ESM-2 15B single-GPU deployment Projected benefit (un-validated) KV cache: 7.7 GB → 1.1 GB (arithmetic extrapolation; not yet tested on hardware) Autoregressive protein gen-eration Conditionally benefi-cial Triton kernel reduces KV fetch cost; end-to-end speedup limited for short sequences Long-sequence ( >512 aa) sliding window Recommended Memory savings critical; KV cache dominates footprint ESM-2 650M embedding extraction Not recommended Prefill overhead of 21–27 ms with no speed benefit; mem-ory savings small The key takeaway is that TurboESM’s value proposition is primarily about memory, not speed. TurboESM incurs prefill latency overhead and offers limited end-to-end speedup for the short sequences typical in PLM workloads. Its benefit is most pronounced in memory-constrained scenarios—large-model deployment, long-sequence retention, or high-throughput batching—where the 7.1 × KV cache reduction enables workloads that would otherwise be infeasible. 
+
+## 6.3 Limitations and Future Work 
+
+Current limitations :• All experiments are conducted on ESM-2 650M; validation on larger PLM variants remains as future work. • The Triton kernel currently targets single-batch decode; multi-batch decode requires further engineering. 14 • Calibration dataset selection requires domain expertise to ensure coverage of relevant structural classes. 
+
+Future directions :• 2-bit quantization with grouped outlier handling : Extending to 2-bit would yield ∼16 ×
+
+compression. We anticipate this will require a hybrid approach that keeps the top-1% outlier channels in 8-bit while applying our method to the remaining 99%. • Integration with ESMFold : Applying TurboESM to the ESMFold structure prediction pipeline, where the KV cache affects the quality of predicted coordinates. • Autoregressive protein design end-to-end test : Validating that compressed KV cache does not degrade the quality of de novo protein sequences generated by ESM-2 in autoregressive mode. • Systematic comparison against INT8 baseline : Providing a complete Pareto curve of accuracy vs. memory across INT8, INT4, and our 3-bit TurboESM, to help practitioners make informed choices. • Hardware-specific optimization : Targeting H100 NVLink architectures where inter-GPU communication bandwidth for KV cache transfer is the bottleneck in multi-GPU inference. 
+
+# 7 Conclusion 
+
+We have presented TurboESM, the first adaptation of rotation-based KV cache quantization to protein language models. Our key contributions are: (1) a mathematically rigorous derivation of the RoPE-invariant orthogonal transformation pipeline; (2) head-wise SVD calibration tailored to the amino acid activation manifold; (3) a dual K/V LUT strategy that captures the distinct statistical properties of key and value activations; (4) QJL 1-bit residual correction that brings effective bit-width to 3.125 bits; and (5) a Triton-based fused decode attention kernel validated across all 33 layers with < 10 −6 error. Our experimental results demonstrate that TurboESM achieves 7.1 × compression of the KV cache with cosine similarity consistently exceeding 0.96 in the decode stage across diverse protein families, all validated on ESM-2 650M. Beyond the immediate engineering contribution, TurboESM demonstrates that the mathematical techniques developed for LLM quantization (orthogonal rotations, data-driven calibration, online softmax kernels) can be successfully adapted to the protein language model domain with appropriate modifications that respect the structural properties of amino acid sequences. We hope this work lowers the barrier to deploying large PLMs in resource-constrained environments and stimulates further research at the intersection of quantization theory and structural biology. 
+
+# AI Ethics and Usage Disclosure 
+
+This project represents a collaboration between human engineering judgment and AI-assisted implementation. Code components including Triton kernels and vectorized quantization routines 15 were drafted with AI assistance and subsequently verified and validated by the authors through layer-wise numerical testing. The authors maintain full responsibility for the technical accuracy of all implementations and findings presented herein. All protein sequences used for calibration and evaluation are sourced from public databases (UniRef50, PDB) and used in compliance with their respective terms of use. No biological sequences were synthesized or used in a manner that violates biosafety guidelines. 
+
+# References 
+
+[1] Lin, Z., Akin, H., Rao, R., Hie, B., Zhu, Z., Lu, W., ... & Rives, A. (2023). Evolutionary-scale prediction of atomic-level protein structure with a language model. Science , 379(6637), 1123–1130. [2] Google Research. (2025). TurboQuant: Accurate KV Cache Quantization with Rotation and Outlier-Free Quantization. arXiv preprint arXiv:2504.19874 .[3] Su, J., Ahmed, M., Lu, Y., Pan, S., Bo, W., & Liu, Y. (2024). RoFormer: Enhanced Transformer with Rotary Position Embedding. Neurocomputing , 568, 127063. [4] Lloyd, S. P. (1982). Least squares quantization in PCM. IEEE Transactions on Information Theory , 28(2), 129–137. [5] Frantar, E., Ashkboos, S., Hoefler, T., & Alistarh, D. (2022). GPTQ: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323 .[6] Hooper, C., Kim, S., Mohammadzadeh, H., Mahoney, M. W., Shao, Y. S., Keutzer, K., & Gholami, A. (2024). KVQuant: Towards 10 million context length LLM inference with KV cache quantization. arXiv preprint arXiv:2401.18079 .[7] Tseng, A., Chee, J., Sun, Q., Kuleshov, V., & De Sa, C. (2024). QuIP#: Even better LLM quan-tization with Hadamard incoherence and lattice codebooks. arXiv preprint arXiv:2402.04396 .[8] Xiao, G., Tian, Y., Chen, B., Han, S., & Lewis, M. (2024). Efficient streaming language models with attention sinks. arXiv preprint arXiv:2309.17453 .[9] Zhang, Z., Sheng, Y., Zhou, T., Chen, T., Zheng, L., Cai, R., ... & Chen, B. (2023). H 2O: Heavy-Hitter Oracle for efficient generative inference of large language models. Advances in Neural Information Processing Systems , 36. [10] Miao, X., Oliaro, G., Zhang, Z., Cheng, X., Wang, Z., Wong, R. Y. Y., ... & Jia, Z. (2024). SpecInfer: Accelerating large language model serving with tree-based speculative inference and verification. Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems .16
