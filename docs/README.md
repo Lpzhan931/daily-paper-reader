@@ -6,97 +6,62 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-31
-- 运行时间：2026-03-31 20:29:30 UTC
+- 最新运行日期：2026-04-01
+- 运行时间：2026-04-01 20:47:08 UTC
 - 运行状态：成功
-- 本次总论文数：25
-- 精读区：14
-- 速读区：11
+- 本次总论文数：13
+- 精读区：6
+- 速读区：7
 
 ### 今日简报（AI）
-今日精选 25 篇前沿论文，深度聚焦大模型推理加速与 KV 缓存优化技术。
-重点关注 TAPS 任务感知采样与 ScoutAttention 的 CPU 预计算方案，两者在提升投机采样效率与显存管理上取得满分突破。
-建议优先研读投机解码与注意力机制优化方向，掌握当前 LLM 推理性能调优的核心趋势。
-- 详情：[/202603/31/README](/202603/31/README)
+- 今日共生成 13 篇推荐（精读 6 篇，速读 7 篇）
+- 精读：《ITQ3_S: High-Fidelity 3-bit LLM Inference via Interleaved Ternary Quantization with Rotation-Domain Smoothing》（9.0/10）, 《StepCache: Step-Level Reuse with Lightweight Verification and Selective Patching for LLM Serving》（9.0/10）
+- 速读：《A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network》（8.0/10）, 《Developing Adaptive Context Compression Techniques for Large Language Models (LLMs) in Long-Running Interactions》（8.0/10）, 《Compiling Code LLMs into Lightweight Executables》（8.0/10）
+- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
+- 详情：[/202604/01/README](/202604/01/README)
 
 ### 精读区论文标签
-1. [TAPS: Task Aware Proposal Distributions for Speculative Sampling](/202603/31/2603.27027v1-taps-task-aware-proposal-distributions-for-speculative-sampling)  
-   标签：评分：10.0/10、query:llm
-   evidence：投机采样中的任务感知建议分布
-2. [ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference](/202603/31/2603.27138v1-scoutattention-efficient-kv-cache-offloading-via-layer-ahead-cpu-pre-computation-for-llm-inference)  
-   标签：评分：10.0/10、query:llm
-   evidence：KV缓存卸载与GPU-CPU协同注意力
-3. [TurboAngle: Near-Lossless KV Cache Compression via Uniform Angle Quantization](/202603/31/2603.27467v1-turboangle-near-lossless-kv-cache-compression-via-uniform-angle-quantization)  
-   标签：评分：10.0/10、query:llm
-   evidence：通过均匀角度量化和逐层早期提升进行KV缓存压缩
-4. [KVSculpt: KV Cache Compression as Distillation](/202603/31/2603.27819v1-kvsculpt-kv-cache-compression-as-distillation)  
-   标签：评分：10.0/10、query:llm
-   evidence：通过蒸馏和连续嵌入空间优化进行KV缓存压缩
-5. [Low-Latency Edge LLM Handover via Joint KV Cache Transfer and Token Prefill](/202603/31/2603.28018v1-low-latency-edge-llm-handover-via-joint-kv-cache-transfer-and-token-prefill)  
-   标签：评分：10.0/10、query:llm
-   evidence：联合 KV 缓存传输与 Token 预填充以实现低延迟
-6. [IsoQuant: Hardware-Aligned SO(4) Isoclinic Rotations for LLM KV Cache Compression](/202603/31/2603.28430v1-isoquant-hardware-aligned-so4-isoclinic-rotations-for-llm-kv-cache-compression)  
-   标签：评分：10.0/10、query:llm
-   evidence：硬件对齐的旋转变换用于KV缓存压缩
-7. [Switch Attention: Towards Dynamic and Fine-grained Hybrid Transformers](/202603/31/2603.26380v1-switch-attention-towards-dynamic-and-fine-grained-hybrid-transformers)  
+1. [ITQ3_S: High-Fidelity 3-bit LLM Inference via Interleaved Ternary Quantization with Rotation-Domain Smoothing](/202604/01/2603.27914v2-itq3s-high-fidelity-3-bit-llm-inference-via-interleaved-ternary-quantization-with-rotation-domain-smoothing)  
    标签：评分：9.0/10、query:llm
-   evidence：全注意力与滑动窗口注意力之间的动态路由
-8. [Robust Batch-Level Query Routing for Large Language Models under Cost and Capacity Constraints](/202603/31/2603.26796v1-robust-batch-level-query-routing-for-large-language-models-under-cost-and-capacity-constraints)  
+   evidence：用于高效大模型推理的3比特权重量化
+2. [StepCache: Step-Level Reuse with Lightweight Verification and Selective Patching for LLM Serving](/202604/01/2603.28795v1-stepcache-step-level-reuse-with-lightweight-verification-and-selective-patching-for-llm-serving)  
    标签：评分：9.0/10、query:llm
-   evidence：容量限制下的批处理级查询路由
-9. [KV Cache Quantization for Self-Forcing Video Generation: A 33-Method Empirical Study](/202603/31/2603.27469v1-kv-cache-quantization-for-self-forcing-video-generation-a-33-method-empirical-study)  
+   evidence：大模型推理服务中的步骤级重用以优化延迟
+3. [Understand and Accelerate Memory Processing Pipeline for Disaggregated LLM Inference](/202604/01/2603.29002v1-understand-and-accelerate-memory-processing-pipeline-for-disaggregated-llm-inference)  
    标签：评分：9.0/10、query:llm
-   evidence：KV缓存量化与压缩变体的实证研究
-10. [V-CAST: Video Curvature-Aware Spatio-Temporal Pruning for Efficient Video Large Language Models](/202603/31/2603.27650v1-v-cast-video-curvature-aware-spatio-temporal-pruning-for-efficient-video-large-language-models)  
+   evidence：加速解耦式LLM推理的内存处理
+4. [PolarQuant: Optimal Gaussian Weight Quantization via Hadamard Rotation for LLM Compression](/202604/01/2603.29078v1-polarquant-optimal-gaussian-weight-quantization-via-hadamard-rotation-for-llm-compression)  
    标签：评分：9.0/10、query:llm
-   evidence：用于高效视频LLM推理的时空剪枝
-11. [ITQ3_S: High-Fidelity 3-bit LLM Inference via Interleaved Ternary Quantization with Rotation-Domain Smoothing](/202603/31/2603.27914v1-itq3s-high-fidelity-3-bit-llm-inference-via-interleaved-ternary-quantization-with-rotation-domain-smoothing)  
+   evidence：用于大模型压缩的训练后权重量化
+5. [VecAttention: Vector-wise Sparse Attention for Accelerating Long Context Inference](/202604/01/2603.29494v1-vecattention-vector-wise-sparse-attention-for-accelerating-long-context-inference)  
    标签：评分：9.0/10、query:llm
-   evidence：大语言模型推理的3比特权重量化
-12. [Efficient Inference of Large Vision Language Models](/202603/31/2603.27960v1-efficient-inference-of-large-vision-language-models)  
-   标签：评分：9.0/10、query:llm
-   evidence：大视觉语言模型加速推理技术的全面综述
-13. [A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network](/202603/31/2603.28239v1-a-switch-centric-in-network-architecture-for-accelerating-llm-inference-in-shared-memory-network)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于加速大模型推理的网络内架构
-14. [HISA: Efficient Hierarchical Indexing for Fine-Grained Sparse Attention](/202603/31/2603.28458v1-hisa-efficient-hierarchical-indexing-for-fine-grained-sparse-attention)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于细粒度稀疏注意力的分层索引机制
+   evidence：用于加速长文本推理的向量级稀疏注意力
+6. [ReDiPrune: Relevance-Diversity Pre-Projection Token Pruning for Efficient Multimodal LLMs](/202604/01/2603.24680v2-rediprune-relevance-diversity-pre-projection-token-pruning-for-efficient-multimodal-llms)  
+   标签：评分：8.0/10、query:llm
+   evidence：多模态大语言模型的高效Token剪枝
 
 ### 速读区论文标签
-1. [Rethinking Token Reduction for Large Vision-Language Models](/202603/31/2603.21701v1-rethinking-token-reduction-for-large-vision-language-models)  
+1. [A Switch-Centric In-Network Architecture for Accelerating LLM Inference in Shared-Memory Network](/202604/01/2603.28239v2-a-switch-centric-in-network-architecture-for-accelerating-llm-inference-in-shared-memory-network)  
    标签：评分：8.0/10、query:llm
-   evidence：针对多模态大模型高推理成本的Token削减
-2. [SJD-VP: Speculative Jacobi Decoding with Verification Prediction for Autoregressive Image Generation](/202603/31/2603.27115v1-sjd-vp-speculative-jacobi-decoding-with-verification-prediction-for-autoregressive-image-generation)  
+   evidence：通过网络内架构加速LLM推理
+2. [Developing Adaptive Context Compression Techniques for Large Language Models (LLMs) in Long-Running Interactions](/202604/01/2603.29193v1-developing-adaptive-context-compression-techniques-for-large-language-models-llms-in-long-running-interactions)  
    标签：评分：8.0/10、query:llm
-   evidence：投机雅可比解码用于加速生成
-3. [Preconditioned Attention: Enhancing Efficiency in Transformers](/202603/31/2603.27153v1-preconditioned-attention-enhancing-efficiency-in-transformers)  
+   evidence：长时交互中的自适应上下文压缩与内存选择
+3. [Compiling Code LLMs into Lightweight Executables](/202604/01/2603.29813v1-compiling-code-llms-into-lightweight-executables)  
    标签：评分：8.0/10、query:llm
-   evidence：通过预条件注意力增强效率
-4. [Expert Streaming: Accelerating Low-Batch MoE Inference via Multi-chiplet Architecture and Dynamic Expert Trajectory Scheduling](/202603/31/2603.27624v1-expert-streaming-accelerating-low-batch-moe-inference-via-multi-chiplet-architecture-and-dynamic-expert-trajectory-scheduling)  
-   标签：评分：8.0/10、query:llm
-   evidence：通过多芯片架构和调度加速混合专家模型推理
-5. [Rényi Entropy: A New Token Pruning Metric for Vision Transformers](/202603/31/2603.27900v1-rnyi-entropy-a-new-token-pruning-metric-for-vision-transformers)  
+   evidence：优化本地设备上的LLM执行性能
+4. [Rethinking Token Pruning for Historical Screenshots in GUI Visual Agents: Semantic, Spatial, and Temporal Perspectives](/202604/01/2603.26041v2-rethinking-token-pruning-for-historical-screenshots-in-gui-visual-agents-semantic-spatial-and-temporal-perspectives)  
    标签：评分：7.0/10、query:llm
-   evidence：用于加速推理的 Token 剪枝技术
-6. [ATLAS-RTC: Closing the Loop on LLM Agent Output with Token-Level Runtime Control](/202603/31/2603.27905v1-atlas-rtc-closing-the-loop-on-llm-agent-output-with-token-level-runtime-control)  
+   evidence：多模态智能体历史截图的Token剪枝
+5. [PQuantML: A Tool for End-to-End Hardware-aware Model Compression](/202604/01/2603.26595v1-pquantml-a-tool-for-end-to-end-hardware-aware-model-compression)  
    标签：评分：7.0/10、query:llm
-   evidence：在失败主导的解码场景中降低延迟
-7. [Meta-Harness: End-to-End Optimization of Model Harnesses](/202603/31/2603.28052v1-meta-harness-end-to-end-optimization-of-model-harnesses)  
+   evidence：剪枝与量化的统一接口
+6. [CXLRAMSim v1.0: System-Level Exploration of CXL Memory Expander Cards](/202604/01/2603.29483v1-cxlramsim-v10-system-level-exploration-of-cxl-memory-expander-cards)  
    标签：评分：7.0/10、query:llm
-   evidence：优化大语言模型应用中的上下文管理和 Token 使用
-8. [DELTA: A DAG-aware Efficient OCS Logical Topology Optimization Framework for AIDCs](/202603/31/2603.28096v1-delta-a-dag-aware-efficient-ocs-logical-topology-optimization-framework-for-aidcs)  
-   标签：评分：7.0/10、query:llm
-   evidence：优化AI数据中心中大模型流量的逻辑拓扑
-9. [Compressing Code Context for LLM-based Issue Resolution](/202603/31/2603.28119v1-compressing-code-context-for-llm-based-issue-resolution)  
-   标签：评分：7.0/10、query:llm
-   evidence：压缩代码上下文以降低高昂成本
-10. [Data-Free Layer-Adaptive Merging via Fisher Information for Long-to-Short Reasoning LLMs](/202603/31/2603.21705v1-data-free-layer-adaptive-merging-via-fisher-information-for-long-to-short-reasoning-llms)  
+   evidence：LLM推理内存扩展的系统级探索
+7. [LogicDiff: Logic-Guided Denoising Improves Reasoning in Masked Diffusion Language Models](/202604/01/2603.26771v1-logicdiff-logic-guided-denoising-improves-reasoning-in-masked-diffusion-language-models)  
    标签：评分：6.0/10、query:llm
-   evidence：通过模型合并减少输出长度并保留推理能力
-11. [Hydra: Unifying Document Retrieval and Generation in a Single Vision-Language Model](/202603/31/2603.28554v1-hydra-unifying-document-retrieval-and-generation-in-a-single-vision-language-model)  
-   标签：评分：6.0/10、query:llm
-   evidence：在单个VLM中统一检索和生成
+   evidence：掩码扩散语言模型的推理优化方法
 
 
 <div class="dpr-home-promo-card">
