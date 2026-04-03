@@ -1,0 +1,255 @@
+Title: Balancing Coverage and Draft Latency in Vocabulary Trimming for Faster Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2603.05210v1
+
+Published Time: Fri, 06 Mar 2026 02:04:42 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# Balancing Coverage and Draft Latency in Vocabulary Trimming for Faster Speculative Decoding 
+
+Ofir Ben Shoham 
+
+Intuit 
+
+ofir_benshoham@intuit.com 
+
+Abstract 
+
+Speculative decoding accelerates inference for Large Language Models by using a lightweight draft model to propose candidate tokens that are verified in parallel by a larger target model. Prior work shows that the draft model often dominates speculative decoding latency, since it generates tokens sequentially and incurs high cost from its language modeling head as vocab-ulary size grows. This exposes a fundamental trade-off in draft model design: larger vocabu-laries improve token coverage and agreement with the target model, but incur higher draft latency, while smaller vocabularies reduce la-tency at the risk of missing tokens required for accurate draft generation. We address this trade-off through vocabulary trimming for draft models, motivated by the ob-servation that domain-specific workloads use only a small fraction of the full vocabulary. We cast draft vocabulary selection as a constrained optimization problem that balances token cov-erage and draft latency. Coverage is computed over assistant responses in the training data, while latency is estimated using architecture-aware FLOPs that capture the cost of the lan-guage modeling head as a function of vocabu-lary size. We optimize a utility function with a Tree-structured Parzen Estimator to efficiently explore the coverage–latency Pareto frontier under a minimum coverage constraint. Exper-iments show improved speculative decoding throughput while reducing draft vocabularies by up to 97% with high coverage. On domain-specific tasks, we achieve up to 16% latency reduction and 20% throughput improvement, and up to 6.7% throughput gains on diverse out-of-distribution tasks. 
+
+1 Introduction 
+
+Applications of large language models (LLMs) have recently become widespread across many do-mains. However, Inference time remains a major bottleneck in the efficient deployment of large lan-guage models (Leviathan et al., 2023). Speculative Decoding has been proposed as a method to re-duce inference latency by leveraging a smaller draft 
+
+model to generate candidate tokens, which are then verified by a larger model. Instead of performing 
+
+K separate forward passes, the large model verifies the proposed K tokens in a single forward pass, significantly improving inference efficiency. Recent work trains draft models on generations produced by the target model in order to improve the acceptance rate of draft tokens during verifica-tion by the large model, thereby reducing inference latency under speculative decoding (Hong et al., 2025). However, draft models typically share the same vocabulary as the target model (e.g., 128K tokens for LLaMA 3), resulting in substantial com-putational overhead. This is particularly problem-atic given prior findings that draft model latency constitutes the primary bottleneck in speculative decoding (Yan et al., 2025). Moreover, Goel et al. (2025) show that, for many downstream tasks, tar-get model generation is confined to a small subset of the full vocabulary; for example, in function-calling tasks with LLaMA-3.2-3B-Instruct, more than 120K tokens are rarely or never generated. To address these limitations and reduce draft model latency, recent work has explored vocabu-lary reduction techniques for the draft in specula-tive decoding. Goel et al. (2025) propose Vocab-Trim, which trims infrequent tokens from the draft vocabulary based on token frequency statistics ob-tained from top-p sampling during inference on a calibration dataset, increasing speculative decod-ing speedup by up to 16% for LLaMA-3 models on Spec-Bench (Xia et al., 2024). Concurrently, Zhao et al. (2025) introduce FR-Spec (Frequency-Ranked Speculative Sampling), which constrains the draft model’s token selection to a frequency-ranked subset of the vocabulary, reducing LM head computation overhead by 75% and achieving an 1
+
+> arXiv:2603.05210v1 [cs.CL] 5 Mar 2026
+
+average speedup of 1.12 × over EAGLE-2 (Li et al., 2024). However, selecting a fixed top-k vocabulary can be suboptimal due to the inherent trade-off be-tween draft model latency and vocabulary cover-age. Larger vocabularies provide better coverage of the target model’s token distribution, but at the cost of increased draft inference latency. Further-more, EAGLE-3 (Li et al., 2025b) embeds vocabu-lary mapping within the model weights via draft-to-target and target-to-draft index buffers, cou-pling vocabulary selection to training time. As a consequence, inference-time vocabulary reduc-tion methods such as FR-Spec are incompatible with EAGLE-3, as noted in the SGLang inference engine documentation (Zheng et al., 2024). To address the limitations of prior work, we pro-pose a novel approach that explicitly balances the trade-off between vocabulary coverage and draft model latency. Our approach formulates this trade-off through a reward function, which is optimized using the Tree-structured Parzen Estimator (TPE) (Watanabe, 2023). The reward is defined by a utility function that combines token coverage measured on the training dataset with an architecture-aware estimation of draft model FLOPs. We evaluate our approach on both out-of-distribution benchmarks and task-specific settings. On out-of-distribution benchmarks, it improves generation throughput by up to 6.7% compared to full-vocabulary baselines, while on task-specific settings it achieves up to 19.6% reductions in la-tency and throughput. 
+
+Our Contributions: 
+
+1. We formulate draft vocabulary selection to optimize speculative decoding inference as a constrained optimization problem, and pro-pose a vocabulary trimming approach that leverages token frequency statistics together with an architecture-aware latency estimate to select an efficient draft vocabulary. 2. We empirically show that the resulting draft models improve LLM generation throughput across both out-of-distribution and domain-specific tasks. 3. We open source our implementation to support future research. 1
+
+> 1https://github.com/Ofir408/ balanced-coverage-latency-spec-decoding
+
+2 Method 
+
+In this work, we present a vocabulary trimming ap-proach for speculative decoding that optimizes the trade-off between token coverage and draft model latency. Our method consists of five components: (1) formulating vocabulary selection as constrained optimization, (2) computing token coverage from training data, (3) estimating draft model FLOPs, (4) defining a utility function, and (5) optimizing via Tree-structured Parzen Estimator. 
+
+2.1 Problem Formulation 
+
+Let V denote the target model’s vocabulary with 
+
+|V| = V tokens. We seek a reduced draft vocab-ulary Vd ⊂ V of size k = |V d| that balances two competing objectives: maximizing token coverage while minimizing draft model latency. We formulate this as a constrained optimization problem: 
+
+k∗ = arg max 
+
+> k∈[kmin ,k max ]
+
+U (k) s.t. C(k) ≥ cmin 
+
+(1) where U (k) is a utility function combining cover-age and latency reduction, C(k) is the token cov-erage at vocabulary size k, and cmin is a minimum coverage threshold. The draft vocabulary Vd is constructed by se-lecting the top-k most frequent tokens from the training distribution, ensuring that the most com-monly generated tokens are retained. 
+
+2.2 Token Coverage Estimation 
+
+Following standard practice in instruction tuning, draft models are trained with a loss computed only over assistant response tokens, while user prompts and system messages are masked. We align our cov-erage metric with this training objective by count-ing token frequencies exclusively within assistant responses. Given a training dataset of conversations, we parse assistant spans using chat template delimiters and compute token frequencies f (v) for each token 
+
+v within these spans. Token coverage for a draft vocabulary of size k is: 
+
+C(k) = 
+
+P 
+
+> v∈top-k
+
+f (v)
+
+P 
+
+> v∈V
+
+f (v) (2) where top-k denotes the k most frequent tokens. This metric captures the fraction of training tokens covered by the draft vocabulary. 22.3 Draft Model Latency Estimation 
+
+We estimate draft model latency using FLOPs as a proxy. EAGLE-style draft models (Li et al., 2025b) consist of three components: 1. A feature fusion layer that projects concate-nated hidden states from multiple target model layers into the hidden dimension. 2. A single transformer decoder layer with self-attention and a feed-forward network. 3. A language modeling head that projects hid-den states to vocabulary logits. The key observation is that only the LM head depends on vocabulary size. For a linear projection from hidden dimension d to vocabulary size k, the FLOPs are 2dk . All other components contribute a fixed cost Ffixed independent of k.Table 1 shows the FLOPs breakdown for LLaMA-3-8B. The LM head with full vocabu-lary ( V =128 ,256 ) accounts for 64% of total draft model computation, making vocabulary reduction highly effective.              
+
+> Component FLOPs % of Total Feature fusion 100.7M 6.1% Attention 436.2M 26.6% Feed-forward 50.3M 3.1% LM head ( V=128 K) 1050.7M 64.2% Total 1637.9M 100%
+> Table 1: Draft model FLOPs breakdown for LLaMA-3-8B.
+
+We define the latency reduction as: 
+
+R(k) = 1 − Ffixed + 2 dk Ffixed + 2 dV (3) 
+
+2.4 Utility Function Definition 
+
+We define a utility function that represents that trade-off between token coverage and latency re-duction with a tunable weight parameter α ∈ [0 , 1] :
+
+U (k) = α · C(k) + (1 − α) · R(k) (4) The coverage weight α controls the trade-off be-tween maintaining high token coverage (larger α)and maximizing draft’s FLOPs latency reduction (smaller α). Higher α values prioritize draft accu-racy at the cost of computational savings, while lower values aggressively reduce vocabulary size. The utility function formulation of the trade-off between token coverage and draft model latency enables exploration of the Pareto frontier between target-vocabulary token coverage and draft model latency, allowing TPE optimization of this objec-tive to select the most accurate draft vocabulary size. 
+
+2.5 TPE-Based Optimization 
+
+We optimize the vocabulary size using TPE, a se-quential model-based optimization algorithm well-suited for hyperparameter search. TPE models the objective function by maintain-ing two density estimators: ℓ(k) for vocabulary sizes that yield high utility, and g(k) for those with low utility. At each iteration, TPE samples can-didate vocabulary sizes by maximizing the ratio 
+
+ℓ(k)/g (k), which serves as a proxy for expected improvement. To enforce the minimum coverage constraint 
+
+C(k) ≥ cmin , we modify the objective to return a penalty value when the constraint is violated: 
+
+˜U (k) = 
+
+(
+
+U (k) if C(k) ≥ cmin 
+
+−1 otherwise . (5) This formulation guides TPE to learn the feasible region while still exploring the coverage-latency trade-off within that region. The optimization runs for N trials (we use N = 100 ), with TPE progres-sively focusing on promising regions of the search space. The output is the optimal vocabulary size k∗
+
+that maximizes utility while satisfying the coverage constraint. The corresponding draft vocabulary Vd
+
+consists of the k∗ most frequent tokens from the training distribution. 
+
+2.6 Draft Vocabulary Size Optimization 
+
+Figure 1 shows the utility score across 100 vocab-ulary configurations explored via Optuna’s TPE sampler (Akiba et al., 2019). The curve exhibits a clear maximum at 13,264 tokens, demonstrating the optimal balance point. Smaller vocabularies suffer from insufficient coverage despite greater speedup, while draft larger vocabularies provide diminishing coverage gains that do not justify their draft latency cost. Figure 2 visualizes the Pareto frontier of the coverage-latency tradeoff. Each point represents a vocabulary configuration (color-coded by size), 30 10000 20000 30000 40000 50000 
+
+> Draft Vocabulary Size
+> 0.62
+> 0.64
+> 0.66
+> 0.68
+> 0.70
+> 0.72
+> 0.74
+> 0.76
+> Utility Score
+> Utility Score vs Draft Vocab Size
+> Optimal: 13,264
+
+Figure 1: Utility score vs. draft vocabulary size. The utility function peaks at 13,264 tokens, representing the optimal tradeoff between coverage and latency while training on the Open-PerfectBlend dataset (Xu et al., 2024). 40 45 50 55 60 65 
+
+> Latency Reduction (%)
+> 60
+> 65
+> 70
+> 75
+> 80
+> 85
+> 90
+> 95
+> 100
+> Token Coverage (%)
+> Pareto Front: Coverage vs Latency
+> Optimal: 13,264
+> 10000
+> 20000
+> 30000
+> 40000
+> Draft Vocab Size
+
+Figure 2: Pareto front showing the coverage-latency tradeoff of the draft model, while training on the Open-PerfectBlend dataset (Xu et al., 2024). The optimal point (red star) balances high coverage with substantial latency reduction. 
+
+revealing the fundamental tension: smaller vocab-ularies achieve up to 64% latency reduction but cover only 60% of tokens, while near-complete coverage (99%+) limits latency reduction to 39%. The optimal configuration achieves 93.7% cover-age with 57.5% LM head latency reduction (a 90% vocabulary reduction 128K →13K tokens). 
+
+3 Experiments 
+
+To evaluate our approach, we adopt Llama-3.1-8B-Instruct (Grattafiori et al., 2024) as the target model and use datasets to regenerate responses with Llama-3.1-8B-Instruct, ensuring alignment between the draft model and the target model it is trained to accelerate. We then measure the inference throughput of the resulting draft model using the SpecForge frame-work (Li et al., 2025a) together with the SGLang inference engine (Zheng et al., 2024). All experi-ments are conducted with 3 independent runs, and we report mean values with 95% confidence in-tervals to ensure statistical rigor. Evaluations are conducted on benchmarks that are out of distri-bution relative to the training data, including MT-Bench (multi-turn conversational and instruction-following quality) (Zheng et al., 2023), GSM8K (grade-school mathematical reasoning) (Cobbe et al., 2021), HumanEval (code generation and functional correctness) (Chen, 2021), MATH500 (advanced mathematical problem solving) (Light-man et al., 2023), and AIME (competition-level mathematical reasoning) (Zhang and Math-AI, 2025). We also measure our approach on two in-ternal downstream tasks, including Named Entity Recognition and function calling. 
+
+3.1 Results on out of distribution datasets 
+
+We train two draft models on the Open-PerfectBlend dataset (Xu et al., 2024): one using a 13264 tokens vocabulary derived from our ap-proach, and one using the full 128K LLaMA-3 vo-cabulary as a baseline. Both models are evaluated on out-of-distribution benchmarks to assess gen-eralization. As shown in Table 2, the vocabulary-trimmed draft model consistently outperforms the baseline, with throughput improvements ranging from 2.2% to 6.7%. Despite reducing vocabulary size by approxi-mately 90%, the draft model maintains effective acceleration across all out-of-distribution bench-marks, demonstrating that the coverage learned from Open-PerfectBlend generalizes beyond the training distribution. 
+
+Benchmark Our approach 128k-vocab Diff (%) 
+
+MT-Bench 177.54 ± 0.52 172.38 ± 0.67 +3.0% GSM8K 160.51 ± 0.50 155.47 ± 0.43 +3.2% HumanEval 206.79 ± 0.62 202.31 ± 0.72 +2.2% MATH500 217.22 ± 0.40 206.74 ± 1.14 +5.1% AIME 224.83 ± 1.30 210.74 ± 0.69 +6.7% 
+
+Table 2: Output throughput comparison between our approach and a baseline with the full vocabulary, on a setup of a single A100-80G GPU. Values shown as mean ± 95% CI over 3 runs. Higher is better. 
+
+3.2 In-domain Results 
+
+Beyond general-purpose benchmarks, we validate our approach on two domain-specific tasks: Named Entity Recognition (NER) and Function Calling. For each task, we fine-tune a target model and train two different draft models, one with our optimized vocabulary and one with the full 128K LLaMA-3 vocabulary. Our approach yields vocabularies 4of just 6,521 tokens for NER and 4,380 tokens for Function Calling, representing 95% and 97% reductions respectively. Table 3 reports results on a single NVIDIA A100-80GB GPU. The optimized draft models consistently outperform the 128K-vocabulary base-lines: the NER task shows 16.4% latency reduc-tion and 19.6% throughput improvement, while Function Calling achieves 9.1% latency reduction and 10.0% throughput improvement. These results confirm that task-aligned vocabulary optimization yields substantial efficiency improvements for spec-ulative decoding in domain-specific applications. 
+
+4 Discussion 
+
+4.1 Generalization to Out-of-Distribution Datasets 
+
+The out-of-distribution results in Table 2 show con-sistent throughput improvements across diverse benchmarks, despite the vocabulary being opti-mized on a different dataset. To understand why vocabulary trimming generalizes effectively, we an-alyze the token coverage of our 13K optimized vo-cabulary on actual target model generations across the five OOD benchmarks. 
+
+Token Coverage Analysis. Table 4 presents the frequency-weighted token coverage achieved by our optimized vocabulary on target model outputs for each benchmark. Despite reducing vocabulary size by approximately 90% (from 128K to 13K tokens), the optimized vocabulary achieves 97.1% average coverage across all OOD benchmark gen-erations, with coverage ranging from 93.2% on MT-Bench to 98.6% on MATH-500 and AIME. The gap between frequency-weighted coverage (97.1%) and unique token coverage reveals a key insight: while many unique tokens fall outside the optimized vocabulary, these tokens appear infre-quently. The missing tokens are predominantly task-specific terminology that appears rarely in gen-eration outputs. 
+
+Domain Alignment with Training Data. The OpenPerfectBlend training dataset comprises a di-verse mixture of instruction-tuning data across mul-tiple domains: mathematics (39.4%), code (38.9%), chat (17.6%), and instruction following (4.1%) (Xu et al., 2024). Table 5 shows how benchmark cover-age correlates with training data domain represen-tation. Notably, the training and evaluation datasets differ substantially in their construction and dif-ficulty levels. The math training data includes MetaMathQA, which bootstraps questions from GSM8K and MATH training sets by “rewriting the question from multiple perspectives without extra knowledge” (Yu et al., 2024). Evaluation is per-formed on the GSM8K and MATH-500 test sets ,which contain unseen problems, as well as AIME (olympiad-level), with the latter presenting substan-tially harder problems than the training distribution. Similarly, code training uses evol-codealpaca (Luo et al., 2023) and UltraInteract (Yuan et al., 2024), while evaluation uses HumanEval with its distinct function-completion format and doctest syntax. De-spite these differences in problem difficulty and format, the vocabulary achieves 94–99% cover-age on model generations, demonstrating that core mathematical notation, operators, and common pro-gramming tokens are shared across difficulty levels. Even MT-Bench, representing the chat domain with only 17.6% of training data, achieves 93.2% cover-age, indicating that our approach captures essential high-frequency tokens even for underrepresented domains. 
+
+Missing Token Analysis. Examining the tokens excluded from the optimized vocabulary reveals that missing tokens are predominantly task-specific and low-frequency. GSM8K’s lower coverage (94.6%) is primarily due to the « annotation token used in GSM8K’s answer format (appearing 3,275 times), along with domain-specific nouns from word problem narratives (e.g., “mashed,” “fries,” “laundry”). HumanEval misses Python doctest syntax ( »> ) and code-specific tokens ( _shift ,
+
+enumerate ). MATH-500 and AIME exclude math-ematical terminology (“asympt,” “cyclic,” “dia-mond”) and geometry-related tokens used in com-petition problems. MT-Bench lacks proper nouns (“Wars,” “Britain,” “Socrates”) and rare conversa-tional vocabulary (“seismic,” “settlement”). Crit-ically, these missing tokens appear infrequently enough that their absence minimally impacts the draft model’s ability to propose acceptable candi-dates. Taken together, these findings explain why vo-cabulary trimming generalizes effectively: high-frequency tokens are largely domain-agnostic and captured by diverse training data, while the long tail of task-specific tokens can be safely excluded with-out degrading speculative decoding performance. 5Table 3: In-domain benchmark results on a single NVIDIA A100-80GB GPU over 500 samples. For each task, percentage deltas are reported relative to the task-specific baseline. Values shown as mean ± 95% CI over 3 runs. Lower latency is better; higher output throughput is better. 
+
+Benchmark Model / Vocabulary Latency (s) ∆ (%) Output Throughput ∆ (%) NER 128K vocab (baseline) 468.11 ± 5.50 – 146.50 ± 1.72 –6,521 vocab (Our Approach) 391.43 ± 3.33 -16.4% 175.18 ± 1.49 +19.6% 
+
+Function Calling 128K vocab (baseline) 401.02 ± 4.28 – 192.90 ± 2.06 –4,380 vocab (Our Approach) 364.54 ± 4.36 -9.1% 212.21 ± 2.56 +10.0% 
+
+Table 4: Token coverage of the 13K optimized vocabu-lary on target model generations for out-of-distribution benchmarks. Freq. Coverage measures the fraction of generated token occurrences covered; Unique Coverage measures the fraction of distinct generated tokens cov-ered. 
+
+Benchmark Tokens Freq. Cov. Unique Cov. GSM8K 117,613 94.6% 69.0% MT-Bench 59,439 93.2% 70.4% HumanEval 61,056 97.0% 75.6% MATH-500 295,210 98.6% 78.3% AIME 40,850 98.6% 87.3% 
+
+Combined 574,168 97.1% —
+
+Table 5: OOD benchmark coverage by training data domain. 
+
+Benchmark Domain Coverage Training % GSM8K Math 94.6% 39.4% MATH-500 Math 98.6% 39.4% AIME Math 98.6% 39.4% HumanEval Code 97.0% 38.9% MT-Bench Chat 93.2% 17.6% 
+
+The balanced composition of OpenPerfectBlend spanning math, code, and chat domains, ensures that the optimized vocabulary covers the essen-tial tokens needed across diverse tasks, enabling draft vocabulary optimization to generalize to out-of-distribution benchmarks with 97% coverage on actual model generations. 
+
+4.2 Accept Length and Throughput Analysis 
+
+Table 6 presents a comprehensive comparison of vocabulary trimming effects across out-of-distribution benchmarks and downstream tasks, re-lating draft vocabulary size, token coverage, accept length, and throughput improvement. The results demonstrate that vocabulary trim-ming improves throughput even when accept length decreases, because the reduction in draft model la-tency more than compensates for the decrease in ac-ceptance rate. The draft model executes faster per 
+
+Table 6: Analysis of vocabulary size, token coverage, accept length, and throughput improvement across OOD benchmarks and downstream tasks.                                          
+
+> Task Draft Vocab Coverage Accept Length Throughput ∆
+> 128K Ours
+> Out-of-Distribution Benchmarks
+> MT-Bench 13,264 93.2% 2.89 2.65 +3.0% GSM8K 13,264 94.6% 2.75 2.53 +3.2% HumanEval 13,264 97.0% 3.39 3.09 +2.2% MATH-500 13,264 98.6% 3.45 3.23 +5.1% AIME 13,264 98.6% 3.53 3.35 +6.7%
+> Downstream Tasks
+> Function Calling 4,380 98.6% 3.86 3.82 +10.0% NER 6,521 85.1% 1.69 1.69 +19.6%
+
+speculation cycle, and this speedup accumulates across all cycles to yield net throughput gains. This effect is observed across both out-of-distribution benchmarks and downstream tasks, though with different magnitudes. For out-of-distribution benchmarks, accept length reduction ranges from 5–9%, which is ex-pected since these benchmarks evaluate on tasks not seen during vocabulary optimization. The opti-mized vocabulary is therefore less aligned with the token distribution of these benchmarks. Neverthe-less, throughput consistently improves by 2.2–6.7% across all OOD benchmarks, confirming that the draft latency reduction outweighs the acceptance penalty. Downstream tasks exhibit even smaller accept length degradation due to domain-specific vocab-ulary optimization. In the function-calling set-ting, the accept length is reduced by only 1.0% 
+
+(from 3.86 to 3.82 ) when shrinking the vocabu-lary from 128 K to 4,380 tokens, while throughput increases by 10 .0% . NER exhibits an even more fa-vorable trade-off: despite achieving only 85.1% to-ken coverage, the accept length remains unchanged (1.69 →1.69), resulting in a 19.6% throughput im-provement. The higher improvement compared to function calling can be attributed to the com-plete preservation of accept length, allowing the full benefit of vocabulary reduction to translate di-rectly into throughput gains without any acceptance 6penalty. These results demonstrate that domain-specific vocabulary optimization can achieve larger throughput gains with smaller vocabularies com-pared to general-purpose optimization. 
+
+4.3 Stability of Vocabulary Optimization 
+
+To verify that our optimization approach produces stable results regardless of training data sampling, we analyze how the optimal vocabulary size varies with different amounts of training data. Figure 3 shows the optimal vocabulary size identified by our approach when using subsets of the OpenPer-fectBlend dataset ranging from 1,000 to 500,000 randomly selected samples. 10 3 10 4 10 5       
+
+> Training Data Size (samples)
+> 0K
+> 20K
+> 40K
+> 60K
+> 80K
+> 100K
+> 120K
+> Optimal Draft Vocabulary Size
+> 11,199 14,274 13,501 13,298 13,212 13,212 13,179 13,054
+> Optimal Vocabulary Size vs Training Data Size
+> Full Vocab (128,256)
+
+Figure 3: Optimal vocabulary size based on our ap-proach vs. training data size. The optimal vocabulary converges to approximately 13K tokens after 10K sam-ples, demonstrating stability across different random subsets of the training data. 
+
+The optimal vocabulary size converges rapidly, stabilizing around 13,000–13,300 tokens after ap-proximately 10,000 training samples. Beyond this point, increasing the training data from 25K to 500K samples (a 20 × increase) changes the op-timal vocabulary by less than 2% (from 13,298 to 13,054 tokens). This stability indicates that the token frequency distribution captured by our approach is robust to random sampling variation. Even with only 1,000 samples, the optimization identifies a vocabulary (11,199 tokens) within 15% of the converged value, suggesting that the high-frequency tokens critical for coverage are consis-tently represented across random subsets. These results demonstrate that practitioners can reliably optimize vocabulary size using moderate-sized sub-sets of their training data, without requiring access to the full dataset. 
+
+5 Limitations 
+
+Our approach has several limitations. First, we evaluate only on LLaMA-3.1-8B-Instruct as the tar-get model; generalization to other model families (e.g., Qwen, Gemma, Mistral) and larger model scales (70B, 405B) remains to be validated. Second, our approach requires training the draft model with the reduced vocabulary, unlike inference-time methods such as VocabTrim (Goel et al., 2025) that prune the vocabulary post-training for Eagle2. While training-time reduction avoids distribution mismatch between training and infer-ence, it incurs additional computational cost when adapting to new domains and prevents retrofitting existing draft models without retraining. Third, we evaluate exclusively on EAGLE3 (Li et al., 2025b) speculative decoding within the SGLang inference engine. Future work should val-idate vocabulary trimming across a broader range of speculative decoding frameworks. 
+
+6 Conclusions 
+
+We introduced vocabulary trimming for speculative decoding draft models, targeting the vocabulary-dependent cost of the LM head, a major contributor to draft latency. We formulated draft vocabulary se-lection as a constrained optimization problem that balances frequency-weighted token coverage (com-puted over assistant responses) with an architecture-aware FLOPs proxy for latency, and used TPE to efficiently search the coverage–latency trade-off. Empirically, trimmed-vocabulary drafts improve end-to-end speculative decoding throughput across both general and domain-specific settings. A13,264-token draft vocabulary (about a 90% reduc-tion from 128K) yields consistent throughput gains on out-of-distribution benchmarks, up to +6 .7% ,while maintaining high frequency-weighted cover-age on target generations. In-domain optimization enables more aggressive trimming (4.4K–6.5K to-kens) and delivers larger improvements, reaching 19.6% and 10.0% throughput improvements. These results show that optimizing draft vocabulary size is a simple, robust mechanism for accelerating spec-ulative decoding without sacrificing practical cov-erage, especially when aligned to the deployment domain. 7References 
+
+Takuya Akiba, Shotaro Sano, Toshihiko Yanase, Takeru Ohta, and Masanori Koyama. 2019. Optuna: A next-generation hyperparameter optimization framework. In The 25th ACM SIGKDD International Confer-ence on Knowledge Discovery & Data Mining , pages 2623–2631. Mark Chen. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, and 1 others. 2021. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 .Raghavv Goel, Sudhanshu Agrawal, Mukul Gagrani, Junyoung Park, Yifan Zao, He Zhang, Tian Liu, Yiping Yang, Xin Yuan, Jiuyan Lu, and 1 others. 2025. Vocabtrim: Vocabulary pruning for effi-cient speculative decoding in llms. arXiv preprint arXiv:2506.22694 .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, and 1 others. 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Fenglu Hong, Ravi Raju, Jonathan Lingjie Li, Bo Li, Urmish Thakker, Avinash Ravichandran, Swayamb-hoo Jain, and Changran Hu. 2025. Training domain draft models for speculative decoding: Best practices and insights. arXiv preprint arXiv:2503.07807 .Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via spec-ulative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR. Shenggui Li, Yikai Zhu, Chao Wang, Fan Yin, Shuai Shi, Yubo Wang, Yi Zhang, Yingyi Huang, Haoshuai Zheng, and Yineng Zhang. 2025a. Specforge: Train speculative decoding models effortlessly. https:// github.com/sgl-project/specforge .Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024. Eagle-2: Faster inference of language models with dynamic draft trees. arXiv preprint arXiv:2406.16858 .Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2025b. Eagle-3: Scaling up inference acceler-ation of large language models via training-time test. 
+
+arXiv preprint arXiv:2503.01840 .Hunter Lightman, Vineet Kosaraju, Yura Burda, Harri Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. 2023. Let’s verify step by step. arXiv preprint arXiv:2305.20050 .Ziyang Luo, Can Xu, Pu Zhao, Qingfeng Sun, Xi-ubo Geng, Wenxiang Hu, Chongyang Tao, Jing Ma, Qingwei Lin, and Daxin Jiang. 2023. Wizardcoder: Empowering code large language models with evol-instruct. Shuhei Watanabe. 2023. Tree-structured parzen esti-mator: Understanding its algorithm components and their roles for better empirical performance. arXiv preprint arXiv:2304.11127 .Heming Xia, Zhe Yang, Qingxiu Dong, Peiyi Wang, Yongqi Li, Tao Ge, Tianyu Liu, Wenjie Li, and Zhi-fang Sui. 2024. Unlocking efficiency in large lan-guage model inference: A comprehensive survey of speculative decoding. In Findings of the Associa-tion for Computational Linguistics ACL 2024 , pages 7655–7671, Bangkok, Thailand and virtual meeting. Association for Computational Linguistics. Tengyu Xu, Eryk Helenowski, Karthik Abinav Sankararaman, Di Jin, Kaiyan Peng, Eric Han, Shao-liang Nie, Chen Zhu, Hejia Zhang, Wenxuan Zhou, and 1 others. 2024. The perfect blend: Redefin-ing rlhf with mixture of judges. arXiv preprint arXiv:2409.20370 .Minghao Yan, Saurabh Agarwal, and Shivaram Venkataraman. 2025. Decoding speculative decod-ing. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) , pages 6460– 6473. Longhui Yu, Weisen Jiang, Han Shi, Jincheng Yu, Zhengying Liu, Yu Zhang, James T Kwok, Zhenguo Li, Adrian Weller, and Weiyang Liu. 2024. Meta-math: Bootstrap your own mathematical questions for large language models. In ICLR .Lifan Yuan, Ganqu Cui, Hanbin Wang, Ning Ding, Xingyao Wang, Jia Deng, Boji Shan, Huimin Chen, Ruobing Xie, Yankai Lin, Zhenghao Liu, Bowen Zhou, Hao Peng, Zhiyuan Liu, and Maosong Sun. 2024. Advancing llm reasoning generalists with pref-erence trees. Preprint , arXiv:2404.02078. Yifan Zhang and Team Math-AI. 2025. American invi-tational mathematics examination (aime) 2025. Weilin Zhao, Tengyu Pan, Xu Han, Yudi Zhang, Sun Ao, Yuxiang Huang, Kaihuo Zhang, Weilun Zhao, Yuxuan Li, Jie Zhou, and 1 others. 2025. Fr-spec: Accelerating large-vocabulary language models via frequency-ranked speculative sampling. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Pa-pers) , pages 3909–3921. Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric Xing, and 1 others. 2023. Judging llm-as-a-judge with mt-bench and chatbot arena. Advances in neural information pro-cessing systems , 36:46595–46623. 
+
+8Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonza-lez, and 1 others. 2024. Sglang: Efficient execution of structured language model programs. Advances in neural information processing systems , 37:62557– 62583. 
+
+9
