@@ -6,52 +6,34 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-03
-- 运行时间：2026-04-03 20:12:26 UTC
+- 最新运行日期：2026-04-04
+- 运行时间：2026-04-04 20:02:59 UTC
 - 运行状态：成功
-- 本次总论文数：10
-- 精读区：3
-- 速读区：7
+- 本次总论文数：4
+- 精读区：1
+- 速读区：3
 
 ### 今日简报（AI）
-今日聚焦大模型推理性能巅峰，深度解析低比特矩阵运算与 GPU 硬件级加速方案。
-重点关注 RSR-core 对低比特算力的极致榨取，以及针对 NVL72 集群的分布式并行推理新范式。
-建议开发者深入研究底层算子优化与扩散模型自适应计算，以突破实时生成任务的性能瓶颈。
-- 详情：[/202604/03/README](/202604/03/README)
+今日聚焦大模型低秩压缩与推理优化，重点解析兼顾理论最优与工程效率的 Swift-SVD 方案。
+Swift-SVD 在模型瘦身领域表现卓越，同时结合事实性控制与边缘推理技术，全面提升了 LLM 的可靠性与响应速度。
+建议优先关注 Swift-SVD 的压缩实践，并尝试通过自适应停止技术优化多轮推理的算力分配。
+- 详情：[/202604/04/README](/202604/04/README)
 
 ### 精读区论文标签
-1. [RSR-core: A High-Performance Engine for Low-Bit Matrix-Vector Multiplication](/202604/03/2603.27462v1-rsr-core-a-high-performance-engine-for-low-bit-matrix-vector-multiplication)  
+1. [Swift-SVD: Theoretical Optimality Meets Practical Efficiency in Low-Rank LLM Compression](/202604/04/2604.01609v1-swift-svd-theoretical-optimality-meets-practical-efficiency-in-low-rank-llm-compression)  
    标签：评分：8.0/10、query:llm
-   evidence：LLM推理的高效矩阵向量乘法
-2. [GPU-Accelerated Optimization of Transformer-Based Neural Networks for Real-Time Inference](/202604/03/2603.28708v1-gpu-accelerated-optimization-of-transformer-based-neural-networks-for-real-time-inference)  
-   标签：评分：8.0/10、query:llm
-   evidence：针对Transformer模型的GPU加速推理流水线与混合精度优化
-3. [FlatAttention: Dataflow and Fabric Collectives Co-Optimization for Large Attention-Based Model Inference on Tile-Based Accelerators](/202604/03/2604.02110v1-flatattention-dataflow-and-fabric-collectives-co-optimization-for-large-attention-based-model-inference-on-tile-based-accelerators)  
-   标签：评分：8.0/10、query:llm
-   evidence：大模型推理的高效注意力机制
+   evidence：用于减少KV缓存和权重开销的低秩大模型压缩
 
 ### 速读区论文标签
-1. [CIAR: Interval-based Collaborative Decoding for Image Generation Acceleration](/202604/03/2603.25463v1-ciar-interval-based-collaborative-decoding-for-image-generation-acceleration)  
-   标签：评分：7.0/10、query:llm-sd
-   evidence：带有端侧自验证的协作解码
-2. [DWDP: Distributed Weight Data Parallelism for High-Performance LLM Inference on NVL72](/202604/03/2604.01621v1-dwdp-distributed-weight-data-parallelism-for-high-performance-llm-inference-on-nvl72)  
-   标签：评分：7.0/10、query:llm
-   evidence：高性能大语言模型推理并行化策略
-3. [Expert-Choice Routing Enables Adaptive Computation in Diffusion Language Models](/202604/03/2604.01622v1-expert-choice-routing-enables-adaptive-computation-in-diffusion-language-models)  
-   标签：评分：7.0/10、query:llm
-   evidence：扩散语言模型的高效推理、自适应计算与专家路由优化
-4. [Approximation Schemes for Edit Distance and LCS in Quasi-Strongly Subquadratic Time](/202604/03/2603.29702v1-approximation-schemes-for-edit-distance-and-lcs-in-quasi-strongly-subquadratic-time)  
+1. [Conditional Factuality Controlled LLMs with Generalization Certificates via Conformal Sampling](/202604/04/2603.27403v1-conditional-factuality-controlled-llms-with-generalization-certificates-via-conformal-sampling)  
    标签：评分：6.0/10、query:llm-sd
-   evidence：编辑距离和字符串匹配的近似方案
-5. [Locally Confident, Globally Stuck: The Quality-Exploration Dilemma in Diffusion Language Models](/202604/03/2604.00375v1-locally-confident-globally-stuck-the-quality-exploration-dilemma-in-diffusion-language-models)  
+   evidence：大模型输出的特征条件接受阈值
+2. [Trust-Aware Routing for Distributed Generative AI Inference at the Edge](/202604/04/2603.28622v1-trust-aware-routing-for-distributed-generative-ai-inference-at-the-edge)  
    标签：评分：6.0/10、query:llm
-   evidence：扩散语言模型中的标记解码顺序与基于置信度的重掩码策略
-6. [TRIMS: Trajectory-Ranked Instruction Masked Supervision for Diffusion Language Models](/202604/03/2604.00666v1-trims-trajectory-ranked-instruction-masked-supervision-for-diffusion-language-models)  
+   evidence：分布式生成式AI推理优化
+3. [Adaptive Stopping for Multi-Turn LLM Reasoning](/202604/04/2604.01413v1-adaptive-stopping-for-multi-turn-llm-reasoning)  
    标签：评分：6.0/10、query:llm
-   evidence：通过并行解码实现低延迟生成
-7. [Asymptotically Optimal Sequential Testing with Heterogeneous LLMs](/202604/03/2604.01086v1-asymptotically-optimal-sequential-testing-with-heterogeneous-llms)  
-   标签：评分：6.0/10、query:llm
-   evidence：优化大语言模型查询的成本与延迟
+   evidence：多轮推理的自适应停止机制以降低延迟
 
 
 <div class="dpr-home-promo-card">
