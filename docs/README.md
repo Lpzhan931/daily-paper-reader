@@ -6,64 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-06
-- 运行时间：2026-04-06 19:50:37 UTC
+- 最新运行日期：2026-04-07
+- 运行时间：2026-04-07 20:35:11 UTC
 - 运行状态：成功
-- 本次总论文数：14
-- 精读区：7
-- 速读区：7
+- 本次总论文数：17
+- 精读区：6
+- 速读区：11
 
 ### 今日简报（AI）
-今日聚焦大模型推理性能巅峰，深度解析多智能体 KV 缓存共享与 NF4 量化加速等 14 篇核心论文。
-重点推荐 TokenDance 的集群扩展方案与 NF4 高效算子，两者显著提升了复杂场景下的推理吞吐与响应速度。
-建议关注边缘云协作及长视频理解的最新进展，掌握多模态模型在资源受限环境下的落地优化思路。
-- 详情：[/202604/06/README](/202604/06/README)
+今日聚焦大模型推理效率优化，深度解析 KV Cache 自适应量化与长文本压缩技术。
+重点推荐两篇满分论文，分别通过三角函数压缩与动态位宽分配，实现了端侧轻量化与长推理性能的突破。
+建议关注端侧部署及卫星网络协作推理等硬件适配方案，探索模型在极端环境下的落地潜力。
+- 详情：[/202604/07/README](/202604/07/README)
 
 ### 精读区论文标签
-1. [TokenDance: Scaling Multi-Agent LLM Serving via Collective KV Cache Sharing](/202604/06/2604.03143v1-tokendance-scaling-multi-agent-llm-serving-via-collective-kv-cache-sharing)  
+1. [Don't Waste Bits! Adaptive KV-Cache Quantization for Lightweight On-Device LLMs](/202604/07/2604.04722v1-dont-waste-bits-adaptive-kv-cache-quantization-for-lightweight-on-device-llms)  
    标签：评分：10.0/10、query:llm
-   evidence：多智能体大模型服务中的集体KV缓存共享与管理
-2. [Fast NF4 Dequantization Kernels for Large Language Model Inference](/202604/06/2604.02556v1-fast-nf4-dequantization-kernels-for-large-language-model-inference)  
+   evidence：针对轻量化端侧大模型推理的自适应KV缓存量化
+2. [TriAttention: Efficient Long Reasoning with Trigonometric KV Compression](/202604/07/2604.04921v1-triattention-efficient-long-reasoning-with-trigonometric-kv-compression)  
+   标签：评分：10.0/10、query:llm
+   evidence：长文本推理中的KV缓存压缩
+3. [Fast Cross-Operator Optimization of Attention Dataflow](/202604/07/2604.03446v1-fast-cross-operator-optimization-of-attention-dataflow)  
    标签：评分：9.0/10、query:llm
-   evidence：用于大模型推理加速的高速反量化算子
-3. [AXELRAM: Quantize Once, Never Dequantize](/202604/06/2604.02638v1-axelram-quantize-once-never-dequantize)  
+   evidence：优化注意力机制数据流以提升性能和效率
+4. [REAM: Merging Improves Pruning of Experts in LLMs](/202604/07/2604.04356v1-ream-merging-improves-pruning-of-experts-in-llms)  
    标签：评分：9.0/10、query:llm
-   evidence：直接从量化KV缓存索引计算注意力分数
-4. [FluxMoE: Decoupling Expert Residency for High-Performance MoE Serving](/202604/06/2604.02715v1-fluxmoe-decoupling-expert-residency-for-high-performance-moe-serving)  
+   evidence：合并专家以改进MoE大模型的剪枝
+5. [SLaB: Sparse-Lowrank-Binary Decomposition for Efficient Large Language Models](/202604/07/2604.04493v1-slab-sparse-lowrank-binary-decomposition-for-efficient-large-language-models)  
    标签：评分：9.0/10、query:llm
-   evidence：解耦专家驻留以实现高性能 MoE 服务
-5. [QAPruner: Quantization-Aware Vision Token Pruning for Multimodal Large Language Models](/202604/06/2604.02816v1-qapruner-quantization-aware-vision-token-pruning-for-multimodal-large-language-models)  
+   evidence：用于剪枝的稀疏-低秩-二进制分解
+6. [MUXQ: Mixed-to-Uniform Precision MatriX Quantization via Low-Rank Outlier Decomposition](/202604/07/2604.04701v1-muxq-mixed-to-uniform-precision-matrix-quantization-via-low-rank-outlier-decomposition)  
    标签：评分：9.0/10、query:llm
-   evidence：量化感知的视觉Token剪枝
-6. [Prompt Compression in the Wild: Measuring Latency, Rate Adherence, and Quality for Faster LLM Inference](/202604/06/2604.02985v1-prompt-compression-in-the-wild-measuring-latency-rate-adherence-and-quality-for-faster-llm-inference)  
-   标签：评分：9.0/10、query:llm
-   evidence：通过提示词压缩实现更快的大语言模型推理并降低延迟
-7. [MI-Pruner: Crossmodal Mutual Information-guided Token Pruner for Efficient MLLMs](/202604/06/2604.03072v1-mi-pruner-crossmodal-mutual-information-guided-token-pruner-for-efficient-mllms)  
-   标签：评分：9.0/10、query:llm
-   evidence：跨模态互信息引导的Token剪枝
+   evidence：用于LLM推理加速的量化技术
 
 ### 速读区论文标签
-1. [MSAO: Adaptive Modality Sparsity-Aware Offloading with Edge-Cloud Collaboration for Efficient Multimodal LLM Inference](/202604/06/2604.02945v1-msao-adaptive-modality-sparsity-aware-offloading-with-edge-cloud-collaboration-for-efficient-multimodal-llm-inference)  
-   标签：评分：8.0/10、query:llm-sd
-   evidence：自适应投机性边云协作卸载
-2. [Scaling the Long Video Understanding of Multimodal Large Language Models via Visual Memory Mechanism](/202604/06/2603.29252v1-scaling-the-long-video-understanding-of-multimodal-large-language-models-via-visual-memory-mechanism)  
+1. [KiToke: Kernel-based Interval-aware Token Compression for Video Large Language Models](/202604/07/2604.03414v1-kitoke-kernel-based-interval-aware-token-compression-for-video-large-language-models)  
+   标签：评分：8.0/10、query:llm
+   evidence：视频大模型的标记压缩以降低推理成本
+2. [3D-Stacked NMP, LLM Decoding, Systolic Array Microarchitecture, Multi-Core Scheduling](/202604/07/2604.04253v1-3d-stacked-nmp-llm-decoding-systolic-array-microarchitecture-multi-core-scheduling)  
+   标签：评分：8.0/10、query:llm
+   evidence：用于LLM解码加速的3D堆叠近内存处理技术
+3. [Communication-Efficient Collaborative LLM Inference over LEO Satellite Networks](/202604/07/2604.04654v1-communication-efficient-collaborative-llm-inference-over-leo-satellite-networks)  
+   标签：评分：8.0/10、query:llm
+   evidence：协作式LLM推理与流水线并行
+4. [Spectral Compact Training: Pre-Training Large Language Models via Permanent Truncated SVD and Stiefel QR Retraction](/202604/07/2604.00733v2-spectral-compact-training-pre-training-large-language-models-via-permanent-truncated-svd-and-stiefel-qr-retraction)  
    标签：评分：7.0/10、query:llm
-   evidence：多模态大模型的视觉KV缓存管理
-3. [Dependency-Guided Parallel Decoding in Discrete Diffusion Language Models](/202604/06/2604.02560v1-dependency-guided-parallel-decoding-in-discrete-diffusion-language-models)  
+   evidence：用于内存高效训练与推理的低秩因子
+5. [PLUME: Latent Reasoning Based Universal Multimodal Embedding](/202604/07/2604.02073v1-plume-latent-reasoning-based-universal-multimodal-embedding)  
    标签：评分：7.0/10、query:llm
-   evidence：并行解码与依赖引导的去掩码
-4. [JoyAI-LLM Flash: Advancing Mid-Scale LLMs with Token Efficiency](/202604/06/2604.03044v1-joyai-llm-flash-advancing-mid-scale-llms-with-token-efficiency)  
+   evidence：减少思维链推理的推理开销
+6. [Are LLM-Based Retrievers Worth Their Cost? An Empirical Study of Efficiency, Robustness, and Reasoning Overhead](/202604/07/2604.03676v1-are-llm-based-retrievers-worth-their-cost-an-empirical-study-of-efficiency-robustness-and-reasoning-overhead)  
    标签：评分：7.0/10、query:llm
-   evidence：具有令牌效率的高效 MoE 语言模型
-5. [Multi-Aspect Knowledge Distillation for Language Model with Low-rank Factorization](/202604/06/2604.03110v1-multi-aspect-knowledge-distillation-for-language-model-with-low-rank-factorization)  
+   evidence：LLM检索器延迟与吞吐量的实证研究
+7. [LightThinker++: From Reasoning Compression to Memory Management](/202604/07/2604.03679v1-lightthinker-from-reasoning-compression-to-memory-management)  
    标签：评分：7.0/10、query:llm
-   evidence：结合低秩分解的知识蒸馏用于模型压缩
-6. [Privacy Guard & Token Parsimony by Prompt and Context Handling and LLM Routing](/202604/06/2603.28972v1-privacy-guard--token-parsimony-by-prompt-and-context-handling-and-llm-routing)  
+   evidence：推理压缩与显式自适应内存管理
+8. [Rényi Attention Entropy for Patch Pruning](/202604/07/2604.03803v1-rnyi-attention-entropy-for-patch-pruning)  
+   标签：评分：7.0/10、query:llm
+   evidence：使用Rényi注意力熵进行Transformer补丁剪枝
+9. [GPU Acceleration of TFHE-Based High-Precision Nonlinear Layers for Encrypted LLM Inference](/202604/07/2604.04783v1-gpu-acceleration-of-tfhe-based-high-precision-nonlinear-layers-for-encrypted-llm-inference)  
+   标签：评分：7.0/10、query:llm
+   evidence：加密大模型推理的GPU加速
+10. [Scalable Variational Bayesian Fine-Tuning of LLMs via Orthogonalized Low-Rank Adapters](/202604/07/2604.03388v1-scalable-variational-bayesian-fine-tuning-of-llms-via-orthogonalized-low-rank-adapters)  
    标签：评分：6.0/10、query:llm
-   evidence：通过上下文管理和提示词优化降低运营成本
-7. [AdaHOP: Fast and Accurate Low-Precision Training via Outlier-Pattern-Aware Rotation](/202604/06/2604.02525v1-adahop-fast-and-accurate-low-precision-training-via-outlier-pattern-aware-rotation)  
+   evidence：贝叶斯微调的高效推理
+11. [DeepStack: Scalable and Accurate Design Space Exploration for Distributed 3D-Stacked AI Accelerators](/202604/07/2604.04750v1-deepstack-scalable-and-accurate-design-space-exploration-for-distributed-3d-stacked-ai-accelerators)  
    标签：评分：6.0/10、query:llm
-   evidence：低精度训练与量化误差缓解
+   evidence：分布式LLM推理的设计空间探索
 
 
 <div class="dpr-home-promo-card">
