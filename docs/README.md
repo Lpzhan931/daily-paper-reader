@@ -6,64 +6,82 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-09
-- 运行时间：2026-04-09 20:07:08 UTC
+- 最新运行日期：2026-04-10
+- 运行时间：2026-04-10 19:54:05 UTC
 - 运行状态：成功
-- 本次总论文数：14
-- 精读区：8
-- 速读区：6
+- 本次总论文数：20
+- 精读区：11
+- 速读区：9
 
 ### 今日简报（AI）
-今日精选 14 篇论文，重点攻克多 Agent 协作与超长文本推理的系统级效率瓶颈。
-ForkKV 与 StructKV 通过优化 KV 缓存架构，实现了多 LoRA 并行服务与长上下文推理的性能飞跃。
-推荐关注 KV 缓存管理与 Token 冗余压缩技术，这是提升大模型推理能效的关键路径。
-- 详情：[/202604/09/README](/202604/09/README)
+今日深度研读 20 篇前沿论文，聚焦大模型推理效率的极致优化与架构创新。
+重点关注 Flux Attention 混合注意力机制及视频大模型中基于视觉语义引导的投机采样技术。
+建议关注端侧 NPU 存储优化与 RL 驱动的芯片架构探索，把握 AI 落地硬件的最新趋势。
+- 详情：[/202604/10/README](/202604/10/README)
 
 ### 精读区论文标签
-1. [ForkKV: Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache](/202604/09/2604.06370v1-forkkv-scaling-multi-lora-agent-serving-via-copy-on-write-disaggregated-kv-cache)  
+1. [See the Forest for the Trees: Loosely Speculative Decoding via Visual-Semantic Guidance for Efficient Inference of Video LLMs](/202604/10/2604.05650v2-see-the-forest-for-the-trees-loosely-speculative-decoding-via-visual-semantic-guidance-for-efficient-inference-of-video-llms)  
+   标签：评分：10.0/10、query:llm-sd
+   evidence：具有宽松验证的松散投机解码
+2. [Flux Attention: Context-Aware Hybrid Attention for Efficient LLMs Inference](/202604/10/2604.07394v1-flux-attention-context-aware-hybrid-attention-for-efficient-llms-inference)  
    标签：评分：10.0/10、query:llm
-   evidence：用于多智能体服务的写时复制解耦KV缓存
-2. [StructKV: Preserving the Structural Skeleton for Scalable Long-Context Inference](/202604/09/2604.06746v1-structkv-preserving-the-structural-skeleton-for-scalable-long-context-inference)  
+   evidence：用于高效LLM推理的上下文感知混合注意力
+3. [DIVERSED: Relaxed Speculative Decoding via Dynamic Ensemble Verification](/202604/10/2604.07622v1-diversed-relaxed-speculative-decoding-via-dynamic-ensemble-verification)  
+   标签：评分：10.0/10、query:llm-sd
+   evidence：通过动态集成验证实现的宽松投机解码
+4. [AsyncTLS: Efficient Generative LLM Inference with Asynchronous Two-level Sparse Attention](/202604/10/2604.07815v1-asynctls-efficient-generative-llm-inference-with-asynchronous-two-level-sparse-attention)  
    标签：评分：10.0/10、query:llm
-   evidence：面向长文本推理的结构感知 KV 缓存压缩
-3. [Does a Global Perspective Help Prune Sparse MoEs Elegantly?](/202604/09/2604.06542v1-does-a-global-perspective-help-prune-sparse-moes-elegantly)  
+   evidence：分层稀疏注意力与KV缓存卸载
+5. [Dual-Pool Token-Budget Routing for Cost-Efficient and Reliable LLM Serving](/202604/10/2604.08075v1-dual-pool-token-budget-routing-for-cost-efficient-and-reliable-llm-serving)  
+   标签：评分：10.0/10、query:llm
+   evidence：优化vLLM集群的吞吐量和KV缓存分配
+6. [KV Cache Offloading for Context-Intensive Tasks](/202604/10/2604.08426v1-kv-cache-offloading-for-context-intensive-tasks)  
+   标签：评分：10.0/10、query:llm
+   evidence：针对上下文密集型任务的KV缓存卸载
+7. [Rethinking Compute Substrates for 3D-Stacked Near-Memory LLM Decoding: Microarchitecture-Scheduling Co-Design](/202604/10/2604.04253v2-rethinking-compute-substrates-for-3d-stacked-near-memory-llm-decoding-microarchitecture-scheduling-co-design)  
    标签：评分：9.0/10、query:llm
-   evidence：针对稀疏混合专家大语言模型的全局冗余感知剪枝策略
-4. [DiffuMask: Diffusion Language Model for Token-level Prompt Pruning](/202604/09/2604.06627v1-diffumask-diffusion-language-model-for-token-level-prompt-pruning)  
+   evidence：LLM解码加速的微架构协同设计
+8. [Fast Heterogeneous Serving: Scalable Mixed-Scale LLM Allocation for SLO-Constrained Inference](/202604/10/2604.07472v1-fast-heterogeneous-serving-scalable-mixed-scale-llm-allocation-for-slo-constrained-inference)  
    标签：评分：9.0/10、query:llm
-   evidence：基于扩散模型的快速Token级提示词剪枝框架
-5. [AudioKV: KV Cache Eviction in Efficient Large Audio Language Models](/202604/09/2604.06694v1-audiokv-kv-cache-eviction-in-efficient-large-audio-language-models)  
+   evidence：针对SLO约束推理服务的可扩展大语言模型分配
+9. [Blink: CPU-Free LLM Inference by Delegating the Serving Stack to GPU and SmartNIC](/202604/10/2604.07609v1-blink-cpu-free-llm-inference-by-delegating-the-serving-stack-to-gpu-and-smartnic)  
    标签：评分：9.0/10、query:llm
-   evidence：大型音频语言模型中的 KV 缓存剔除与压缩
-6. [TRAPTI: Time-Resolved Analysis for SRAM Banking and Power Gating Optimization in Embedded Transformer Inference](/202604/09/2604.06955v1-trapti-time-resolved-analysis-for-sram-banking-and-power-gating-optimization-in-embedded-transformer-inference)  
+   evidence：通过将CPU移出推理路径来优化吞吐量和延迟
+10. [HAWK: Head Importance-Aware Visual Token Pruning in Multimodal Models](/202604/10/2604.07812v1-hawk-head-importance-aware-visual-token-pruning-in-multimodal-models)  
    标签：评分：9.0/10、query:llm
-   evidence：嵌入式硬件上的KV缓存内存占用分析与优化
-7. [MARS: Enabling Autoregressive Models Multi-Token Generation](/202604/09/2604.07023v1-mars-enabling-autoregressive-models-multi-token-generation)  
+   evidence：多模态模型中的视觉Token剪枝以减少推理开销
+11. [Valve: Production Online-Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate](/202604/10/2604.07874v1-valve-production-online-offline-inference-colocation-with-jointly-bounded-preemption-latency-and-rate)  
    标签：评分：9.0/10、query:llm
-   evidence：无需草稿模型的单次前向传播多Token生成
-8. [InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models](/202604/09/2604.07173v1-infinilora-disaggregated-multi-lora-serving-for-large-language-models)  
-   标签：评分：9.0/10、query:llm
-   evidence：解耦的多LoRA服务以优化吞吐量和延迟
+   evidence：通过在线-离线推理混部优化吞吐量和延迟
 
 ### 速读区论文标签
-1. [MoBiE: Efficient Inference of Mixture of Binary Experts under Post-Training Quantization](/202604/09/2604.06798v1-mobie-efficient-inference-of-mixture-of-binary-experts-under-post-training-quantization)  
+1. [SHIELD: A Segmented Hierarchical Memory Architecture for Energy-Efficient LLM Inference on Edge NPUs](/202604/10/2604.07396v1-shield-a-segmented-hierarchical-memory-architecture-for-energy-efficient-llm-inference-on-edge-npus)  
    标签：评分：8.0/10、query:llm
-   evidence：通过二值化实现MoE的高效推理
-2. [Do We Need Distinct Representations for Every Speech Token? Unveiling and Exploiting Redundancy in Large Speech Language Models](/202604/09/2604.06871v1-do-we-need-distinct-representations-for-every-speech-token-unveiling-and-exploiting-redundancy-in-large-speech-language-models)  
+   evidence：优化KV缓存和激活内存的节能大模型推理
+2. [From LLM to Silicon: RL-Driven ASIC Architecture Exploration for On-Device AI Inference](/202604/10/2604.07526v1-from-llm-to-silicon-rl-driven-asic-architecture-exploration-for-on-device-ai-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：基于相似性的Token合并压缩技术
-3. [Q-Zoom: Query-Aware Adaptive Perception for Efficient Multimodal Large Language Models](/202604/09/2604.06912v1-q-zoom-query-aware-adaptive-perception-for-efficient-multimodal-large-language-models)  
+   evidence：用于端侧AI推理加速的ASIC架构探索
+3. [Networking-Aware Energy Efficiency in Agentic AI Inference: A Survey](/202604/10/2604.07857v1-networking-aware-energy-efficiency-in-agentic-ai-inference-a-survey)  
    标签：评分：8.0/10、query:llm
-   evidence：查询感知的自适应感知用于高效多模态大模型推理
-4. [Scheduling the Unschedulable: Taming Black-Box LLM Inference at Scale](/202604/09/2604.06970v1-scheduling-the-unschedulable-taming-black-box-llm-inference-at-scale)  
+   evidence：智能体AI推理能效综述
+4. [Robust Length Prediction: A Perspective from Heavy-Tailed Prompt-Conditioned Distributions](/202604/10/2604.07931v1-robust-length-prediction-a-perspective-from-heavy-tailed-prompt-conditioned-distributions)  
    标签：评分：8.0/10、query:llm
-   evidence：调度黑盒大模型推理以优化延迟
-5. [Just Pass Twice: Efficient Token Classification with LLMs for Zero-Shot NER](/202604/09/2604.05158v1-just-pass-twice-efficient-token-classification-with-llms-for-zero-shot-ner)  
+   evidence：用于高效LLM服务和调度的输出长度预测
+5. [A Full-Stack Performance Evaluation Infrastructure for 3D-DRAM-based LLM Accelerators](/202604/10/2604.08044v1-a-full-stack-performance-evaluation-infrastructure-for-3d-dram-based-llm-accelerators)  
+   标签：评分：8.0/10、query:llm
+   evidence：基于3D-DRAM的LLM加速器性能评估基础设施
+6. [DeepStack: Scalable and Accurate Design Space Exploration for Distributed 3D-Stacked AI Accelerators](/202604/10/2604.04750v2-deepstack-scalable-and-accurate-design-space-exploration-for-distributed-3d-stacked-ai-accelerators)  
+   标签：评分：7.0/10、query:llm
+   evidence：针对大语言模型分布式3D堆叠AI加速器的性能建模
+7. [Lightweight LLM Agent Memory with Small Language Models](/202604/10/2604.07798v1-lightweight-llm-agent-memory-with-small-language-models)  
+   标签：评分：7.0/10、query:llm
+   evidence：使用小语言模型构建的LLM智能体高效内存系统
+8. [VectraFlow: Long-Horizon Semantic Processing over Data and Event Streams with LLMs](/202604/10/2604.03855v1-vectraflow-long-horizon-semantic-processing-over-data-and-event-streams-with-llms)  
    标签：评分：6.0/10、query:llm
-   evidence：因果大模型的高效标记分类
-6. [Select-then-Solve: Paradigm Routing as Inference-Time Optimization for LLM Agents](/202604/09/2604.06753v1-select-then-solve-paradigm-routing-as-inference-time-optimization-for-llm-agents)  
-   标签：评分：6.0/10、query:llm
-   evidence：LLM智能体的推理时优化
+   evidence：LLM驱动数据流中的吞吐量与准确率权衡
+9. [Inference-Time Code Selection via Symbolic Equivalence Partitioning](/202604/10/2604.06485v1-inference-time-code-selection-via-symbolic-equivalence-partitioning)  
+   标签：评分：6.0/10、query:llm-sd
+   evidence：代码生成中的推理时缩放与验证方法
 
 
 <div class="dpr-home-promo-card">

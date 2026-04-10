@@ -1,0 +1,518 @@
+Title: Valve: Production Online-Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate
+
+URL Source: https://arxiv.org/pdf/2604.07874v1
+
+Published Time: Fri, 10 Apr 2026 00:38:08 GMT
+
+Number of Pages: 10
+
+Markdown Content:
+# Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate 
+
+Fangyue Liu * 1 2 Hua Liu * 2 Xinyuan Lyu * 2 Shuo Ai 2 Hao Liang 2 Lingpeng Chen 2 Ziqian Hu 2
+
+Chong Zha 2 Xin Jin 1 Hanmei Luo 2 Peng Chen 2
+
+## Abstract 
+
+LLM inference powers latency-critical production services nowadays. The bursty nature of inference traffic results in over-provisioning, which in turn leads to resource underutilization. While online-offline colocation promises to utilize idle capacity, broad production deployment must overcome two major challenges: (i) large online interference due to slow or frequent preemptions, and (ii) extensive frameworks and drivers modifications, to colocate different models and support preemptions. We present Valve, a production-friendly colocation system that jointly bounds preemption latency and 
+
+preemption rate . Specifically, Valve enables sub-millisecond compute preemption at most once per online request, and rate-limited sub-layer memory reclamation. These guaranties are provided by a GPU runtime that combines channel-controlled compute isolation, page-fault-free memory recla-mation, and dynamic memory reservation. Criti-cally, Valve is practical to deploy, requiring one line of driver modification and 20 lines of frame-work patch. Deployed on 8,054 GPUs in produc-tion, Valve improves cluster utilization by 34.6%, which translates to a 2,170 GPU save. This ef-ficiency gains is achieved with minimal online interference, incurring < 5% TTFT increase and 
+
+< 2% TPOT increase across workloads. 
+
+## 1. Introduction 
+
+Large language model (LLM) inference powers a growing set of workloads. These include latency-critical production services, such as conversational assistants, code genera-tion, multimodal tasks (OpenAI, 2022; Anthropic, 2023; Liu et al., 2024; Jimenez et al., 2023; Jain et al., 2024). LLM also serves batch processing workloads, such as doc-ument processing, data analysis (Lai et al., 2023). Beyond 
+
+> *
+
+Equal contribution. 1Peking University 2Tencent. (1)                           
+
+> Kernel -Level
+> Preemption OFF:1
+> P:1 P:2 P:3 Online arrival
+> P:1 P:2 P:3
+> OFF:1
+> P:1 P:2 P:3
+> D
+> (4)
+> Valve OF F:1
+> P:1 P:2 P:3
+> OFF:2 OFF:3
+> (2)
+> Layer -Level
+> Preemption OFF:1 OFF:2
+> (3)
+> Time -Slice
+> Preemption
+> DDD
+> DDDD
+> DDDD
+> DDDD
+> D
+> D
+> D
+> D
+> Offline : Layer -id Online Prefill : Layer -id Online Decode
+> Slow
+> Preemption
+> Frequent
+> Preemption
+> Fast,
+> Infrequent
+> Preemption
+
+Figure 1. Comparison of online-offline colocation approaches. 
+
+user-facing applications, inference has also become a build-ing block for training workflows, including data curation, post-training actor rollouts, and critic scoring (Guo et al., 2025; Lee et al., 2023). Despite their importance, LLM inference clusters in pro-duction still suffer from low utilization. This is primarily because operators must provision for bursty demand un-der strict latency SLAs, resulting in significant idle capac-ity off-peak. In practice, the burstiness comes from two main sources. First, online services may experience unpre-dictable traffic spikes (Xiang et al., 2025), which are further amplified by customized or fine-tuned models. Second, in-ference in training workflows typically arrives in periodic large batches, causing volatile GPU memory usage (Zhong et al., 2025; Wu, 2025). Harvesting idle capacity to improve utilization remains one of the central challenges in LLM inference deployments. A promising direction is to colocate latency-critical online serving with offline inference on the same GPU, which uti-lizes the idle capacity to run preemptible offline workloads. In practice, however, we find two key obstacles that limit broad deployments of existing approaches (Wu et al., 2023; Qiao et al., 2024; Fan et al., 2025): (i) interference with online workloads caused by high preemption latency or fre-quency, and (ii ) extensive modifications to GPU drivers or inference frameworks. Coarse-grained preemption—e.g., kernel-level (Wu et al., 1
+
+> arXiv:2604.07874v1 [cs.OS] 9 Apr 2026 Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate
+
+2023) (which degrades to iteration-level when CUDA graphs are enabled) and transformer-layer-level (Qiao et al., 2024)—incurs preemption latencies of up to tens of mil-liseconds. Immediate preemption (Fan et al., 2025; Harris, 2017) can react quickly, but may trigger preemptions fre-quently. Moreover, many existing approaches require exten-sive framework or driver modifications (Ruan et al., 2023; Qiao et al., 2024), which hinders deployment in production environments. To address these challenges, we present Valve, a production-friendly online-offline colocation system that jointly bounds 
+
+preemption latency and preemption rate , while imposing negligible interference with online services. Valve builds on three key ideas: (1) Channel-controlled compute isolation. Valve uses GPU channel control to preempt and recover offline execu-tion within sub-millisecond latency. Combined with online request lifecycle awareness , Valve gates offline kernels out-side the lifetime of an online request, ensuring each online request is preempted at most once. (2) Sub-layer memory reclamation with dynamic reser-vation. Valve reclaims KV cache promptly by coordinat-ing memory reclamation with compute preemption. After preempting compute, Valve remaps reclaimed pages to a quarantine page and exposes invalidated page IDs to the framework for recomputation, preventing unrecoverable page faults. Valve further regulates reclamation rate by dynamically reserving memory for online workloads. (3) Throughput-aware scheduling. A burst and multi-GPU aware scheduler models offline throughput on harvested GPUs and assigns offline workloads, meeting their SLAs. We build Valve as a production-friendly system consisting of a node-level runtime and a cluster-level scheduler. Valve requires only a one-line driver modification and 20-line framework patching, making it easy to deploy in production. The main contributions of this paper are summarized as follows: • We design a production-friendly runtime that enables sub-millisecond compute preemption at most once per online request, and sub-layer memory reclamation with a rate-bounded reclamation frequency. • We develop a burst- and multi-GPU-aware scheduler that places offline jobs smartly on harvested GPUs to meet throughput SLAs while improving utilization. • We deploy Valve in a production cluster with 8,054 GPUs, improving average utilization by 34.6%, which translates to saving 2,170 GPUs. Across workloads, Valve incurs < 5% TTFT increase and < 2% TPOT increase. 0–0.5   
+
+> 0.5–1
+> 1–2
+> 2–4
+> 4–8
+> ≥8
+> (a) CV distribution of utilization
+> 0
+> 20
+> 40
+> 60
+> Percentage (%)  GPU Util KV Cache Util
+> Figure 2. Coefficient of Variation (CV) analysis of GPU utilization and KV cache utilization.
+
+## 2. Background 
+
+We first analyze why GPU utilization is low in production by characterizing workload burstiness and SLA requirements. We then derive key requirements for production-friendly online–offline inference colocation, review existing systems and their limitations, and outline the main challenges. 
+
+2.1. Low GPU Utilization of Production Workloads 
+
+Production LLM inference is bursty in both compute and KV-cache usage. To meet strict latency SLAs, online ser-vices reserve peak headroom, leaving GPUs underutilized on average. 
+
+Burstiness in compute and KV-cache memory. Each re-quest uses GPU compute and allocates KV cache throughout its lifecycle. As a result, compute utilization often switches between idle and fully busy. Meanwhile, KV cache grows with the number of concurrent context tokens, and can spike under batch arrivals. Figure 2 measures burstiness across workloads using CV and Figure 3 shows two typical pat-terns: some workloads are bursty in both compute and KV cache, while other workloads are bursty mostly only in com-pute. 
+
+Production workloads and their SLAs. Production infer-ence includes both online and offline workloads. Online inference is user-facing (or latency-critical stages in post-training) and must meet strict latency SLAs, so it can tolerate almost no interference. Offline inference often requires only throughput SLAs, or has no SLA. To meet online SLAs under bursty demand, operators overprovision GPUs, which leads to low average utilization. 
+
+2.2. Key Requirements for Inference Online-Offline Colocation in Production Extremely low interference for online workloads. To meet strict SLAs for real-time online inference, the system must introduce almost no extra delay. Interference comes from both compute and memory effects, and is driven by 
+
+how long each preemption lasts and how often preemptions happen. Thus, the key goal is to bound both preemption latency and preemption rate .2Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate  
+
+> Table 1. Comparison of schemes for online-offline colocation.
+
+TGS Conserve Gpreempt Valve Compute Interference Iteration-level Layer-level Frequent < 1ms per-request Memory Interference Frequent Layer-level Not handling Sub-layer, limited rate Framework Modifications 0 LOC >5000 LOC 0 LOC <20 LOC Driver Modifications 0 LOC 0 LOC >200 LOC 1 LOC 0.0      
+
+> 0.5
+> 1.0
+> GPU Util.
+> 0.0
+> 0.2
+> 0.4
+> KV Cache Util.
+> 0510 Time (min)
+> 0.0
+> 0.5
+> 1.0
+> 0510 Time (min)
+> 0.0
+> 0.2
+> 0.4
+> Utilization
+> Figure 3. GPU utilization and KV cache utilization time series for user-facing inference (bottom) and reward model inference (top). They show different degrees of burstiness in KV cache utilization.
+
+Minimal modifications to drivers and frameworks. Pro-duction deployment requires minimal modifications to GPU drivers and inference frameworks. Extensive modifications increase maintenance burden and limit broader adoption. 
+
+Throughput SLAs for offline workloads. The system should place offline workloads on suitable nodes to meet throughput SLAs, while maximizing cluster throughput. 
+
+2.3. Existing Solutions for Online-Offline Colocation 
+
+A complementary line of work colocates latency-critical online inference with offline jobs on the same GPU, to back-fill idle capacity while preserving strict online SLAs (Wu et al., 2023; Han et al., 2022; Qiao et al., 2024; Fan et al., 2025; Shen et al., 2025; Prabhu et al., 2025; Xu et al., 2024; Yu et al., 2025). Table 1 compares these systems. In pro-duction, they commonly face two obstacles: (i) noticeable interference with online workloads (due to slow or frequent preemptions), and (ii) extensive driver/framework modifica-tions that make deployment and maintenance hard. 
+
+Compute-side preemption. TGS (Wu et al., 2023), XSched (Shen et al., 2025) Lv2 intercepts kernel launches, but LLM serving often relies on CUDA Graphs, which bun-dle kernels of one inference iteration into a single graph, so preemption degrades to graph-level granularity. Con-serve (Qiao et al., 2024) inserts checkpoints into inference code and preempts at the transformer-layer level, but long prefills in production batch inference (e.g., 32k tokens) can stretch layer-level preemption delay to hundres of millisec-onds. The preempted iteration is duplicated, decreasing 10 1 10 2 
+
+> Gap interval CDF (us)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0 CDF
+> Figure 4. Distribution of gap interval between decode iterations.
+
+offline throughput. Gpreempt (Fan et al., 2025) uses a CUDA-driver timeslice for automatic switching, but the decode phase has short gaps between iterations (Figure 4), so it may run offline kernels once per iteration, causing frequent preemptions and increased queue length. 
+
+Memory-side KV-cache isolation. vAttention, Conserve, vTensor, and Prism virtualize KV-cache placement via VMM indirection and resize memory footprints on de-mand (Prabhu et al., 2025; Qiao et al., 2024; Xu et al., 2024; Yu et al., 2025). However, they do not fully solve how to reclaim offline KV memory quickly and safely when online demand spikes. For example, Conserve (Qiao et al., 2024) can reclaim KV cache only at transformer-layer boundaries, which can delay reclamation by up to hundreds of millisec-onds during long prefills. Moreover, prior work largely does not discuss how to control the reclamation frequency. In practice, inference workloads change their memory regions and sizes over time; naively relying on UVM (Harris, 2017) or aggressively sharing memory can trigger reclamation repeatedly, causing severe interference to online workloads. 
+
+Deployability. Many systems also fall short in deploy-ability. Conserve (Qiao et al., 2024) requires extensive inference-framework changes, often involving thousands of lines of code (e.g., injecting checkpoints into inference code and adding new scheduling modules). REEF (Han et al., 2022) requires replacing the compiler toolchain with a custom compiler, which in turn demands major changes to the user container image. XSched (Shen et al., 2025) Lv3 and REEF only support idempotent operators, but all-reduce in multi-GPU inference and some linear attention kernels are not idempotent, making the whole CUDA graph unpre-emptible. As a result, no existing approach simultaneously achieves low-interference, LLM-compatible preemption and production-friendly deployability. 3Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate Online Workload       
+
+> Offline Workload
+> GPU
+> Colocation
+> Runtime
+> Offline
+> Cluster Scheduler ( §6)
+> Online User Offline User
+> Channel -Controlled
+> Compute Isolation ( §4)
+> Sub -layer
+> Memory Reclamation ( §5)
+> Kernel Mem Alloc
+> Channel Op. VMM Op.
+> GPU
+> 1
+> GPU
+> 2
+> GPU
+> 3
+> GPU
+> 4
+
+Figure 5. Valve architecture overview. 
+
+2.4. Challenges 
+
+We face three challenges in designing a production-friendly online-offline inference colocation system in production. 
+
+Challenge 1: Gap-aware sub-millisecond compute inter-ference. The system must achieve sub-millisecond compute preemption while not inserting offline wake-ups between online decode iterations. This requires controllable, fast offline switch, with awareness of online request lifecycles. 
+
+Challenge 2: Rate-limited sub-layer memory reclama-tion. Online bursts may require reclaiming offline KV cache 
+
+immediately in sub-layer granualrity. However, swapping KV pages to CPU is too slow, while invalidating KV pages without coordination can cause illegal accesses. The system must reclaim memory promptly while not killing offline applications. Restricting the reclamation frequency with framework transparency is also critical. 
+
+Challenge 3: Precise offline performance modeling. Of-fline throughput varies with online burstiness and multi-GPU behaviors, requiring precise modeling and scheduling. 
+
+## 3. Valve Overview 
+
+We introduce Valve, an industrial system for online-offline inference colocation. Valve is designed to meet three goals: (1) low compute and memory interference to online work-loads, (2) reliable throughput SLAs for offline workloads, and (3) minimal framework/driver modifications. Figure 5 shows the overall architecture. At the node level, the GPU Colocation Runtime enables compute and memory sharing with low interference by jointly bounding preemption latency and rate. For compute, it limits online impact by providing sub-millisecond, infre-quent kernel preemptions via channel control and workload-aware offline execution control (§4). For memory, it follows prior work (Prabhu et al., 2025) to share GPU memory through a global pool with coarse-grained handles and an 
+
+allocate–release interface. It bounds memory interference Application   
+
+> streams
+> Engines
+> User -mode
+> Driver API
+> runlist
+> Enabled Channels
+> Disabled Channels
+> Launch
+> kernel
+> Injected
+> Runtime
+> Stream -channel
+> mapping Kernel
+> on
+> stream
+> ioctl
+> Kernel
+> on
+> channel
+> Injected
+> Runtime
+> lLaunch kernel on hardware
+> lEnable/disable channels
+
+Figure 6. Channel control in the kernel launch path. 
+
+with fast sub-layer memory reclamation coordinated with compute preemption, and controls reclamation frequency via MIAD(Multiple Increase, Addictive Decrease)-style on-line reservation (§5). These mechanisms also preserve high offline throughput by harvesting most idle compute cycles; during memory reclamation, selective eviction affects fewer offline requests and safe sub-layer reclamation avoids termi-nating offline workloads. These mechanisms also preserve high offline throughput by harvesting most idles compute cycles, impacting less offline requests during memory preemptions, without terminating offline workloads during memory preemptions. At the cluster level, online workloads are submitted directly to GPUs, while offline workloads are submitted to the Clus-ter Scheduler (§6). The scheduler builds a comprehensive performance model of offline workloads on harvested GPUs, and schedules them to satisfy their throughput SLAs, which is specified as the fraction of the standalone throughput. 
+
+## 4. Channel-Controlled Compute Isolation 
+
+We use workload-aware channel control to achieve two goals: sub-millisecond preemption latency and at most one 
+
+preemption per online request. Channel control provides a fast and precise way to pause and resume offline execution, while workload awareness triggers preemption in time and avoids frequent preemptions. 
+
+4.1. GPU Channel Control Channels in the kernel launch path. Figure 6 shows the kernel launch path and where GPU channels fit in. A CUDA stream issues kernel launches through the user-mode driver, which submits work to a channel managed by the kernel-mode driver (KMD) and the GPU. A process typically owns one or more channels, which are bound to specific compute engines. The GPU schedules channels using a hardware-maintained runlist . Importantly, the KMD exposes standard ioctl interfaces to create, enable, and disable channels, and to submit work to channels. These ioctls (I/O control com-mands) make channels a practical control point for control-4Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate Global                        
+
+> Memory
+> Pool
+> Handle 1 Handle 2 Handle 3 Handle 4 Handle 5
+> R4 R4
+> R5 R5
+> II. Dynamic Online
+> Memory Reservation
+> R2 R3
+> R2 R3
+> ③Selective Memory Reclamation
+> R2 R3
+> R2 R3
+> R1
+> R1 R1
+> ②Remap to Shared
+> Quarantine Page
+> R1
+> Framework
+> Block Table
+> R1 R1 R4 R4
+> R5 R5
+> R2 R2 R2
+> R3 R3 R3
+> R2
+> R3
+> Allocate/Release ④Notification of Invalidated Page
+> Compute
+> Preemption
+> ①Preempt Compute
+> I. Sub -layer Memory Reclamation
+
+Figure 7. Sub-layer memory reclamation with dynamic online memory reservation. 
+
+ling offline compute. 
+
+Channel control for portable compute isolation. Valve uses this ioctl-level control point to preempt and resume of-fline workloads with low latency. Specifically, it disables the offline workload’s channel to preempt execution and later re-enables it to resume. On Pascal+ GPUs, disabling a channel triggers a hardware context save to an on-GPU context-save buffer, so in-flight kernels can be safely restored after re-enable (e.g., registers and other on-chip state). These operations take effect within 1 ms, enabling fast preemption without waiting for kernel boundaries. A practical challenge is that these KMD ioctls require driver-managed identifiers (e.g., GPU-client and channel handles) that are not exposed through CUDA APIs. We obtain these identifiers without modifying the driver by intercepting CUDA initialization ioctls: their arguments contain the GPU-client and channel identifiers, which consistently ap-pear as matched pairs on Pascal+ drivers. Our colocation runtime records a mapping from each application to its (GPU-client, channel) handles, and then issues the corre-sponding disable/enable ioctls on demand. 
+
+Optimizing preemption latency for multi -GPU preemp-tion. Naively issuing preemption ioctls on a multi-GPU node leads to latency that grows roughly linearly with the number of GPUs. The bottleneck is a shared write lock that the KMD holds while handling these ioctls across GPUs on the same node. We find this synchronization is not required for inference tasks. On Turing+ GPUs, the preemption com-mand can be offloaded directly to the target device without taking the global lock, reducing kernel-space overhead. Ac-cordingly, we apply a one-line driver modification which changes the flag used to bypass the lock and offload the com-mand to the channel. With this modification, preemption latency on an 8-GPU node drops from > 5 ms to < 1 ms. 
+
+4.2. On-GPU Offline Workload Scheduling Preempting offline workloads. Our runtime, injected into the online process, intercepts kernel-launch commands to track whether the online workload is active. When the online workload transitions to busy, the runtime immediately issues channel-disable commands for all offline workloads on the node, so offline execution is paused promptly. 
+
+Waking up offline workloads. To bound preemption to at most once per online inference request, we do not re-enable offline workloads immediately when the online workload be-comes idle, since short idle gaps can appear between decode iterations. Instead, we wake up offline workloads only after a cooldown interval Tcool during which the online workload stays continuously idle. We set Tcool to twice the maximum gap G between decode iterations, as measured by our run-time instrumentation. This avoids waking offline work in per-iteration gaps and ensures at most one preemption over the lifetime of an online request. 
+
+## 5. Sub-layer Memory Reclamation with Dynamic Reservation 
+
+The main bottleneck of online-offline memory sharing is KV-cache reclamation. When online memory demand spikes, the system may need to unmap and remap offline VMM-mapped KV cache (Prabhu et al., 2025) on the online critical path. Valve addresses this with three techniques: (i) sub-layer memory reclamation to make preemption fast, (ii) dy-namic online memory reservation to reduce interference rate, and (iii) selective handle reclamation for higher offline throughput without adding interference. 
+
+Sub-layer memory reclamation. We first focus on reduc-ing reclamation latency. A natural baseline (Xiang et al., 2025; Qiao et al., 2024) reclaims KV memory only at iter-ation boundaries or layer boundaries, because unmapping KV pages during kernel execution can lead to unrecoverable memory faults. However, this coarse granularity can make reclamation slow, especially when online bursts arrive dur-ing a long prefill iteration. prefill phase when online bursts arrive during offline prefill iterations. Valve enables safe sub-layer reclamation by coordinating compute and memory preemption (Figure 7). When online workloads need memory, we always disable offline compute first, ensuring no in-flight kernel can access pages being reclaimed. We then select a set of offline “evictor” memory handles, remap the virtual pages in those handles to a shared quarantine page, and finally reclaim the memory handles for online workloads. This avoids faults and allows the offline workload to resume later. Accesses to reclaimed pages can lead to incorrect intermedi-ate tokens. To keep the behavior correct, Valve records the reclaimed KV page (block) IDs and exposes them through a small patch: a single callback that returns the invalidated IDs for each request after a decode step. Across vLLM, SGLang, and TensorRT-LLM, this integration touches at 5Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate 
+
+Algorithm 1 Valve selective memory reclamation 
+
+Require: Number of handles k; handle set H (equal size); request cost C OST (r); impacted requests R EQS (h)
+
+Ensure: A handle subset S to reclaim  
+
+> 1:
+
+S ← ∅ , E ← ∅  
+
+> 2:
+
+for i = 1 to k do  
+
+> 3:
+
+h∗ ← arg min h∈H\S 
+
+P 
+
+> r∈REQS (h)\E
+
+COST (r) 
+
+> 4:
+
+S ← S ∪ { h∗} 
+
+> 5:
+
+E ← E ∪ REQS (h∗) 
+
+> 6:
+
+end for  
+
+> 7:
+
+return S
+
+most two scheduler-side functions and requires fewer than 20 lines of code changes. The framework then discards intermediate data for affected requests, returns them to the waiting state with only the input and previously generated to-kens, and later resume them by recomputing. This achieves sub-layer reclamation without crashes. 
+
+Dynamic MIAD-style memory reservation. To reduce reclamation frequency within a given budget while max-imizing offline memory, Valve maintains a dynamic on-line KV-cache headroom H as pre-mapped VMM handles. Valve adapts H using MIAD (Multiplicative Increase, Ad-ditive Decrease): on an online pressure event (i.e., when 
+
+H reaches 90% utilization), it multiplicatively increases H
+
+by a factor α to reserve more mapped handles in advance; when pressure is absent, it shrinks conservatively by releas-ing one handle every interval T . The release interval T
+
+is also MIAD-controlled: if the pressure-event rate over a sliding window exceeds the user-specified target, Valve multiplicatively increases T ; otherwise, it decreases T . This reservation drives the reclamation rate toward the target. 
+
+Selective handle reclamation. The KV cache is not allo-cated continuously on the memory handle due to the mem-ory fragment problem, so one handle can be shared by dif-ferent numbers of offline requests. Reclaiming a handle blindly may preempt more requests than necessary. Valve uses selective handle reclamation (Algorithm 1) to mini-mize the number of affected offline requests. Specifically, it greedily selects handles with the lowest marginal token cost, defined as the total number of extra tokens incurred by the additional requests affected by reclaiming that handle. This improves offline throughput without increasing online interference. 
+
+## 6. Valve Cluster Scheduling 
+
+To satisfy offline throughput SLAs, we build a comprehen-sive performance model for offline LLM inference on har-vested GPUs. We characterize a harvested GPU along three aspects: (i) idle compute fraction; (ii) the burstiness and average of memory usage; and (iii) the multi-GPU behavior of online workloads. We formulate it as 
+
+Thrput (w,N )
+
+Thrput (w, max )
+
+= Pcompute ,(w,N )·Pmemory ,(w,N )·Pmulti ,(w,N ).
+
+(1) Here, w denotes an offline workload and N denotes a node. 
+
+Thrput (w,N ) is the effective throughput of w on N , and 
+
+Thrput (w, max ) is its throughput on the monopolized GPU. We define the three performance factors as follows. 
+
+Idle compute fraction. We measure the idle compute frac-tion using the colocation runtime as the fraction of GPU timeslices available to run the offline workload. 
+
+Burstiness and average of memory. GPU memory deter-mines both feasibility and throughput. For each workload 
+
+w, we profile it once at submission to obtain a memory– throughput curve Thrput w(memory ). Let M be the avail-able memory on node N . Without eviction, the effective throughput is the time average of Thrput w(M ) over the node’s memory trace. When M dips below the workload’s required memory Mreq , the shirnk ∆M = max(0 , M req −
+
+M ) introduces throughput loss. We use a workload-specific coefficient MAC w to map the expected deficit to throughput loss. The memory factor is formulated as: 
+
+Pmemory ,(w,N ) = E[Thrput w(M )] − MAC w ·E[∆ M ]Thrput w(Mmax ) .
+
+(2) 
+
+The multi-card behavior. Online multi-GPU services of-ten use GPUs asynchronously, so activity can be misaligned across cards; in our trace, 32% of instances show only partial overlap. In contrast, model-parallel offline inference runs in lockstep. Misalignment across cards then creates stragglers and idle gaps, reducing throughput and risking SLA vio-lations. We quantify cross-card alignment with a pairwise score Pmulti ,(w,N ) = T∩(N )  
+
+> T∪(N)
+
+, where T∩ is overlapping busy time and T∪ is union busy time. At placement, we admit a 
+
+k-GPU job only if all pairs satisfy Pmulti ,(w,N ) ≥ 0.95 .
+
+Scheduling. Building on this model, our scheduler sched-ules offline workloads to nodes with guaranteed through-put SLA. Besides, a monitor periodically checks the past throughput of each offline throughput and evicts those that persistently violate their SLA for rescheduling. 
+
+## 7. Evaluation 
+
+In this section, we first quantify the production impact of Valve (§ 7.1), then compare it with existing online-offline colocation approaches in terms of interference to online workloads and throughput of offline workloads (§ 7.2). 6Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate 0 24 48 72 96 120 144 168 (a) Improved GPU utilization 
+
+> 0
+> 20
+> 40
+> 60 Precentage (%)
+> Hour
+
+Figure 8. Cluster GPU utilization with Valve. Nov 01 Dec 01 Jan 01 (b) Deployment scale growth 
+
+> 0
+> 1800
+> 3600
+> 5400
+> 7200
+> 9000 Deployment Scale
+> Date
+
+Figure 9. Deployment scale with Valve. 
+
+7.1. Production Impact of Valve Deployment. Valve is deployed in production clusters with 8045 GPU cards. The clusters serve both online and offline inference workloads. Valve has been in production for more than three months, with the number of managed GPU cards increasing over time, illustrated by Figure 9. 
+
+Metrics. We use two metrics to quantify Valve’s end-to-end impact: (i) improved GPU utilization , which is the frac-tion of time when GPUs execute offline compute; and (ii) 
+
+saved GPU cards . The amount of GPU cards saved by each colocated offline workload is computed as the throughput normalized by standalone offline throughput. 
+
+Results. Figure 8 shows improved GPU utilization in the production cluster over one week, with an average of 34.6% improvement. The inference work done by the offline work-loads translates to a saving of 2170 GPU cards. 
+
+7.2. Comparison with Alternative Colocation Approaches Metrics. We evaluate both the interference to online work-loads and the throughput of offline workloads using three metrics: • TTFT increase percentage: The increase percentage of online workloads under each strategy, compared with standalone running TTFT. • TPOT increase percentage: The increase percentage of online workloads under each strategy, compared with standalone running TPOT. • Offline throughput: To compare the throughput of different strategies clearly, we report the normalized 0
+
+> 20
+> 40
+> 60
+> 80
+> 100
+> Workload Percentage (%)  (a) TTFT increased percentage distribution
+> 0–5%
+> 5–10%
+> 10–20%
+> ≥20%
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Workload Percentage (%)  (b) TPOT increased percentage distribution
+> 0–2%
+> 2–5%
+> 5–20%
+> ≥20%
+> KernelPreempt+UVM
+> GPreempt+UVM
+> Channel+UVM
+> Channel+Prism
+> Channel+StaticMem
+> Valve
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Workload Percentage (%)  (c) Offline throughput distribution
+> ≥0.95
+> 0.8–0.95
+> 0.5–0.8
+> <0.5
+
+Figure 10. Distribution over 10 workloads of (a) TTFT increase percentage (b) TPOT increase percentage and (c) offline through-put under each strategies. Stacked segments indicate the workload percentage in each bin. 
+
+throughput, which is the throughput divided by the throughput under no-memory-preemption, i.e. Prism with our compute preemption (Channel+Prism). 
+
+Methodology. We sample 10 online workload and offline workload pairs from production deployments, and replay them in our test cluster with different colocation strategies. 
+
+Baseline techniques. We consider two orthogonal design dimensions—compute preemption and memory preemption. 
+
+Compute preemption. (1) KernelPreempt: kernel-level pre-emption—switch at kernel boundaries, adopted by TGS (Wu et al., 2023). With CUDA graphs, kernel boundaries align with iteration steps, resulting in coarse-grained preemption. (2) GPreempt: immediate online workload preemption via setting short time slice for offline workloads and long time slice for online workloads, proposed by GPreempt (Fan et al., 2025). (3) Channel: our channel-based preemption with workload awareness (§4). 
+
+Memory preemption. (1) UVM (Harris, 2017): allocate normal device memory for online workloads and use CUDA Unified Virtual Memory for offline workloads, which allows the online workloads to reclaim offline memory as needed. (2) Prism (Yu et al., 2025): share memory between online and offline workloads via CUDA VMM. (3) StaticMem: statically allocate unused memory to offline workloads via the CUDA VMM. The minimum free memory over the past 7Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate 
+
+hour is used as the offline limit; online bursts above this kill offline workloads immediately. (4) OurMem: our memory preemption(§5)—sub-layer reclamation and MIAD-style dynamic memory reservation for low reclamation rate. 
+
+Baseline combinations. We evaluate combinations of the above techniques as baselines to assess how Valve’s preemp-tion mechanisms reduce interference while sustaining high offline throughput. We (i) compare KernelPreempt+UVM, Gpreempt+UVM, and Channel+UVM to show the effects of our compute preemption; (ii) compare Channel+UVM, Channel+Prism, Channel+StaticMem, and Valve to show the effects of our memory preemption. 
+
+Results. Figure 10 illustrates the results. Valve keeps the online TTFT increase within 5% and TPOT increase within 2% across all workloads, which is significantly lower than all baselines. Meanwhile, Valve maintains similar offline throughput to Channel+Prism where offline KV cache is not reclaimed, and significantly outperforms UVM-based baselines and static memory allocation baselines. For compute preemption, KernelPreempt suffers from large single preemption latency in all cases since CUDA graphs make preemption iteration-level; Gpreempt incurs frequent preemptions because an offline wakeup and preemption happens after each inference iteration. This harms TPOT and increases queue length, which in turn increases TTFT. In contrast, Valve’s channel-based control with workload awareness bounds both preemption latency and rate, achiev-ing low compute interference. For memory preemption, Channel+UVM preempts often: UVM lets offline workloads fill spare online memory, which is reclaimed whenever online demand spikes; it also cannot use memory already allocated by online workloads, limiting offline throughput. Channel+Prism does not reclaim mem-ory, forcing online batch-size reduction and more queue-ing, increasing TTFT significantly in 4 sampled workloads. Channel+StaticMem shows low interference but static al-location underutilizes memory, yielding 9%–100% lower offline throughput in the 4 sampled online workloads with bursty memory usage. Valve utilizes MIAD-style dynamic reservation and sub-layer fast reclamation for low memory interference while keeping high offline throughput. 
+
+Effectiveness of Valve eviction policy. We further evaluate our eviction policy under varying reclamation rate and re-claimed memory size. We compare against a FIFO baseline, which evicts offline KV cache blocks in first-in-first-out order. We colocate a 7B online model with a 7B offline model. As shown in Figure 11(a), by targeting blocks tied to fewer in-flight offline requests, our policy consistently reduces throughput loss by 22.9%–40.1% over FIFO. 10G 0.2/m   
+
+> 20G 0.2/m
+> 10G 0.4/m
+> 20G 0.4/m
+> 10G 0.8/m
+> 20G 0.8/m
+> 0
+> 250
+> 500
+> 750
+> 1000 Throughput (token/s)  FIFO Valve
+> Figure 11. Effectiveness of the eviction selection.
+
+## 8. Related Work 
+
+Autoscaling. Serverless autoscaling systems (e.g., BlitzS-cale, ServerlessLLM, and HydraServe) unload model weights when idle and reload them on demand (Zhang et al., 2025; Lou et al., 2025; Fu et al., 2024). This reduces steady-state GPU memory footprint, but the on-demand reload can introduce cold-start delays (e.g., TTFT spikes) under highly bursty traffic, making it hard to satisfy strict latency SLAs. These approaches are complementary to Valve and are suit-able when bursts are milder or SLOs are less stringent. 
+
+Multiplexing. Several systems multiplex multiple mod-els on one GPU via temporal or spatial sharing (NVIDIA, 2026a; Li et al., 2023; Duan et al., 2024; Xiang et al., 2025; Patke et al., 2024; NVIDIA, 2026b; Ghodrati et al., 2020). They typically target relaxed or best-effort SLAs: under con-tention, workloads queue for compute and memory, leading to higher latency. Valve instead targets online–offline colo-cation by jointly bounding interference latency and rate. 
+
+LLM inference systems. Prior work improves online LLM serving via scheduling and memory management (Kwon et al., 2023; Agrawal et al., 2023; Sun et al., 2024; Sheng et al., 2024). These systems focus on optimizing the serving stack (e.g., batching, KV-cache efficiency, and tail-latency control) and are orthogonal to them by providing bounded-interference for online–offline inference colocation. 
+
+Cluster scheduling. Interference-aware CPU sched-ulers (Verma et al., 2015; Schwarzkopf et al., 2013; Delim-itrou & Kozyrakis, 2013; 2014) and ML schedulers (Xiao et al., 2018; Gu et al., 2019; Xiao et al., 2020; Crankshaw et al., 2017; Gujarati et al., 2020; Crankshaw et al., 2020) improve cluster utilization. Valve is orthogonal by solving new challenges in inference colocation for high utilization. 
+
+## 9. Conclusion 
+
+We present Valve, a production-friendly online–offline colo-cation system that jointly bounds preemption latency and 
+
+preemption rate . Valve combines channel-controlled com-pute isolation with safe, rate-limited sub-layer memory reclamation, achieving both low preemption latency and rate. Deployed on 8,054 GPUs, Valve improves average 8Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate 
+
+cluster utilization by 34.6% and saves 2,170 GPUs, while incurring < 5% TTFT increase and < 2% TPOT increase across workloads. 
+
+## References 
+
+Agrawal, A., Panwar, A., Mohan, J., Kwatra, N., Gulavani, B. S., and Ramjee, R. Sarathi: Efficient llm inference by piggybacking decodes with chunked prefills. arXiv preprint arXiv:2308.16369 , 2023. Anthropic. Introducing Claude, 2023. 
+
+https://www.anthropic.com/index/ introducing-claude .Crankshaw, D., Wang, X., Zhou, G., Franklin, M. J., Gonza-lez, J. E., and Stoica, I. Clipper: A {Low-Latency } online prediction serving system. In USENIX NSDI , 2017. Crankshaw, D., Sela, G.-E., Mo, X., Zumar, C., Stoica, I., Gonzalez, J., and Tumanov, A. Inferline: latency-aware provisioning and scaling for prediction serving pipelines. In ACM Symposium on Cloud Computing , 2020. Delimitrou, C. and Kozyrakis, C. Paragon: Qos-aware scheduling for heterogeneous datacenters. ACM SIG-PLAN Notices , 48(4):77–88, 2013. Delimitrou, C. and Kozyrakis, C. Quasar: Resource-efficient and qos-aware cluster management. ACM Sig-plan Notices , 49(4):127–144, 2014. Duan, J., Lu, R., Duanmu, H., Li, X., Zhang, X., Lin, D., Stoica, I., and Zhang, H. Muxserve: Flexible spatial-temporal multiplexing for multiple llm serving. arXiv preprint arXiv:2404.02015 , 2024. Fan, R., Ren, T., Xie, M., Gao, S., Shu, J., and Lu, Y. 
+
+{GPREEMPT }:{GPU } preemptive scheduling made gen-eral and efficient. In 2025 USENIX Annual Technical Conference (USENIX ATC 25) , pp. 263–272, 2025. Fu, Y., Xue, L., Huang, Y., Brabete, A.-O., Ustiugov, D., Patel, Y., and Mai, L. {ServerlessLLM }:{Low-Latency }
+
+serverless inference for large language models. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) , pp. 135–153, 2024. Ghodrati, S., Ahn, B. H., Kim, J. K., Kinzer, S., Yatham, B. R., Alla, N., Sharma, H., Alian, M., Ebrahimi, E., Kim, N. S., et al. Planaria: Dynamic architecture fission for spatial multi-tenant acceleration of deep neural networks. In IEEE/ACM MICRO , 2020. Gu, J., Chowdhury, M., Shin, K. G., Zhu, Y., Jeon, M., Qian, J., Liu, H., and Guo, C. Tiresias: A GPU cluster manager for distributed deep learning. In USENIX NSDI , 2019. Gujarati, A., Karimi, R., Alzayat, S., Hao, W., Kaufmann, A., Vigfusson, Y., and Mace, J. Serving {DNNs } like clockwork: Performance predictability from the bottom up. In USENIX OSDI , 2020. Guo, D., Yang, D., Zhang, H., Song, J., Zhang, R., Xu, R., Zhu, Q., Ma, S., Wang, P., Bi, X., et al. Deepseek-r1: In-centivizing reasoning capability in llms via reinforcement learning. arXiv preprint arXiv:2501.12948 , 2025. Han, M., Zhang, H., Chen, R., and Chen, H. Microsecond-scale preemption for concurrent gpu-accelerated dnn in-ferences. In USENIX OSDI , 2022. Harris, M. CUDA Unified Memory, 2017. 
+
+https://developer.nvidia.com/blog/ unified-memory-cuda-beginners/ .Jain, N., Han, K., Gu, A., Li, W.-D., Yan, F., Zhang, T., Wang, S., Solar-Lezama, A., Sen, K., and Stoica, I. Livecodebench: Holistic and contamination free eval-uation of large language models for code. arXiv preprint arXiv:2403.07974 , 2024. Jimenez, C. E., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O., and Narasimhan, K. Swe-bench: Can language mod-els resolve real-world github issues? arXiv preprint arXiv:2310.06770 , 2023. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with pagedattention. In ACM SOSP , 2023. Lai, Y., Li, C., Wang, Y., Zhang, T., Zhong, R., Zettle-moyer, L., Yih, W.-t., Fried, D., Wang, S., and Yu, T. Ds-1000: A natural and reliable benchmark for data sci-ence code generation. In International Conference on Machine Learning , pp. 18319–18345. PMLR, 2023. Lee, H., Phatale, S., Mansoor, H., Mesnard, T., Ferret, J., Lu, K., Bishop, C., Hall, E., Carbune, V., Rastogi, A., et al. Rlaif vs. rlhf: Scaling reinforcement learning from human feedback with ai feedback. arXiv preprint arXiv:2309.00267 , 2023. Li, Z., Zheng, L., Zhong, Y., Liu, V., Sheng, Y., Jin, X., Huang, Y., Chen, Z., Zhang, H., Gonzalez, J. E., et al. 
+
+{AlpaServe }: Statistical multiplexing with model par-allelism for deep learning serving. In USENIX OSDI ,2023. Liu, Z., Fang, F., Feng, X., Du, X., Zhang, C., Wang, N., Zhao, Q., Fan, L., GAN, C., Lin, H., et al. Ii-bench: An image implication understanding benchmark for multi-modal large language models. Advances in Neural Infor-mation Processing Systems , 37:46378–46480, 2024. 9Valve: Production Online–Offline Inference Colocation with Jointly-Bounded Preemption Latency and Rate 
+
+Lou, C., Qi, S., Jin, C., Nie, D., Yang, H., Liu, X., and Jin, X. Towards swift serverless llm cold starts with paraserve. 
+
+arXiv preprint arXiv:2502.15524 , 2025. NVIDIA. CUDA Multi-Process Service, 2026a. 
+
+https://docs.nvidia.com/deploy/mps/ index.html (accessed 2026-04-09). NVIDIA. ”nvidia multi-instance gpu (mig)”, 2026b. ”https://docs.nvidia.com/datacenter/ tesla/mig-user-guide/ (accessed 2026-04-09)”. OpenAI. Introducing ChatGPT, 2022. https://openai. com/blog/chatgpt .Patke, A., Reddy, D., Jha, S., Qiu, H., Pinto, C., Narayanaswami, C., Kalbarczyk, Z., and Iyer, R. Queue management for slo-oriented large language model serv-ing. arXiv preprint arXiv:2407.00047 , 2024. Prabhu, R., Nayak, A., Mohan, J., Ramjee, R., and Panwar, A. vattention: Dynamic memory management for serv-ing llms without pagedattention. In Proceedings of the 30th ACM International Conference on Architectural Sup-port for Programming Languages and Operating Systems, Volume 1 , pp. 1133–1150, 2025. Qiao, Y., Anzai, S., Yu, S., Ma, H., Wang, Y., Kim, M., and Xu, H. Conserve: Harvesting gpus for low-latency and high-throughput large language model serving. arXiv preprint arXiv:2410.01228 , 2024. Ruan, Z., Park, S. J., Aguilera, M. K., Belay, A., and Schwarzkopf, M. Nu: Achieving {Microsecond-Scale }
+
+resource fungibility with logical processes. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) , pp. 1409–1427, 2023. Schwarzkopf, M., Konwinski, A., Abd-El-Malek, M., and Wilkes, J. Omega: flexible, scalable schedulers for large compute clusters. In EuroSys , 2013. Shen, W., Han, M., Liu, J., Chen, R., and Chen, H. 
+
+{XSched }: Preemptive scheduling for diverse {XPUs }.In 19th USENIX Symposium on Operating Systems De-sign and Implementation (OSDI 25) , pp. 671–692, 2025. Sheng, Y., Cao, S., Li, D., Zhu, B., Li, Z., Zhuo, D., Gonza-lez, J. E., and Stoica, I. Fairness in serving large language models. In 18th USENIX Symposium on Operating Sys-tems Design and Implementation (OSDI 24) , pp. 965–988, 2024. Sun, B., Huang, Z., Zhao, H., Xiao, W., Zhang, X., Li, Y., and Lin, W. Llumnix: Dynamic scheduling for large language model serving. In 18th USENIX symposium on operating systems design and implementation (OSDI 24) ,pp. 173–191, 2024. Verma, A., Pedrosa, L., Korupolu, M., Oppenheimer, D., Tune, E., and Wilkes, J. Large-scale cluster management at Google with Borg. In EuroSys , 2015. Wu, B., Zhang, Z., Bai, Z., Liu, X., and Jin, X. Transparent 
+
+{GPU } sharing in container clouds for deep learning workloads. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) , pp. 69– 85, 2023. Wu, C. Hybridflow: A flexible and efficient rlhf frame-work. EuroSys 2025 (30/03/2025-03/04/2025, Rotter-dam) , 2025. Xiang, Y., Li, X., Qian, K., Yang, Y., Zhu, D., Yu, W., Zhai, E., Liu, X., Jin, X., and Zhou, J. Aegaeon: Effective gpu pooling for concurrent llm serving on the market. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles , pp. 1030–1045, 2025. Xiao, W., Bhardwaj, R., Ramjee, R., Sivathanu, M., Kwatra, N., Han, Z., Patel, P., Peng, X., Zhao, H., Zhang, Q., et al. Gandiva: Introspective cluster scheduling for deep learning. In USENIX OSDI , 2018. Xiao, W., Ren, S., Li, Y., Zhang, Y., Hou, P., Li, Z., Feng, Y., Lin, W., and Jia, Y. Antman: Dynamic scaling on GPU clusters for deep learning. In USENIX OSDI , 2020. Xu, J., Zhang, R., Guo, C., Hu, W., Liu, Z., Wu, F., Feng, Y., Sun, S., Shao, C., Guo, Y., et al. vtensor: Flexible virtual tensor management for efficient llm serving. arXiv preprint arXiv:2407.15309 , 2024. Yu, S., Xing, J., Qiao, Y., Ma, M., Li, Y., Wang, Y., Yang, S., Xie, Z., Cao, S., Bao, K., et al. Prism: Unleashing gpu sharing for cost-efficient multi-llm serving. arXiv preprint arXiv:2505.04021 , 2025. Zhang, D., Wang, H., Liu, Y., Wei, X., Shan, Y., Chen, R., and Chen, H. {BlitzScale }: Fast and live large model autoscaling with o (1) host caching. In 19th USENIX Symposium on Operating Systems Design and Implemen-tation (OSDI 25) , pp. 275–293, 2025. Zhong, Y., Zhang, Z., Wu, B., Liu, S., Chen, Y., Wan, C., Hu, H., Xia, L., Ming, R., Zhu, Y., et al. Optimizing {RLHF }
+
+training for large language models with stage fusion. In 
+
+22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) , pp. 489–503, 2025. 10
