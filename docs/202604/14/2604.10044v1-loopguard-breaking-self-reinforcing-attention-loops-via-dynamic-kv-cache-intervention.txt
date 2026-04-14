@@ -1,0 +1,913 @@
+Title: LoopGuard: Breaking Self-Reinforcing Attention Loops via Dynamic KV Cache Intervention
+
+URL Source: https://arxiv.org/pdf/2604.10044v1
+
+Published Time: Tue, 14 Apr 2026 00:32:37 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# LoopGuard: Breaking Self-Reinforcing Attention Loops via Dynamic KV Cache Intervention 
+
+Dongjie Xu 1, Hao Wu 2, Weijie Shi 3, Yue Cui 4, Yuanjun Liu 1,Jiawei Li 3, Haolun Ma 3, An Liu 1, Jia Zhu 5, Jiajie Xu 1
+
+> 1
+
+Soochow University, 
+
+> 2
+
+Tongji University, 
+
+> 3
+
+The Hong Kong University of Science and Technology, 
+
+> 4
+
+Alibaba Group, 
+
+> 5
+
+Zhejiang Normal University 
+
+Abstract 
+
+Through systematic experiments on long-context generation, we observe a damaging fail-ure mode in which decoding can collapse into persistent repetition loops. We find that this degeneration is driven by collapsed attention patterns, where a subset of heads locks onto a narrow suffix of the history, and is further stabilized by inference-time KV cache reuse. Crucially, since many existing KV cache poli-cies rely on attention-based importance, this collapse can produce spuriously high scores for repetitive tokens, causing cache management to inadvertently amplify repetition. To study this phenomenon in a controlled and reproducible manner, we introduce LoopBench, a bench-mark with explicit loop-inducing conditions and loop-oriented metrics that quantify repeti-tion severity and generation instability beyond downstream task scores. Building on these in-sights, we propose LoopGuard, a lightweight, plug-in KV cache guard that detects loop on-set online and disrupts the feedback cycle by pruning repetitive tail spans under a fixed cache budget. Experiments on LoopBench show that LoopGuard reduces loop incidence by over 90 percentage points, while restoring output diver-sity and reducing token waste. 
+
+1 Introduction 
+
+Large language models (LLMs) are increasingly deployed in long-context generation settings, pow-ering workflows such as long-form summariza-tion, structured information extraction, and tool-augmented agents (Bai et al., 2024). In these appli-cations, reliability is as critical as raw capability: failures can propagate to downstream systems and incur substantial computational cost (Yao et al., 2022). Yet, despite advances in model scaling and long-context training, LLMs remain vulnerable to generation degeneration that can abruptly derail outputs, waste tokens, and inflate latency (Holtz-man et al., 2019). Understanding and mitigating such reliability failures is therefore essential for dependable long-context generation. In this work, we study persistent repetition loops, a damaging failure mode in which long-context decoding collapses into self-sustaining repetition and fails to recover contextual diversity (Li et al., 2023). At inference time, long-context generation crucially relies on the key–value (KV) cache, which stores past keys and values to enable efficient at-tention over extended histories. This mechanism underpins many practical applications that require prolonged decoding, such as long-form summariza-tion, structured generation, and agentic workflows. To operate under bounded memory, a broad range of KV cache management strategies have been pro-posed, typically retaining or evicting past states based on attention-derived relevance or simple re-tention rules (Zhang et al., 2023; Li et al., 2024; Xiao et al., 2024b). Our analysis reveals that repetition loops are driven by a collapse in attention dynamics: asubset of attention heads repeatedly locks onto a narrow suffix of the generated history, forming highly stable and concentrated attention patterns that trap generation in a low diversity attractor (Fig-ure 1a) (Liu et al., 2024; Hiraoka and Inui, 2025). Once such attention collapse occurs, inference-time KV cache reuse preserves and reinforces the same trajectory across subsequent decoding steps. More-over, because many KV cache management strate-gies rely on attention-based importance signals, the collapsed attention can become self-reinforcing, re-peatedly preserving the same repetitive states and reducing cache diversity, which further amplifies repetition loops (Figure 1b). We observe this lock-ing and amplification effect to be more pronounced in smaller LLMs, indicating a vulnerability that depends on model scale, making loops easier to trigger and harder to escape. Compounding this issue, existing evaluations typically prioritize down-stream task scores under healthy contexts, leaving      
+
+> arXiv:2604.10044v1 [cs.AI] 11 Apr 2026 The
+> model
+> begins
+> to
+> generate
+> diverse
+> content
+> repetitive
+> repetitive
+> text
+> repetitive
+> repetitive
+> text
+> repetitive
+> repetitive
+> text
+> Repetitive Output Old Anchors
+> (Low Attention
+> Score)
+> Input KV Cache
+> Recent Repetition
+> （High Attention
+> Score ）
+> Retained
+> Cache
+> Standard
+> Policy
+> （e.g.,H 2
+
+0) 
+
+> Filter:
+> Keep High
+> Score
+> Loop
+> Strengthened
+> Discarded Context
+> repetitive
+> repetitive
+> text
+> repetitive
+> repetitive
+> text
+> repetitive
+> repetitive
+> text
+> Repetitive Output
+> repetitive
+> Loop Detected
+> Loop Guard Action
+> New
+> diverse
+> content
+> is
+> generated
+> Prune Tail
+> Repetitions
+> Preserve
+> Anchors
+> Diversity
+> Restored
+
+(c)Our Strategy: Loop Guard 
+
+Intervention. 
+
+(b) The Trap of Attention -Based 
+
+Eviction. 
+
+(a) Self -Reinforcing Head Locking Dynamics.   
+
+> Key Tokens(History/KV Cache)
+> Query Tokens （Generation Step ）
+> Positive
+> Feedback
+> Loop
+> Head Locking
+> text
+> repetitive
+> text
+> repetitive
+> repetitive
+> repetitive
+> repetitive
+> repetitive
+> repetitive
+> repetitive
+> repetitive
+> text
+> repetitive
+> repetitive
+> repetitive
+
+Figure 1: Illustration of self-reinforcing repetition loops and our mitigation strategy. (a) Attention heads lock onto narrow repetitive spans, creating a positive feedback loop. (b) Existing attention-based eviction policies (e.g., H2O) inadvertently strengthen this loop by preserving high-score repetitive tokens while discarding diverse context. (c) LoopGuard detects loop onset and prunes the repetitive tail to break the feedback cycle and restore diversity. 
+
+the regime of degeneration insufficiently controlled and hard to reproduce. This methodological gap makes it difficult to rigorously compare cache poli-cies when reliability fails, motivating the need for a dedicated benchmark and loop-oriented metrics for systematic analysis. To overcome the lack of reproducible evalua-tion and the vulnerability of existing cache policies, we introduce LoopBench, a benchmark designed to isolate loop dynamics under controlled condi-tions. It incorporates explicit triggers covering both schema-constrained generation and recursive in-struction following. Complementing this, we intro-duce loop-oriented metrics to quantify repetition severity and generation instability beyond standard accuracy scores. Building on these findings, we propose LoopGuard, a lightweight KV cache inter-vention that monitors online degeneration signals. Upon detecting loop onset, LoopGuard breaks the self-reinforcing feedback cycle by pruning repet-itive tail spans with a debounced trigger, while preserving anchor tokens and sparsely retaining distant context (Figure 1c). Experiments demon-strate that LoopGuard acts as a minimally invasive safety net, reducing loop incidence by over 90 per-centage points while restoring output diversity and reducing token waste under a fixed cache budget. Our contributions are summarized as follows: • We identify persistent repetition loops as an attention-level failure mode with head locking, and show that KV cache feedback and attention-guided heuristics can jointly amplify repetition by reducing cache diversity. • We construct LoopBench, a controlled and repro-ducible benchmark with loop-inducing conditions, and introduce loop-specific metrics that quantify repetition severity and generation instability. • We propose LoopGuard, a lightweight KV cache intervention that detects loop onset online and mitigates repetition by disrupting self-reinforcing cache feedback through targeted pruning of repet-itive tail spans under a fixed cache budget. 
+
+2 Related Work 
+
+2.1 Repetitive Generation Mechanisms 
+
+Repetitive generation refers to a degeneration phenomenon in which language models become trapped in producing identical or highly similar to-ken sequences over extended decoding steps (Ols-son et al., 2022). It has been observed across models of varying scales and can severely compro-mise generation quality and reliability (Xu et al., 2022; Press et al., 2021). Beyond being a surface-level decoding issue, recent studies suggest that repetition loops reflect a more persistent failure in inference-time dynamics: once the model enters a low-entropy repetitive regime, the generation tra-jectory can become self-reinforcing and difficult to escape, leading to persistent loops (Li et al., 2025). Repetition has also been investigated as an adver-sarially inducible failure mode, where non-halting prompts or automated prompt optimization reliably drive models into sustained repetition under con-trolled settings (Hammouri et al., 2025). While this line of work establishes the reproducibility and stability of repetition loops, it primarily focuses on how to elicit such behaviors, leaving the underlying mechanisms of loop persistence during inference less understood. 
+
+2.2 Efficient Long-context Inference with KV Cache 
+
+As context length increases, managing the KV cache during inference becomes a central chal-lenge for long-context generation. A prominent line of work focuses on selectively retaining or evicting KV entries under a fixed memory bud-get. Methods such as H 2O (Zhang et al., 2023) and SnapKV (Li et al., 2024) estimate token impor-tance based on historical attention and retain only a subset of tokens for subsequent attention compu-tation. Recent works such as StreamingLLM (Xiao et al., 2024b) and LM-Infinite (Han et al., 2024) retain a small set of initial tokens in addition to a sliding context window, helping preserve model performance on long sequences. However, these methods rely on predefined retention rules and can-not adapt to evolving inference dynamics. To re-duce irreversible information loss, hierarchical or retrieval-based KV cache management has been proposed: InfLLM (Xiao et al., 2024a) maintains block-level memory units with on-demand retrieval (optionally offloading cold blocks to CPU), and QUEST (Tang et al., 2024) introduces query-aware sparsity at page granularity. Overall, many KV cache strategies rely on attention-derived relevance signals; under repetition loops, these signals can be-come self-reinforcing and biased toward a narrow history, amplifying loops and hindering recovery. 
+
+3 Background and Motivation 
+
+3.1 KV Cache Formulation 
+
+During inference, KV cache stores previously com-puted attention keys and values for reuse across decoding steps, enabling efficient long-context gen-eration by reducing redundant computation. For each past token xi, the model computes key and 0 500 1000 1500 2000 2500      
+
+> Token Length (Generation Step)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Diversity Metric  Collapse Point
+> (a) Diversity Collapse Pattern
+> 0500 1000 1500 2000 2500
+> Token Length (Generation Step)
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Survival Rate
+> (b) Comparison of Model Survival
+> Llama-1B
+> Qwen-1.7B
+> Llama-3B
+> Qwen-4B
+
+Figure 2: Diversity Collapse and Scale-dependent Sur-vival under Repetition Loops. (a) Diversity metric over decoding steps with a clear collapse point. (b) Survival rate (non-collapsed runs) across model scales under loop-inducing prompts. 
+
+value vectors (khi , v hi ) for each attention head h,and stores them in the cache so that future steps can reuse them without recomputation. At step t+1 , head h forms a query qht+1 and attends to a subset of cached positions. Let 
+
+St ⊆ {0, . . . , t } denote the indices of tokens whose keys and values are currently accessible un-der a cache policy (the full cache corresponds to 
+
+St = {0, . . . , t }), which can be viewed as an ad-ditional restriction on top of the causal attention mask. The attention weights and head output are 
+
+αht+1 ,i = softmax i∈St
+
+⟨qht+1 , k hi ⟩√dh
+
+!
+
+,oht+1 = X
+
+> i∈St
+
+αht+1 ,i vhi .
+
+(1) The multi-head outputs are then combined to com-pute the next-token distribution. Under memory limits, cache management dynamically updates St
+
+(typically enforcing |St| ≤ B for a fixed budget B), and thus directly constrains which past information can influence decoding at each step. 
+
+3.2 Analysis of Repetitive Generation 
+
+In this paper, we focus on persistent repetition loops in long-context decoding, where generation collapses into self-sustaining repetition and fails to recover diversity. This regime is practically im-portant because long-horizon decoding magnifies failure cost (token waste and latency) and is where KV cache reuse and budgeted cache policies can induce strong feedback effects. Figure 2 summarizes two key observations. In Figure 2(a), our diversity metric exhibits a two-stage trajectory: it remains high early on, then drops sharply at a collapse point and stays persis-tently low, after which decoding is trapped in a stable repetitive regime. This behavior is consis-tent with a self-reinforcing autoregressive process in which predictions concentrate once a short span starts to repeat (Li et al., 2025). In Figure 2(b), we observe a clear scale effect: defining survival at step t as the fraction of runs that have not collapsed by t, larger models survive longer while smaller models fail earlier and more frequently. These ob-servations motivate online monitoring and targeted disruption once looping begins. 
+
+3.3 Repetition Collapse under RoPE and KV Cache 
+
+We study why repetition loops, once formed, can remain stable under rotary position embeddings (RoPE) (Su et al., 2024) with KV cache reuse, i.e., autoregressive decoding where RoPE is applied to the query and key vectors, while past keys and values are cached and reused across steps. Under RoPE, attention scores admit a block-wise relative-offset form 
+
+st,i =
+
+> dh/2
+
+X
+
+> j=1
+
+(q(j) 
+
+> t
+
+)⊤R ωj (t − i) k(j) 
+
+> i
+
+, (2) where R(·) is a 2×2 rotation and ωj are fixed fre-quencies. Thus, scoring depends on indices primar-ily through the relative offset (t − i).After collapse, decoding often enters a short-period tail repetition regime with period P , where projections over the active suffix become approx-imately periodic: qt ≈ qt−P and ki ≈ ki−P . Sub-stituting into Eq. (2) gives 
+
+st,i − st−P,i −P ≈ X
+
+> j
+
+(q(j) 
+
+> t−P
+
+)⊤R ωj (t − i)k(j)
+
+> i−P
+
+− X
+
+> j
+
+(q(j) 
+
+> t−P
+
+)⊤R ωj (t − P − (i − P )) k(j) 
+
+> i−P
+
+= 0 .
+
+(3) indicating approximate invariance of scores along the repetition trajectory. With KV reuse, repeated suffix states are ap-pended while earlier entries remain fixed. Once attention concentrates on a short recent span, the head output is dominated by a tail operator 
+
+Ttail : {vi}i∈B t 7 → X
+
+> i∈B t
+
+αt,i vi, (4) which becomes nearly constant across steps under Eq. (3) . Repeatedly appending near-duplicate tail states therefore yields a self-consistent contraction on the tail subspace, stabilizing a low-diversity at-tractor. Further details (including error bounds and a stability sketch) are deferred to Appendix A. 
+
+4 Benchmark and Metrics 
+
+4.1 Loop-inducing Benchmarks 
+
+Our goal is to evaluate persistent repetition loops 
+
+under controlled and reproducible conditions, rather than downstream task performance (Du et al., 2025). To this end, we construct loop-inducing prompts with explicit output constraints and long-horizon decoding, which expose self-reinforcing dynamics while minimizing confounders such as semantic ambiguity. Construction details and rep-resentative outputs are provided in Appendix C and Appendix D. 
+
+LoopBench-DC tests schema-constrained struc-tured generation under long, noisy contexts. We re-purpose the MultiNews subset of LongBench (Bai et al., 2024) by replacing summarization with strict JSON-based entity extraction and normalization, where loops appear as duplicated fields or repeated JSON fragments after partial schema satisfaction. 
+
+LoopBench-RI targets recursive instruction fol-lowing over long narratives. We repurpose the Nar-rativeQA subset of LongBench (Bai et al., 2024) by replacing QA with an explicit self-referential recur-sion protocol (draft → self-correct → expand →
+
+repeat), seeded with a short logic-stream history; loops manifest as template-like repetition in self-corrections and expansions after diversity collapse. Despite different surface formats, both bench-marks share the same failure pattern: abrupt di-versity collapse followed by a persistent repetitive regime driven by KV cache feedback. 
+
+4.2 Evaluation Protocol 
+
+We evaluate repetition loops under a fixed decod-ing protocol to isolate cache-coupled dynamics and ensure reproducibility. Unless otherwise specified, we use greedy (deterministic) decoding and cap generation at a maximum of Tmax = 2500 tokens; all models and KV cache strategies use identical prompts and stopping criteria. Each prompt is run three times, yielding identical outputs under deter-ministic decoding. 
+
+4.3 Metrics and Collapse Definition 
+
+We detect repetition loops using task-agnostic sig-nals computed from the generated output, capturing (a) Self -Reinforcing Loop(Problem) (b) LoopGuard Monitor (Stage 1: Detection) (c) Adaptive Pruning (Stage 2: Intervention)                    
+
+> LLM
+> LLM
+> High Atth Lock
+> ABABC…
+> …BCABC
+> Repetitive Tail
+> Feedback
+> Loop
+> KV Cache
+> Output: A... A...(Stagnation)
+> Statistical Signals
+> [TTR < Thresh]
+> [CR < Thresh]
+> [P1 Streak > N]
+> TRIGGER
+> Activeted
+> Sliding Window
+> [Last N Tokens]
+> …BCABCA
+> Exact Repetition
+> Detection
+> Tail Signature Match
+> [ABC] [ABC] =
+> TRIGGER
+> Logic
+> (AND Gate)
+
+Anchor Distant Recent    
+
+> (Solid Keep) (Sparse Keep) (Dynamic Sparse)
+> New Output: D (Loop Broken)
+> Pruned Healthier Cache
+> Cache Pruning Mechanism
+> Cut Repetitive Blocks
+> Dynamic Sparse Sampling
+> Filter
+> 1
+> 2
+> …
+> …
+> Cut Repetitive Blocks
+> Progressive
+> Level -Up
+> LoopGurad Monitor
+
+Figure 3: Overview of LoopGuard. (a) Repetition loops driven by attention locking on a narrow tail and stabilized by KV-cache feedback. (b) Online detection via debounced statistical and tail-repetition signals. (c) Adaptive KV cache pruning to break the loop and restore diversity. 
+
+diversity collapse, global redundancy, and persis-tence (Tevet and Berant, 2021). 
+
+Type–Token Ratio (TTR). TTR measures lexi-cal diversity as the fraction of unique tokens in the generated sequence (Kettunen, 2014): 
+
+TTR = |uniq( y1: T )|
+
+T , (5) where y1: T denotes the generated token sequence with length T .
+
+Compression Ratio (CR). CR measures global repetition via lossless compressibility (Shaib et al., 2024): 
+
+CR = |comp( y1: T )||y1: T | , (6) where comp( ·) is a standard lossless compressor; lower CR indicates stronger repetition. 
+
+Generation length. We report the number of generated tokens T per run as an auxiliary cost measure. In our setting, persistence is reflected by near-budget generation (i.e., failing to terminate early under a fixed Tmax ). 
+
+Loop detection rule. A run is flagged as a repe-tition loop if it exhibits both abnormally low diver-sity and high global redundancy, and persists close to the maximum token budget: 
+
+Loop = 1 ⇐⇒ TTR ≤ θTTR ∧ CR ≤ θCR 
+
+∧ T ≥ θlen .
+
+(7) where θlen = 2480 (with Tmax = 2500 ), and θTTR 
+
+and θCR are fixed thresholds shared across meth-ods, with details reported in Appendix B. 
+
+5 The LoopGuard Method 
+
+5.1 Overview of LoopGuard 
+
+As shown in Figure 3, LoopGuard is a lightweight inference-time guard that mitigates self-reinforcing repetition loops via event-driven KV cache inter-ventions. Figure 3a illustrates the collapse: at-tention locks onto a repetitive tail and KV cache reuse stabilizes this trajectory, leading to sustained stagnation. LoopGuard operates in two stages. In Stage 1 (Figure 3b), an online monitor tracks re-cent outputs with a sliding window and triggers only when loop patterns persist, using a debounced decision rule. In Stage 2 (Figure 3c), LoopGuard prunes the KV cache by removing the repetitive tail and reassembling the cache from anchor to-kens, sparsely retained long-range context, and a budgeted recent subset to break the feedback cycle and restore diversity. 
+
+5.2 Online Detection with Debounced Trigger 
+
+LoopGuard models loop onset as an online change-point in decoding dynamics, reflected by a rapid shift toward a low-diversity attractor and persis-tent self-reinforcement. We therefore build a se-lective monitor that fuses complementary evidence of degeneration and triggers only under consistent, persistent signals. Let Wt = {max(1 , t − W + 1) , . . . , t } be a sliding window over the partial output y1: t. We compute windowed collapse indicators for diver-sity (TTR), redundancy (CR), and confidence col-lapse based on the top-1 probability pmax (t) = max v Pr( yt+1 = v | y1: t). We aggregate them via a robust K-of-3 vote: 
+
+Warn( t) = 1[mttr (t) < θ ttr ] + 1[mcr (t) < θ cr ]+ 1[mp1 (t) ≥ θstreak ] ≥ K. 
+
+(8) where mp1 (t) counts consecutive steps with 
+
+pmax (t) > θ conf .To avoid reacting to transient repetitions, we re-quire persistence evidence using (i) a novelty-based stagnation gate over Wt and (ii) a debounced suffix self-alignment test for short-period tail repetitions; see Appendix B for details. An intervention is issued only after a warmup phase and outside a cooldown window: 
+
+Trigger( t) = 1[t ≥ tmin ] ∧ 1[cd( t) = 0] 
+
+∧ Warn( t) ∧  Stall( t) ∨ TailRep( t). (9) where cd( t) is a cooldown counter reset after each intervention. This debounced design keeps the monitor dormant during healthy decoding, while responding promptly once the degenerative regime becomes stable. 
+
+5.3 Adaptive KV Cache Pruning 
+
+When Trigger( t) fires, LoopGuard performs an event-driven cache reset that removes the corrupted tail trajectory while retaining enough context for coherent continuation under a fixed budget B. Con-cretely, we construct a retained index set Ikeep ⊆{0, . . . , t } and prune all KV entries outside it, with 
+
+|I keep | ≤ B:
+
+Ikeep = Ianchor ∪ I sparse ∪ I recent . (10) 
+
+Anchors. We preserve a short prefix Ianchor =
+
+{0, . . . , N anchor − 1} to keep the instruction and global constraints stable after pruning. 
+
+Sparse long-range context. Let Wrecent  
+
+> t
+
+= {t −
+
+R + 1 , . . . , t } denote the recent window. From the remaining history {0, . . . , t } \ W recent  
+
+> t
+
+, we form 
+
+Isparse by uniform subsampling under a fixed bud-get. This preserves coarse long-range coverage while avoiding dense contiguous spans that can reinforce local repetition. 
+
+Tail-cleaned recent context. Let Ibad (t) ⊆Wrecent  
+
+> t
+
+denote indices belonging to detected tail-repetition blocks. We exclude them from the recent candidates, 
+
+Crecent = Wrecent  
+
+> t
+
+\ I bad (t), (11) and select Irecent as a budgeted subsample of 
+
+Crecent . This explicitly cuts the loop-inducing suf-fix while retaining a small amount of local context for smooth continuation. 
+
+Progressive aggressiveness. LoopGuard main-tains a discrete aggressiveness level ℓ that controls the recent budget Brecent (ℓ). If degeneration re-triggers shortly after an intervention, we increase ℓ
+
+(up to a cap) and shrink Brecent (ℓ) accordingly, re-ducing reliance on the immediate past and shifting attention toward anchors and sparse long-range con-text. Finally, we map Ikeep to cache slots and apply index selection to prune keys and values across layers, after which decoding resumes under the cooldown constraint. 
+
+5.4 Complexity Analysis 
+
+LoopGuard incurs negligible overhead on top of standard autoregressive decoding. The online mon-itor maintains windowed statistics over the last W
+
+tokens: TTR and novelty updates cost O(W ) per step in a straightforward implementation, while the compression-based redundancy score is eval-uated every s steps (a fixed interval), yielding an amortized O(W/s ) overhead. Cache pruning is event-driven and executes only when Trigger( t)
+
+fires. It applies an index-gather to keys and values across L layers with cost O(L |I keep | dkv ), which is linear in the retained cache length and requires no additional forward passes. In practice, since 
+
+|I keep | ≤ B is bounded and interventions are rare, the added cost is small compared to the base atten-tion computation. 
+
+6 Experiments 
+
+6.1 Experiment Setting Datasets. We evaluate our method on two dis-tinct categories of tasks: (1) LoopBench, our newly constructed benchmark comprising LoopBench-DC 
+
+(Data Constraints) and LoopBench-RI (Recursive Instructions), which are specifically designed to in-duce and evaluate self-reinforcing repetition loops; and (2) 2WikiMultihopQA from LongBench (Bai et al., 2024), which serves as a standard long-context baseline to verify that our method preserves multi-hop reasoning capabilities under strict mem-ory budgets. 
+
+Models. We conduct experiments using the Qwen (Yang et al., 2025) and Llama (Dubey et al., 2024) model families, with a specific focus on smaller scales that are typically more sensitive to cache dynamics. 
+
+Baselines. We compare LoopGuard against three representative KV cache strategies: (1) Full Cache (standard attention with no eviction); (2) H2O (Zhang et al., 2023), an attention-based heavy-hitter eviction policy; and (3) StreamingLLM (Xiao et al., 2024b), a position-based sliding window pol-icy with attention sinks. 
+
+Implementation Details. To ensure a fair com-parison, all efficient KV cache methods are con-Dataset Model Method CR ↑ TTR ↑ Avg Len ↓ Loop Rate ↓                                                                
+
+> LoopBench-DC Qwen3-1.7B Full Cache 0.064 0.086 2495 100% StreamingLLM 0.085 0.118 2496 100% H2O0.052 0.079 2495 100%
+> LoopGuard (Ours) 0.219 0.528 1326 1.3%
+> Llama3.2-1B Full Cache 0.044 0.065 2498 100% StreamingLLM 0.058 0.087 2498 100% H2O0.039 0.054 2496 100%
+> LoopGuard (Ours) 0.207 0.495 1382 1.7%
+> LoopBench-RI Qwen3-1.7B Full Cache 0.105 0.097 2379 93.5% StreamingLLM 0.097 0.122 2418 97.2% H2O0.080 0.095 2486 99.8%
+> LoopGuard (Ours) 0.261 0.474 1412 2.7%
+> Llama3.2-1B Full Cache 0.089 0.119 2479 94.7% StreamingLLM 0.081 0.097 2485 98.4% H2O0.068 0.084 2496 100.0%
+> LoopGuard (Ours) 0.305 0.489 1457 2.3%
+
+Table 1: Main results on LoopBench under a fixed KV budget of 1024 tokens and a shared maximum generation budget of Tmax = 2500 . We report loop rate and loop-oriented metrics (CR/TTR) together with average generation length (Avg Len) as an auxiliary token-cost measure. Best results are in bold .
+
+strained to a fixed KV cache budget of 1024 tokens. For LoopGuard, we set the online monitor window 
+
+W = 256 , the debounce threshold K = 2 , and reserve a fixed anchor size of 32 tokens. We utilize greedy decoding for LoopBench to strictly isolate deterministic loop dynamics, and cap generation with a maximum output length of Tmax = 2500 
+
+tokens. All experiments are conducted on NVIDIA A100 GPUs. 
+
+6.2 Main Results on LoopBench 
+
+Table 1 reports the main results on LoopBench under a fixed KV cache budget and a shared maximum generation budget of Tmax = 2500 .Across both LoopBench-DC and LoopBench-RI, and for both Qwen3-1.7B and Llama3.2-1B, Loop-Guard consistently and substantially reduces per-sistent repetition compared to all baselines. On LoopBench-DC, all baseline methods (Full Cache, StreamingLLM, and H 2O) collapse in all runs, reaching a loop rate of 100% for both model fami-lies, whereas LoopGuard reduces the loop rate to 
+
+1.3% (Qwen3-1.7B) and 1.7% (Llama3.2-1B). On LoopBench-RI, baselines still fail in the vast major-ity of cases ( 93 .5% –100% ), while LoopGuard low-ers loop rates to 2.3% –2.7% , demonstrating loop suppression across distinct loop-inducing regimes. Beyond loop frequency, LoopGuard also restores diversity and reduces token waste. Baseline outputs are highly compressible and lexically repetitive, with very low CR ( ≤ 0.105 ) and TTR ( ≤ 0.122 ), and they almost always exhaust the maximum to-     
+
+> Method F1 ↑
+> Full Cache 50.49 StreamingLLM 21.05 H2O33.73
+> LoopGuard (Ours) 53.61
+
+Table 2: Performance on 2WikiMultiHopQA (Long-Bench) measured by F1 under the same KV budget setting as LoopBench. 
+
+ken budget with average lengths near Tmax . In contrast, LoopGuard substantially increases CR to about 0.21 –0.22 and TTR to 0.47 –0.53 , indicating recovery of lexical and structural diversity, while reducing average generation length to roughly 1.3k– 
+
+1.45 k tokens; this reduction reflects natural termi-nation after diversity is restored rather than aggres-sive early stopping. Among the baselines, H 2Oconsistently exhibits the most severe degeneration (lowest CR/TTR and highest loop rates), align-ing with our analysis that attention-guided eviction can amplify self-reinforcing repetition once atten-tion collapses onto a narrow history span, whereas StreamingLLM alters retention behavior but does not fundamentally prevent loop formation. 
+
+6.3 Generalization to Long-Context QA 
+
+Beyond loop-inducing settings, we evaluate whether LoopGuard preserves general long-context capabilities on 2WikiMultiHopQA from Long-Bench (Bai et al., 2024). Table 2 reports the F1 scores. LoopGuard achieves the best performance (53.61 F1), slightly improving over Full Cache 2 3 4 5 6 
+
+> Interventions per Sequence
+> 0
+> 25
+> 50
+> 75
+> 100
+> 125
+> Number of Sequences
+> 14
+> 61
+> 83
+> 118
+> 24
+> (a) Distribution of Intervention Counts
+> 0 400
+> 400 800
+> 800 1100
+> 1100 1300
+> 1300 1600
+> Trigger Position (Token Index)
+> 0
+> 200
+> 400
+> 600
+> 800
+> Number of Interventions
+> 225
+> 684
+> 517
+> 49
+> (b) Distribution of Intervention Timing
+
+Figure 4: LoopGuard intervention behavior under loop-inducing prompts. (a) Distribution of the number of interventions per sequence. (b) Distribution of interven-tion trigger positions. 
+
+(50.49), indicating that our event-driven pruning does not harm multi-hop reasoning and can even help by reducing distraction from redundant or noisy context. In contrast, StreamingLLM and H2O exhibit substantial drops (21.05 and 33.73 F1, respectively), suggesting that fixed sliding-window retention or attention-guided eviction may discard globally relevant evidence required for multi-hop aggregation. Overall, these results demonstrate that LoopGuard is not only effective at suppressing per-sistent repetition loops, but also maintains strong task performance under strict KV budgets, support-ing its plug-in reliability intervention design. 
+
+6.4 Intervention Frequency and Timing 
+
+Figure 4 summarizes LoopGuard’s intervention be-havior. In Figure 4a, interventions per sequence concentrate in the range of 3–5, with 5 being the most common case; sequences with very few ( ≤2) or many ( ≥6) interventions are relatively rare. Fig-ure 4b shows that triggers are overwhelmingly con-centrated at 800–1300 tokens (accounting for the vast majority of interventions), while early-stage triggers (0–400) are almost absent. Overall, Loop-Guard is mostly dormant early and activates primar-ily around the typical collapse window, consistent with an event-driven reliability guard rather than an always on pruning policy. 
+
+6.5 Ablation Study of LoopGuard 
+
+Table 3 summarizes the ablation results of Loop-Guard. Without any guard, all sequences collapse into loops, which confirms that the prompts induce a highly stable degenerate regime under the fixed KV budget. Always-on pruning offers only a lim-ited reduction in loop rate (79.8%) even though it intervenes very frequently (12.5 times per se-quence on average). More importantly, over half of its triggers happen early (57.6%), suggesting that it prunes the cache before clear degeneration emerges, 
+
+Variant Loop Rate (%) ↓ Avg. #Int. ↓ Early (%) ↓
+
+No Guard 100.0 0.00 –Always-on Pruning 79.8 12.5 57.6 Single-signal ( p1) 35.4 7.6 21.2 
+
+Full LoopGuard 1.3 4.8 1.7 
+
+Table 3: Ablation study of LoopGuard variants on Loop-Bench. We report loop rate, average number of inter-ventions per sequence (Avg. #Int.), and the fraction of early triggers. Lower is better for all metrics. 
+
+which disrupts normal generation yet fails to break the self reinforcing loop once it forms. This high-lights that aggressive pruning alone is not sufficient; the intervention must be timed and targeted. The single signal variant that relies on the top 1 confidence streak ( p1) improves loop suppres-sion substantially, lowering the loop rate to 35.4%. However, it still requires 7.6 interventions per se-quence and shows a noticeable fraction of early triggers (21.2%). This pattern indicates that a sin-gle confidence cue is informative but not decisive: high confidence can arise from benign formatting or locally predictable spans, so triggering on p1
+
+alone tends to intervene too often and sometimes too early. In contrast, the full LoopGuard achieves the lowest loop rate (1.3%) with fewer interven-tions (4.8 on average) and almost no early trig-gers (1.7%). These results support the full design choice that combines multiple lightweight signals with a debounced trigger, so interventions are is-sued mainly after persistent degeneration is cor-roborated, which improves precision and reduces unnecessary cache modifications. 
+
+7 Conclusion 
+
+In this study, we investigated persistent repetition loops in long-context decoding and linked them to an attention-level collapse where a subset of heads locks onto a narrow suffix, which KV cache reuse then reinforces via feedback. We introduced Loop-Bench with loop-oriented metrics beyond down-stream task scores, and proposed LoopGuard, an event-driven KV cache intervention that detects loop onset and breaks the feedback cycle by prun-ing repetitive tails while retaining anchors and sparse long-range context under a fixed budget. Experiments show that LoopGuard cuts loop inci-dence by over 90 percentage points, restores output diversity, and preserves performance on standard long-context QA. Limitations 
+
+This work focuses on inference-time mitigation of persistent repetition loops through KV cache interventions, and does not address degeneration rooted in training objectives or model architec-tures. While LoopGuard is effective at disrupt-ing stabilized loops once collapse occurs, it is not designed to prevent all forms of low-diversity gen-eration, such as semantically repetitive but lexi-cally varied outputs that may not trigger our de-tection signals. In addition, our evaluation centers on controlled loop-inducing scenarios to enable reproducible analysis of reliability failures under long-horizon decoding. Although LoopBench iso-lates dynamics coupled with the KV cache, it does not cover all failure modes that may arise in open-ended or interactive generation settings. Extending reliability evaluation to broader regimes and com-bining inference-time guards with complementary training-time approaches remain important direc-tions for future study. 
+
+References 
+
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, and 1 others. 2024. Long-bench: A bilingual, multitask benchmark for long context understanding. In Proceedings of the 62nd annual meeting of the association for computational linguistics (volume 1: Long papers) , pages 3119– 3137. Yufeng Du, Minyang Tian, Srikanth Ronanki, Subendhu Rongali, Sravan Bodapati, Aram Galstyan, Azton Wells, Roy Schwartz, Eliu A Huerta, and Hao Peng. 2025. Context length alone hurts llm per-formance despite perfect retrieval. arXiv preprint arXiv:2510.05381 .Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, and 1 others. 2024. The llama 3 herd of models. 
+
+arXiv e-prints , pages arXiv–2407. Ghaith Hammouri, Kemal Derya, and Berk Sunar. 2025. Non-halting queries: Exploiting fixed points in llms. In 2025 IEEE Conference on Secure and Trustworthy Machine Learning (SaTML) , pages 1–22. IEEE. Chi Han, Qifan Wang, Hao Peng, Wenhan Xiong, Yu Chen, Heng Ji, and Sinong Wang. 2024. Lm-infinite: Zero-shot extreme length generalization for large language models. In Proceedings of the 2024 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) ,pages 3991–4008. Tatsuya Hiraoka and Kentaro Inui. 2025. Repetition neurons: How do language models produce repeti-tions? In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 2: Short Papers) , pages 483– 495. Ari Holtzman, Jan Buys, Li Du, Maxwell Forbes, and Yejin Choi. 2019. The curious case of neural text degeneration. arXiv preprint arXiv:1904.09751 .Kimmo Kettunen. 2014. Can type-token ratio be used to show morphological complexity of languages? Jour-nal of Quantitative Linguistics , 21(3):223–245. Huayang Li, Tian Lan, Zihao Fu, Deng Cai, Lemao Liu, Nigel Collier, Taro Watanabe, and Yixuan Su. 2023. Repetition in repetition out: Towards understanding neural text degeneration from the data perspective. 
+
+Advances in Neural Information Processing Systems ,36:72888–72903. Xingyu Li, Xiaolei Liu, Cheng Liu, Yixiao Xu, Kangyi Ding, Bangzhou Xin, and Jia-Li Yin. 2025. Loopllm: Transferable energy-latency attacks in llms via repet-itive generation. arXiv preprint arXiv:2511.07876 .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. Snapkv: Llm knows what you are looking for before gener-ation. Advances in Neural Information Processing Systems , 37:22947–22970. Nelson F Liu, Kevin Lin, John Hewitt, Ashwin Paran-jape, Michele Bevilacqua, Fabio Petroni, and Percy Liang. 2024. Lost in the middle: How language mod-els use long contexts. Transactions of the Association for Computational Linguistics , 12:157–173. Catherine Olsson, Nelson Elhage, Neel Nanda, Nicholas Joseph, Nova DasSarma, Tom Henighan, Ben Mann, Amanda Askell, Yuntao Bai, Anna Chen, and 1 oth-ers. 2022. In-context learning and induction heads. 
+
+arXiv preprint arXiv:2209.11895 .Ofir Press, Noah A Smith, and Mike Lewis. 2021. Train short, test long: Attention with linear biases enables input length extrapolation. arXiv preprint arXiv:2108.12409 .Chantal Shaib, Joe Barrow, Jiuding Sun, Alexa F Siu, Byron C Wallace, and Ani Nenkova. 2024. Stan-dardizing the measurement of text diversity: A tool and a comparative analysis of scores. arXiv preprint arXiv:2403.00553 .Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. 2024. Roformer: En-hanced transformer with rotary position embedding. 
+
+Neurocomputing , 568:127063. Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: query-aware sparsity for efficient long-context LLM infer-ence. In Forty-first International Conference on Ma-chine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024 . OpenReview.net. Guy Tevet and Jonathan Berant. 2021. Evaluating the evaluation of diversity in natural language generation. In Proceedings of the 16th Conference of the Euro-pean Chapter of the Association for Computational Linguistics: Main Volume , pages 326–346. Chaojun Xiao, Pengle Zhang, Xu Han, Guangxuan Xiao, Yankai Lin, Zhengyan Zhang, Zhiyuan Liu, and Maosong Sun. 2024a. Infllm: Training-free long-context extrapolation for llms with an efficient context memory. Advances in Neural Information Processing Systems , 37:119638–119661. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024b. Efficient streaming language models with attention sinks. In The Twelfth International Conference on Learning Representa-tions, ICLR 2024, Vienna, Austria, May 7-11, 2024 .OpenReview.net. Jin Xu, Xiaojiang Liu, Jianhao Yan, Deng Cai, Huayang Li, and Jian Li. 2022. Learning to break the loop: Analyzing and mitigating repetitions for neural text generation. Advances in Neural Information Process-ing Systems , 35:3082–3095. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, and 1 others. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R Narasimhan, and Yuan Cao. 2022. React: Synergizing reasoning and acting in language models. In The eleventh international conference on learning representations .Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, and 1 oth-ers. 2023. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Ad-vances in Neural Information Processing Systems ,36:34661–34710. 
+
+A Additional Theoretical Analysis for RoPE KV Cache 
+
+A.1 Explicit RoPE Formulation 
+
+We briefly recall the explicit construction of ro-tary position embeddings (RoPE) (Su et al., 2024) and show how it yields the block-wise relative-offset form used in the main text. Let dh be the per-head dimension and assume dh is even. Each query and key vector is partitioned into dh/2 two-dimensional blocks, qt = ( q(1)  
+
+> t
+
+, . . . , q (dh/2)  
+
+> t
+
+), k i =(k(1)  
+
+> i
+
+, . . . , k (dh/2)  
+
+> i
+
+). For block j, RoPE applies a position-dependent rotation 
+
+˜q(j) 
+
+> t
+
+= R(ωj t) q(j) 
+
+> t
+
+, ˜k(j) 
+
+> i
+
+= R(ωj i) k(j) 
+
+> i
+
+,
+
+(12) where R(θ) = 
+
+cos θ − sin θ
+
+sin θ cos θ
+
+
+
+and ωj is the frequency associated with block j. The attention score is then 
+
+st,i =
+
+> dh/2
+
+X
+
+> j=1
+
+(˜ q(j) 
+
+> t
+
+)⊤˜k(j) 
+
+> i
+
+=
+
+> dh/2
+
+X
+
+> j=1
+
+(q(j) 
+
+> t
+
+)⊤R ωj (t−i) k(j) 
+
+> i
+
+,
+
+(13) which recovers Eq. (2) in the main text. Notably, the score depends on positions only through the relative offset (t − i).
+
+A.2 Approximate Score Invariance and Error Bounds 
+
+We formalize the approximation in Eq. (3) by bounding the score difference under periodic tail repetition. Let Bt denote the (short) tail window on which attention concentrates after collapse. As-sume there exists a period P such that, for the relevant tail region, 
+
+∥qt − qt−P ∥2 ≤ δq,
+
+∥ki − ki−P ∥2 ≤ δk, ∀ i ∈ B t. (14) for small δq, δ k, where ∥ · ∥ 2 denotes the Eu-clidean norm. 
+
+Lemma 1 (Approximate shift invariance) . Under assumption (14) , the RoPE attention scores satisfy 
+
+st,i − st−P,i −P ≤
+
+> dh/2
+
+X
+
+> j=1
+
+
+
+∥k(j) 
+
+> i−P
+
+∥2δq
+
++ ∥q(j) 
+
+> t−P
+
+∥2δk + δqδk
+
+
+
+, ∀ i ∈ B t.
+
+(15) 
+
+Proof. By the RoPE score form, and since (t−i) = (t − P ) − (i − P ), the rotation term R ωj (t − i)
+
+is identical in both scores. For each block j, write 
+
+(q(j) 
+
+> t
+
+)⊤R ωj (t − i)k(j) 
+
+> i
+
+− (q(j) 
+
+> t−P
+
+)⊤R ωj (t − i)k(j)
+
+> i−P
+
+=  q(j) 
+
+> t
+
+− q(j)
+
+> t−P
+
+⊤R(·) k(j)
+
+> i
+
++ ( q(j) 
+
+> t−P
+
+)⊤R(·)  k(j) 
+
+> i
+
+− k(j)
+
+> i−P
+
+.
+
+(16) Taking absolute values and applying triangle inequality and Cauchy–Schwarz, together with ∥R(·)u∥2 = ∥u∥2 (orthogonality of R), yields 
+
+(q(j) 
+
+> t
+
+− q(j) 
+
+> t−P
+
+)⊤R(·) k(j) 
+
+> i
+
+≤ ∥ q(j) 
+
+> t
+
+− q(j) 
+
+> t−P
+
+∥2 ∥k(j) 
+
+> i
+
+∥2,
+
+(q(j) 
+
+> t−P
+
+)⊤R(·) ( k(j) 
+
+> i
+
+− k(j) 
+
+> i−P
+
+) ≤ ∥ q(j) 
+
+> t−P
+
+∥2 ∥k(j) 
+
+> i
+
+− k(j) 
+
+> i−P
+
+∥2.
+
+(17) Using ∥k(j) 
+
+> i
+
+∥2 ≤ ∥ k(j) 
+
+> i−P
+
+∥2 + ∥k(j) 
+
+> i
+
+− k(j) 
+
+> i−P
+
+∥2 and the bounds in (14) , and summing over j, gives (15) .When δq and δk are small, the score difference is negligible, justifying the approximate invariance used in the main text. Moreover, softmax is a smooth mapping; under bounded logits, small per-turbations in scores induce bounded changes in attention weights, so the attention distribution over 
+
+Bt varies slowly along the repetition trajectory. 
+
+A.3 Stability Sketch of the Tail Operator 
+
+We provide a sketch explaining why the tail oper-ator in Eq. (4) can stabilize repetition under KV reuse. Consider the cache-coupled decoding dy-namics 
+
+ht+1 = F (ht, KV t),
+
+KV t+1 = Append(KV t, k t+1 , v t+1 ), (18) and suppose that, after collapse, attention mass concentrates on a short tail index set Bt.Under approximate score invariance (Lemma 1), the attention weights over Bt vary slowly across steps. Consequently, the induced tail operator 
+
+Ttail ({vi}i∈B t ) = P 
+
+> i∈B t
+
+αt,i vi remains approxi-mately time-invariant along the repetition trajec-tory. Repeatedly appending near-duplicate tail states therefore induces a self-consistent update restricted to a low-dimensional “tail” subspace. Linearizing the cache-coupled dynamics around a periodic repetition trajectory yields a local recur-rence for perturbations. If the linearized update is locally contractive on directions orthogonal to the tail subspace (e.g., the corresponding Jacobian has spectral radius < 1 on those directions), then such perturbations decay, resulting in a stable low-diversity attractor. Breaking this attractor thus re-quires an explicit perturbation to the KV cache, motivating cache-level interventions. 
+
+B Implementation Details and Hyperparameter Settings 
+
+B.1 Threshold Settings for Loop Detection 
+
+In Eq. (7) , we use fixed thresholds for the diversity and redundancy metrics to identify persistent repeti-tion loops. Specifically, we set the Type–Token Ra-tio threshold to θTTR = 0 .2 and the Compression Ratio threshold to θCR = 0 .12 across all bench-marks and models. The choice of θTTR = 0 .2 reflects a strong col-lapse in lexical diversity: fewer than 20% of gen-erated tokens are unique, which rarely occurs in healthy long-context generation but is typical once repetition loops emerge. Similarly, θCR = 0 .12 
+
+corresponds to a high degree of global redundancy under lossless compression, indicating extensive repetition beyond short-range patterns. We observe consistent separation between nor-mal generation and persistent looping behavior across LoopBench-DC and LoopBench-RI. Quali-tatively similar trends hold under moderate thresh-old variations, suggesting that loop detection is not sensitive to precise tuning. 
+
+B.2 Online Detection: Parameters and Criteria 
+
+This section summarizes the hyperparameters and criteria used by LoopGuard for online loop detec-tion. 
+
+Windowed indicators. All statistics are computed over a sliding window of W = 256 tokens. We monitor lexical diversity (Type–Token Ratio) and redundancy (Compression Ratio), with thresholds 
+
+θttr = 0 .2 and θcr = 0 .12 , respectively. These values consistently separate healthy decoding from collapsed repetition across models and prompts. 
+
+Confidence collapse. We track the top-1 prediction probability pmax (t) = max v Pr( yt+1 = v | y1: t)
+
+and maintain a streak counter that increments when 
+
+pmax (t) > θ conf = 0 .9. A confidence-collapse signal is raised when the streak exceeds θstreak = 6 
+
+steps. 
+
+Persistence gates. To suppress transient repetition, LoopGuard additionally requires persistence evi-dence. We use (i) a novelty-based stagnation test with threshold θnov = 0 .02 and θstall = 4 consec-utive steps, and (ii) a debounced suffix repetition check that detects short-period tail alignment. De-tails of the suffix-matching procedure are omitted for brevity. 
+
+Triggering constraints. An intervention is permit-ted only after a warmup of tmin = 64 decoding steps and is followed by a cooldown window of 32 
+
+steps. All hyperparameters are shared across mod-els and benchmarks without per-instance tuning. C LoopBench Construction Details 
+
+This appendix details how we construct Loop-Bench , a controlled set of loop-inducing prompts designed to elicit persistent repetition collapse un-der long-horizon decoding. LoopBench contains two subsets with distinct surface forms but a shared failure pattern: an abrupt diversity collapse fol-lowed by a stable repetitive regime. 
+
+C.1 LoopBench-DC: Data-Constraint Structured Generation Goal. LoopBench-DC targets schema-constrained structured generation under long and noisy con-texts, where loops typically manifest as duplicated fields or repeated JSON fragments after partial schema satisfaction. 
+
+Prompt format. Each instance is a single long prompt consisting of: (i) a fixed instruction header 
+
+requesting entity extraction and normalization (e.g., mapping entity mentions to Wikipedia titles), (ii) an explicit output schema constraint specifying the required JSON item fields { name , wikipedia url ,
+
+type } and the allowed type set { Organization ,
+
+Person , Location , Event , Other }, and (iii) a dirty context paragraph containing long-form transcripts with substantial redundancy and repeated spans. This design makes the task semantically unam-biguous (extract-and-list) while enforcing strict for-matting, which exposes loop persistence once the model begins to repeat suffix fragments. 
+
+Source and size. We repurpose the MultiNews subset of LongBench by replacing summarization with the above strict JSON-based entity extraction prompt. LoopBench-DC contains 300 prompts, with an average prompt length of 3,853 tokens (tok-enized on the full prompt text, excluding generated outputs). 
+
+C.2 LoopBench-RI: Infinite Recursive Interpretation Goal. LoopBench-RI targets recursive instruction following over long narratives, where loops typ-ically appear as template-like repetitions in self-corrections and expansions. 
+
+Prompt format. Each instance contains: (i) a long source narrative (book-style or story-like text), (ii) a strict recursive protocol that forces the model to iterate Draft Interpretation →
+
+Self-Correction → Recursive Expansion →
+
+Repeat , and (iii) a short logic-stream seed history 
+
+that provides 1–2 completed iterations (draft + self-correction) and then truncates at the next Draft 
+
+header. By construction, the model is required to continue the loop immediately, which encourages persistent generation and makes repetition collapse highly reproducible under deterministic decoding. 
+
+Source and size. We repurpose the NarrativeQA subset of LongBench by replacing question answer-ing with the above self-referential recursion proto-col. LoopBench-RI contains 200 prompts, with an average prompt length of 5,376 tokens (tokenized on the full prompt text, excluding generated out-puts). 
+
+C.3 Reproducibility Notes 
+
+Across both subsets, prompts are designed to min-imize semantic ambiguity while imposing strong structural constraints (schema or recursion), so that once a repetition trajectory is entered, it becomes stable and persistent under long-horizon decod-ing. Representative prompt templates and quali-tative looping outputs are provided separately in Appendix D. 
+
+D Representative Looping Outputs 
+
+This appendix lists representative model outputs under loop-inducing prompts in LoopBench-DC. We include examples from different KV cache strategies, where baseline methods may exhibit du-plicated entries and sustained tail repetition once the schema is partially satisfied. These qualitative cases complement the main quantitative results by illustrating typical failure patterns in practice. 
+
+E Attention Visualization under Repetition Loops 
+
+This appendix provides attention visualizations for representative loop-inducing generations. Fig-ure 5 shows attention maps from selected heads across multiple layers during long-context decod-ing. Across layers and heads, attention concen-trates into narrow, vertically aligned stripes, indi-cating persistent focus on a small repetitive suffix of the generated history. These barcode-like pat-terns qualitatively support our analysis that repe-tition loops are driven by attention-level collapse and head locking. Input (Full Prompt) 
+
+Context: Extract a list of the people, organizations, locations and other entities in the following text, disambiguat-ing and normalizing each name to the title of its corresponding Wikipedia article. Classify the Type of each as one of the following: "Organization, Person, Location, Event, Other". Output the results in JSON format: 
+
+(Context truncated) tonight, several developing stories as we come on the air. news coming in, the suspected chinese spy balloon hovering over the u.s. where it is now, and will there be a window to shoot it down? also tonight, the dangerous life-threatening cold moving into the northeast. the live readings already. first, the pentagon tracking that chinese balloon, the intelligence bay hanging beneath it, the size of three busses. where it was spotted today over the u.s., where it’s believed to be headed now, 60,000 feet in the air. will the u.s. shoot this down? secretary of state antony blinken postponing his high stakes trip to china. mola lenghi, mary bruce standing by at the white house. the deadly cold already tonight, the national weather service is calling it a once in a generation arctic blast. 25 million americans, multiple states. new york city, philadelphia, boston, wind-chill readings in maine expected to reach 60 below zero. and where the wind chill is already 106 degrees below zero tonight. . . . so where is it tonight, and where u.s. authorities believe it’s headed. among the first sightings over billings, montana. that intelligence bay hanging beneath the balloon, that’s the size of three busses. the pentagon tonight on discussions over whether or not to shoot it down, and will there be a small window of opportunity to do just that? what we’re learning tonight. secretary of state antony blinken postponing his high-stakes trip to beijing, calling china’s actions unacceptable. so, will this be shot down? if so, where? and what china is saying tonight. mary bruce at the white house, and abc’s mola lenghi leading us off tonight in montana. reporter: tonight, the pentagon confirming the massive chinese spy balloon is on the move 60,000 feet above the ground and heading east. the balloon continues t move eastward and is currently over the center of the continental united states. what the heck is that? reporter: a senior u.s. official tells abc news the balloon now appears headed towards north carolina. across the country today, americans with their eyes on the skies, posting images like this one, the balloon floating over missouri. commercial pilots radioing in. we got that balloon in sight also. looks like it’s way up there, maybe 50,000 feet or so. reporter: the balloon is huge with a technology bay attached below that is itself the size of three busses, loaded with high resolution cameras, according to a senior u.s. official, equipped with what appear to be solar panels on the side that could power its technology. it first entered american airspace over alaska, then flying into southwest canada before dipping down over billings, montana. this thing is up in the sky. what the heck is that? that thing is not the moon. any help would be appreciated. reporter: montana republican congressman ryan zinke was blunt, tweeting “shoot. it. down.” the pentagon today sayig that option was considered and rejected, for now. we assessed that currently it does not pose a physical or military risk to people on the ground. for now we are continuing to monitor and review options. reporter: the white house today saying president biden agreed with the pentagon’s strong recommendation. the risks involved with shooting down the balloon just too great. any potential debris field would be significant and potentially cause civilian injuries or deaths or significant property damage. reporter: for its part, china insisting today the balloon is not a spy vessel at all but a civilian airship used for research, mainly meteorological purposes. the pentagon flatly rejecting that claim. we are aware of the prc’s statement. however, the fact is, we know that it’s a surveillance pballo. we have clearly communicated that this balloon is violating u.s. air space and international law and that this is unacceptable. reporter: china says the balloon deviated far from its planned course, but the pentagon questioning that as well, saying the balloon can be maneuvered. a senior u.s. official telling abc news, it’s likely being navigated with spy satellites. this all happening as secretary of state antony blinken prepared for a weekend trip to beijing. 
+
+Output (Full Cache) 
+
+{"name":"Pentagon","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of State","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Army","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Navy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Coast Guard","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Marine Corps","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Army Corps of Engineers","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. National Weather Service","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Homeland Security","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Justice","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Interior","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Treasury","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Education","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Veterans Affairs","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Agriculture","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Energy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Commerce","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Justice","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Veterans Affairs","wikipedia url":". . . ","type":"Organization"}, . . . {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force Academy","wikipedia url":". . . ","type":"Organization"}, . . . 
+
+[Model enters infinite loop] 
+
+Output (StreamingLLM) 
+
+{"name":"Pentagon","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of State","wikipedia url":". . . ","type":"Organization"}, {"name":"China","wikipedia url":". . . ","type":"Organization"}, {"name":"Mary Bruce","wikipedia url":". . . ","type":"Person"}, {"name":"Mola Lenghi","wikipedia url":". . . ","type":"Person"}, {"name":"Rob Marciano","wikipedia url":". . . ","type":"Person"}, {"name":"Victor Oquendo","wikipedia url":". . . ","type":"Person"}, {"name":"Eva Pilgrim","wikipedia url":". . . ","type":"Person"}, {"name":"Robin Roberts","wikipedia url":". . . ","type":"Person"}, {"name":"Alex Murdaugh","wikipedia url":". . . ","type":"Person"}, {"name":"National Weather Service","wikipedia url":". . . ","type":"Organization"}, {"name":"United States","wikipedia url":". . . ","type":"Location"}, {"name":"Missouri","wikipedia url":". . . ","type":"Location"}, {"name":"Montana","wikipedia url":". . . ","type":"Location"}, {"name":"North Carolina","wikipedia url":". . . ","type":"Location"}, {"name":"Alaska","wikipedia url":". . . ","type":"Location"}, {"name":"Billings, Montana","wikipedia url":". . . ","type":"Location"}, {"name":"New York City","wikipedia url":". . . ","type":"Location"}, {"name":"Philadelphia","wikipedia url":". . . ","type":"Location"}, {"name":"Boston","wikipedia url":". . . ","type":"Location"}, {"name":"Maine","wikipedia url":". . . ","type":"Location"}, {"name":"Wind chill","wikipedia url":". . . ","type":"Other"}, {"name":"Arctic blast","wikipedia url":". . . ","type":"Other"}, {"name":"Unemployment rate","wikipedia url":". . . ","type":"Other"}, {"name":"Federal Reserve Bank","wikipedia url":". . . ","type":"Other"}, {"name":"Weather balloon","wikipedia url":". . . ","type":"Other"}, {"name":"Surveillance balloon","wikipedia url":". . . ","type":"Other"}, . . . {"name":"Federal Reserve","wikipedia url":". . . ","type":"Other"}, {"name":"Jobs report","wikipedia url":". . . ","type":"Other"}, {"name":"Unemployment rate","wikipedia url":". . . ","type":"Other"}, {"name":"Federal Reserve Bank","wikipedia url":". . . ","type":"Other"}, {"name":"Jobs report","wikipedia url":". . . ","type":"Other"}, . . . 
+
+[Model enters infinite loop] 
+
+Output (H2o) 
+
+{"name":"Pentagon","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of State","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Air Force","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Army","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Navy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Coast Guard","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Marine Corps","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Army Corps of Engineers","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. National Weather Service","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Homeland Security","wikipedia url":". . . ","type":"Organization"}, . . . {"name":"U.S. Department of Justice","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Interior","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Treasury","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Education","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Veterans Affairs","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Agriculture","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Energy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Commerce","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Justice","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Interior","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Treasury","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Veterans Affairs","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Agriculture","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Energy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Commerce","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Interior","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Treasury","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Agriculture","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Energy","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of Commerce","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of the Interior","wikipedia url":". . . ","type":"Organization"}, . . . 
+
+[Model enters infinite loop] 
+
+Output (Our Method) 
+
+{"name":"Pentagon","wikipedia url":". . . ","type":"Organization"}, {"name":"U.S. Department of State","wikipedia url":". . . ","type":"Organization"}, {"name":"China","wikipedia url":". . . ","type":"Organization"}, {"name":"Secretary of State Antony Blinken","wikipedia url":". . . ","type":"Person"}, {"name":"Mary Bruce","wikipedia url":". . . ","type":"Person"}, {"name":"Mola Lenghi","wikipedia url":". . . ","type":"Person"}, {"name":"Rob Marciano","wikipedia url":". . . ","type":"Person"}, {"name":"Victor Oquendo","wikipedia url":". . . ","type":"Person"}, {"name":"Eva Pilgrim","wikipedia url":". . . ","type":"Person"}, {"name":"Robin Roberts","wikipedia url":". . . ","type":"Person"}, {"name":"Alex Murdaugh","wikipedia url":". . . ","type":"Person"}, {"name":"National Weather Service","wikipedia url":". . . ","type":"Organization"}, {"name":"United States","wikipedia url":". . . ","type":"Location"}, {"name":"Missouri","wikipedia url":". . . ","type":"Location"}, {"name":"Montana","wikipedia url":". . . ","type":"Location"}, {"name":"North Carolina","wikipedia url":". . . ","type":"Location"}, {"name":"Alaska","wikipedia url":". . . ","type":"Location"}, {"name":"Southwest Canada","wikipedia url":". . . ","type":"Location"}, {"name":"Billings, Montana","wikipedia url":". . . ","type":"Location"}, {"name":"New York City","wikipedia url":". . . ","type":"Location"}, {"name":"Philadelphia","wikipedia url":". . . ","type":"Location"}, {"name":"Boston","wikipedia url":". . . ","type":"Location"}, {"name":"Maine","wikipedia url":". . . ","type":"Location"}, {"name":"Wind chill","wikipedia url":". . . ","type":"Other"}, {"name":"Arctic blast","wikipedia url":". . . ","type":"Other"}, {"name":"Unemployment rate","wikipedia url":". . . ","type":"Other"}, . . . {"name":"Federal Reserve Bank","wikipedia url":". . . ","type":"Other"}, {"name":"Jobs report","wikipedia url":". . . ","type":"Other"}, {"name":"Bungee jump","wikipedia url":". . . ","type":"Other"}, {"name":"Debris field","wikipedia url":". . . ","type":"Other"}, {"name":"Spy satellite","wikipedia url":". . . ","type":"Other"}, {"name":"Weather balloon","wikipedia url":". . . ","type":"Other"}, {"name":"Surveillance balloon","wikipedia url":". . . ","type":"Other"}, . . . {"name":"United Nations","wikipedia":". . . ","type":"Organization"} Barcode -like Attention Stripes （Selected Heads Across Layers ）    
+
+> L16 -H10 L16 -H11
+> L20 -H10 L20 -H11
+> L21 -H8 L21 -H9
+> L22 -H0 L22 -H1
+
+Figure 5: Barcode-like attention patterns under repetition collapse. Visualization of attention maps from selected heads across multiple layers (L16, L20–L22) during persistent repetition loops. Each panel exhibits narrow, vertically aligned high-attention stripes, indicating head-level locking onto a small repetitive suffix of the history.

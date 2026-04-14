@@ -1,0 +1,1427 @@
+Title: RouterWise: Joint Resource Allocation and Routing for Latency-Aware Multi-Model LLM Serving
+
+URL Source: https://arxiv.org/pdf/2604.10907v1
+
+Published Time: Tue, 14 Apr 2026 01:35:42 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# RouterWise: Joint Resource Allocation and Routing for Latency-Aware Multi-Model LLM Serving 
+
+Hossein Hosseini Kasnavieh Chris Leckie Adel N. Toosi School of Computing and Information Systems, The University of Melbourne, Australia 
+
+hossein.hosseini@student.unimelb.edu.au 
+
+{caleckie, adel.toosi }@unimelb.edu.au 
+
+Abstract —Multi-model LLM routing has emerged as an ef-fective approach for reducing serving cost and latency while maintaining output quality by assigning each prompt to an appropriate model. However, prior routing methods typically assume that each model has a fixed latency. In real deployments, this assumption is inaccurate: multiple models often share limited GPU resources, and a model’s latency depends strongly on both its allocated resources and the request load induced by the routing policy. Consequently, routing and resource allocation are tightly coupled. In this work, we study joint resource allocation and routing for latency-aware multi-model LLM serving in GPU clusters. Given a set of deployed models and a latency service-level objective (SLO), we seek a system setup and routing policy that maximize overall output quality while satisfying the latency target. We formalize this problem as a constrained joint optimization over deployment setup and routing fractions, and propose R OUTER WISE , which combines a dual-price formulation for score-maximizing routing with setup-specific latency models derived from system profiling. ROUTER WISE searches over feasible system setups and, for each fixed setup, computes the best routing policy under the latency target. Our results show that even on the same GPU cluster, achievable output-quality score can vary by up to 87% across retained setups, highlighting that resource allocation is a key determinant of routing performance. 
+
+Index Terms —Prompt routing, LLM serving, Resource alloca-tion 
+
+I. I NTRODUCTION 
+
+Large Language Models (LLMs) have demonstrated re-markable capabilities across a wide range of complex tasks, including reasoning, coding, and multi-step problem solv-ing [1], [2]. In recent years, numerous proprietary models with varying scales have been developed by industry leaders, such as GPT [3] and Claude [4], alongside high-quality open-source models like Llama [5] and Qwen [6]. These models span a broad spectrum of sizes, leading to significant differences in their performance, computational cost, and latency character-istics. In practice, user prompts exhibit substantial variability in complexity, ranging from simple factual queries to multi-step reasoning tasks. This heterogeneity suggests that not all re-quests require the full capability of the largest models. Prompt routing has therefore emerged as an effective strategy for improving system efficiency by dynamically selecting an ap-propriate model for each input. In particular, simpler prompts can often be handled accurately by smaller, faster models, while more complex queries are routed to larger models with GPU cluster 
+
+GPU 1 
+
+Qwen3-14B GPU 2 
+
+Qwen3-32B GPU 3 
+
+Qwen3-32B GPU 4 
+
+Qwen3-8B  GPU 1 
+
+GPU 2 
+
+GPU 3 
+
+GPU 4 
+
+Qwen3 8B 
+
+8B 
+
+8B 
+
+14B 
+
+14B 
+
+Qwen3-32B 
+
+Qwen3-32B 
+
+Qwen3 14B  Qwen3 32B 
+
+GPU cluster 
+
+(a) I solated deployment  (b) Co-located deployment 
+
+Fig. 1. Resource allocation strategies in multi-model LLM serving. Models can be deployed in isolation or co-located on shared GPUs. Co-location en-ables flexible compute and memory resource sharing and improves utilization. 
+
+stronger reasoning capabilities. By adapting model selection to prompt complexity, routing systems can significantly reduce computational cost and latency without sacrificing overall output quality [7], [8]. Prior work on prompt routing has primarily focused on two directions. First, a large body of research develops efficient models to estimate prompt complexity or predict output quality for use in the routing layer. Most approaches adopt encoder-based architectures, often fine-tuning variants of BERT for this purpose [7]–[11]. In addition to these approaches, [12] introduces confidence tokens that signal output correctness after the decoding phase, while [13] proposes IntroLM, which predicts output quality during the prefilling phase. Second, these quality estimation models are integrated into routing policies that explicitly trade off performance and efficiency, enabling systems to decide when to route a prompt to a smaller model versus escalating it to a more capable one. In particular, existing approaches that study the performance-efficiency trade-off implicitly assume that each model invocation has a fixed cost and latency, independent of system configuration and workload [10], [11]. This assumption effectively treats model serving as a stateless API call, ignoring the fact that in real deployments, multiple models share limited GPU resources and compete for compute, memory, and bandwidth. As a result, latency and throughput are not fixed, but depend critically on resource allocation decisions, such as tensor parallelism, GPU thread partitioning, and memory assignment, as well as the incoming                   
+
+> arXiv:2604.10907v1 [cs.NI] 13 Apr 2026 40 50 60 70 80 90 100
+> GPU thread percentage (%)
+> 50
+> 60
+> 70
+> 80
+> 90
+> 100
+> P95 TTFT (ms)
+> Traffic load
+> 3.11 RPS
+> 5.22 RPS
+> 9.44 RPS
+> 11.56 RPS (a) tp = 2 40 50 60 70 80 90 100
+> GPU thread percentage (%)
+> 55
+> 60
+> 65
+> 70
+> 75
+> 80
+> P95 TTFT (ms)
+> Traffic load
+> 3.11 RPS
+> 5.22 RPS
+> 9.44 RPS
+> 11.56 RPS (b) tp = 4
+> Fig. 2. P95 TTFT versus GPU thread percentage under different traffic loads for two tensor parallelism (tp) settings, measured for Vicuna-13B served with vLLM. Higher thread allocation generally lowers TTFT.
+
+request load. This mismatch leads to a fundamental limitation: prior routing formulations fail to capture the non-linear and load-dependent behavior of latency in practical multi-model serving systems. In this work, we address the problem of jointly optimizing resource allocation and routing in multi-model LLM serving systems. Given a GPU cluster, a pool of models, and a routing component that estimates the performance of each model for a given prompt, our goal is to determine both (i) the allocation of system resources—including GPU thread share and memory (VRAM)—to each model, and (ii) a routing policy that assigns prompts to models. The objective is to maximize overall output quality while satisfying latency service-level objectives (SLOs). Crucially, these two components are tightly coupled: the resources allocated to a model directly affect its latency and throughput, which in turn influence optimal routing decisions. As a result, resource allocation and routing must be optimized jointly. Figure 1 illustrates this trade-off. Models can be deployed either in isolation on dedicated GPUs or co-located on shared GPUs. While isolated deployment simplifies scheduling, it may lead to underutilization. In contrast, co-location enables flexible resource sharing, allowing resources to be shifted toward high-demand models and improving overall utilization. To solve this problem, we formulate it as a joint opti-mization over resource allocation and routing. R OUTER WISE 
+
+addresses this problem by searching over feasible system setups and, for each fixed setup, optimizing the routing policy under a latency target. For the routing subproblem, we adopt a dual-price approach that assigns a cost to each model reflecting its resource usage, and routes each prompt to the model that maximizes its utility after accounting for this cost. Our contributions are summarized as follows:  
+
+> •
+
+We formulate multi-model LLM serving as a joint op-timization problem, where resource allocation and rout-ing decisions are optimized together under latency con-straints.  
+
+> •
+
+We develop a dual-price-based routing method that ef-ficiently computes optimal routing policies for a fixed resource allocation by reducing a constrained assignment problem to simple per-prompt decisions.  
+
+> •
+
+We construct latency models from system profiling data to capture the impact of resource allocation and load on model latency in realistic GPU deployments.  
+
+> •
+
+We propose an efficient solution framework that combines dual-price routing and learned latency models to solve the joint optimization problem without requiring expensive end-to-end system simulation. II. P RELIMINARIES 
+
+A. GPU Sharing Model 
+
+Large language models are often deployed across multiple GPUs to satisfy memory and performance requirements. A common approach is tensor parallelism (TP), in which model weights are partitioned across GPUs and each GPU stores a shard [14]. A straightforward deployment strategy is to dedicate afull GPU to each shard, as in Fig. 1(a). While simple to manage, this static allocation can lead to inefficient resource use in multi-model serving. In practice, different models may experience different request rates and may require different amounts of compute and memory to sustain their incoming load under a latency target. As a result, some GPUs may remain underutilized while others become bottlenecks. To address this, we allow multiple shards to share a GPU, enabling fine-grained allocation of compute and memory re-sources across co-located models. This flexibility allows the system to assign more resources to models with higher load or greater compute demand, while avoiding overprovisioning for less demanding models. Consequently, co-location can improve overall GPU utilization and help the system satisfy latency objectives more efficiently than isolated deployment. In our system, compute sharing is enabled by NVIDIA MPS [15]. MPS allows the CUDA kernels submitted by shards of different co-located models to be scheduled concurrently on the same GPU. More importantly, it allows us to cap the fraction of GPU compute resources (i.e., active threads) that each shard can use. This provides a practical mecha-nism for controlling interference among co-located shards and mitigating resource contention. GPU memory, in contrast, is partitioned explicitly across the co-located models. Figure 2 illustrates the benefit of such flexible compute allocation. For a fixed tensor parallelism level, increasing the GPU thread percentage generally reduces P95 TTFT under different traffic loads, indicating that latency is sensitive to the compute share assigned to a model. This suggests that, under co-location, allocating more compute to heavily loaded models can improve serving efficiency and reduce latency. 
+
+B. Routing Model 
+
+We assume access to a lightweight routing model that estimates the expected utility of each deployed model for a given prompt. For an input prompt x, the router outputs a score vector 
+
+s(x) = ( s1(x), . . . , s M (x)) ∈ [0 , 1] M ,
+
+where M is the number of deployed models and si(x) denotes the predicted output quality of model i on prompt x.0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Predicted score
+> 0
+> 1
+> 2
+> Density
+> Mistral 7B
+> Yi 34B
+> Vicuna 13B Fig. 3. Distribution of predicted routing scores for different models on Router-Bench. Larger models generally achieve higher scores, but the distributions overlap substantially, indicating that a non-trivial fraction of prompts can also be served effectively by smaller models.
+
+In our implementation, the router is instantiated as aDeBERTa-v3-Large encoder [16] with a multi-head regression layer attached to the [CLS] representation, where each head predicts the score of one candidate model. The router is trained on RouterBench [17], which provides prompts paired with model-specific quality scores. The router supplies the per-prompt utility estimates used by our allocation and routing framework, but is not itself the focus of this work. Our formulation is agnostic to the router architecture and only assumes access to per-model quality estimates for each prompt. Figure 3 shows the distribution of predicted scores across models on the RouterBench dataset after training the router model. As expected, larger models tend to achieve higher scores on average. However, the score distributions overlap substantially, indicating that a non-trivial fraction of prompts can also be served effectively by smaller models. This het-erogeneity creates an opportunity for more efficient serving, by routing simpler prompts to smaller models while reserving larger models for prompts that benefit most from their addi-tional capability. 
+
+C. System Setup 
+
+We consider a multi-model LLM serving system deployed on a GPU cluster with G GPUs and a pool of M models, indexed by i ∈ { 1, . . . , M }. The system serves an incoming workload with global arrival rate λ (requests per second). Each model is assigned a setup that specifies both the GPUs on which it is deployed and the resources allocated to it. Formally, the setup of model i is represented as 
+
+θi = ( Gi, tp i, ρ i, μ i) ∈ Θi,
+
+where Gi ⊆ { 1, . . . , G } denotes the set of GPUs assigned to model i, tp i denotes the tensor parallelism level, ρi ∈ (0 , 1] 
+
+denotes the fraction of GPU compute resources allocated to model i (e.g., GPU thread percentage), and μi ∈ (0 , 1] denotes the fraction of GPU memory allocated to model i. The set Θi
+
+captures all feasible configurations for model i.A system setup is defined as the collection of setups for all models, 
+
+Θ = ( θ1, θ 2, . . . , θ M ) ∈ S ,
+
+where S denotes the set of candidate system-level configura-tions. Feasibility is governed by deployability constraints such as GPU memory capacity, tensor-parallel placement require-ments, and the requirement that model shards can be placed on the available GPUs without violating these constraints. In addition to these deployability constraints, we later apply a separate pruning rule that discards setups whose total compute demand is below a specified utilization threshold. Moreover, for each model i and tensor parallelism level tp i,we denote by mi(tp i) the minimum fraction of GPU memory required by one shard of model i under that tensor parallelism level, as obtained from profiling. This quantity is later used to determine whether the shards induced by a candidate system setup can be feasibly placed on the available GPUs. In addition to the system setup, we consider a workload consisting of prompts drawn from an underlying distribution 
+
+D. A routing policy is a function 
+
+π : X → { 1, . . . , M },
+
+which maps each input prompt x ∈ X to one of the deployed models. Intuitively, π(x) specifies the model selected to serve prompt x.Our goal is to determine a joint system setup and routing policy that maximize overall utility while satisfying latency re-quirements. These two decisions are tightly coupled. Changing a model’s setup—for example, by modifying its GPU place-ment, tensor parallelism level, or allocated compute share— changes its latency and throughput characteristics, which in turn affects the routing policy that should be used. Conversely, the routing policy determines the load presented to each model, which influences how resources should be allocated across the system. This interdependence motivates the joint treatment of resource allocation and routing in our framework. III. P ROBLEM FORMULATION 
+
+We now formulate the problem for jointly optimizing resource allocation and routing decisions in a multi-model LLM serving system. As discussed in Section II, these two decisions are tightly coupled: the system setup determines the latency characteristics of each model, while the routing policy determines the average output load assigned to each model. Our goal is therefore to select a system setup and routing policy that together maximize overall utility while satisfying latency requirements. Let Θ ∈ S denote a feasible system setup. At inference time, a routing policy assigns each incoming prompt to one of the deployed models. Although routing decisions are made at the prompt level, over a workload distribution such a policy induces an aggregate traffic split across models. We capture this system-level view using a routing fraction vector 
+
+w = ( w1, . . . , w M ) ∈ ∆M ,
+
+∆M ≜
+
+(
+
+w ∈ RM
+
+> ≥0
+> M
+
+X
+
+> i=1
+
+wi = 1 
+
+)
+
+, (1) where wi denotes the fraction of prompts routed to model 
+
+i. Thus, w specifies the aggregate traffic split induced across the M deployed models. The set ∆M is the M -dimensional probability simplex , i.e., the set of all feasible nonnegative routing fraction vectors whose entries sum to one. This fraction-based view allows us to characterize routing at the workload level through two quantities: the maximum achievable average score under a target traffic split, and the resulting latency under a given system setup. 
+
+a) Maximum achievable score under routing fractions: 
+
+Let X = {x1, . . . , x N } denote a finite set of prompts sampled from the workload distribution, and let si(xj ) ∈ [0 , 1] denote the predicted score of model i on prompt xj . Given routing fractions w, we define ˆS(w) as the maximum average score achievable by assigning prompts to models such that model i
+
+serves a fraction wi of the workload: 
+
+ˆS(w) = 1
+
+N max 
+
+> {zji }
+> N
+
+X
+
+> j=1
+> M
+
+X
+
+> i=1
+
+zji si(xj ) (2) subject to 
+
+zji ∈ { 0, 1}, ∀j, i, (3) 
+
+> M
+
+X
+
+> i=1
+
+zji = 1 , ∀j, (4) 
+
+> N
+
+X
+
+> j=1
+
+zji = ci, ∀i. (5) where zji = 1 indicates that prompt xj is assigned to model 
+
+i, and ci denotes the target number of prompts assigned to model i, with 
+
+> M
+
+X
+
+> i=1
+
+ci = N, ci ≈ N w i.
+
+b) Latency under system setup and routing fractions: 
+
+Let λ denote the global arrival rate. Under routing fractions 
+
+w, model i receives load 
+
+λi = λw i.
+
+Given a system setup Θ, we denote by L(Θ , w ) the resulting average latency metric under routing fractions w. Depending on the target service-level objective (SLO), L(Θ , w ) may represent average end-to-end latency, average time to first token (TTFT), or average time per output token (TPOT). For request-level average latency metrics, we define 
+
+L(Θ , w ) = 
+
+> M
+
+X
+
+> i=1
+
+wi ℓi(Θ , λw i),
+
+where ℓi(Θ , λ i) denotes the corresponding average latency of model i under setup Θ and load λi.
+
+c) Joint optimization problem: Using these definitions, we formulate the joint resource allocation and routing problem as follows: 
+
+max 
+
+> Θ∈S , w ∈∆M
+
+ˆS(w) s.t. L(Θ , w ) ≤ τ, (6) where τ denotes the latency target. In the next section, we propose our RouterWise method to solve the formalized optimization problem. IV. R OUTER WISE 
+
+We now present R OUTER WISE , our method for solving the joint setup-and-routing problem in Eq. (6). 
+
+A. RouterWise Pipeline 
+
+ROUTER WISE solves the joint setup-and-routing problem in Eq. (6) through three stages. 
+
+Stage 1: Relax routing under a fixed setup. For a fixed system setup Θ, R OUTER WISE first considers the latency-constrained routing problem 
+
+max 
+
+> w∈∆M
+
+ˆS(w) s.t. L(Θ , w ) ≤ τ, 
+
+where ˆS(w) is the maximum achievable average score under routing fractions w, and L(Θ , w ) is the corresponding latency under setup Θ. To make this problem tractable, R OUTER WISE 
+
+relaxes the latency constraint using a Lagrange multiplier β ≥
+
+0 and defines the objective 
+
+J (Θ , w ; β) = ˆS(w) − β L(Θ , w ) − τ . (7) For a fixed setup Θ and a fixed value of β, R OUTER WISE 
+
+then solves 
+
+max 
+
+> w∈∆M
+
+J (Θ , w ; β).
+
+Stage 2: Search over the Lagrange multiplier. For a fixed setup Θ, different values of β produce different operating points on the score-latency trade-off curve. Smaller values of β place more emphasis on score, while larger values penalize latency more strongly and therefore favor lower-latency routing fractions. R OUTER WISE searches over β to identify the operating point that best satisfies the latency target for the given setup. 
+
+Stage 3: Search over feasible system setups. After com-puting the best feasible routing solution for a fixed setup, ROUTER WISE searches over the feasible system setups and selects the setup that yields the highest score while satisfying the latency constraint. Sections IV-B and IV-C introduce the two components required to evaluate the relaxed objective, and Section IV-D describes how R OUTER WISE combines them in the optimiza-tion procedure. 0 10 20 30 40                         
+
+> Input load (RPS)
+> 20
+> 40
+> 60
+> 80
+> 100
+> Mean TTFT (ms)  tp = 4, ρ= 100%
+> tp = 4, ρ= 70%
+> tp = 2, ρ= 100%
+> tp = 2, ρ= 70% (a) Mistral 7B 510 15 20
+> Input load (RPS)
+> 40
+> 60
+> 80
+> Mean TTFT (ms) (b) Vicuna 13B 246810 12 14
+> Input load (RPS)
+> 200
+> 400
+> Mean TTFT (ms) (c) Yi 34B Fig. 4. Average TTFT as a function of input load under different tensor parallelism levels and maximum GPU compute shares ( ρ) for three models. Each curve corresponds to a different setup, showing that the latency-load relationship varies substantially across model sizes and deployment configurations.
+
+B. Dual-Price Formulation of the Score Function ˆS(w)
+
+Proposition 1 (Dual-price characterization of the score func-tion) . Consider the primal score-maximization problem in Eqs. (2) –(5) , where the target number of prompts assigned to model i is ci. Let αi ∈ R denote the dual variable associated with the count constraint 
+
+> N
+
+X
+
+> j=1
+
+zji = ci.
+
+Then, after dualizing these count constraints, the resulting dual problem is 
+
+min 
+
+> α∈RM
+
+g(α),
+
+where 
+
+g(α) = 1
+
+N
+
+
+
+> N
+
+X
+
+> j=1
+
+max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+ +
+
+> M
+
+X
+
+> i=1
+
+αici
+
+ . (8) 
+
+Moreover, for any fixed dual vector α, the maximizing assignment in the inner problem is obtained independently for each prompt xj as 
+
+i∗(xj ; α) = arg max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+.
+
+Thus, the dual variables αi admit a natural interpretation as model-specific prices: increasing αi makes model i less attractive in the prompt assignment, while decreasing αi
+
+makes it more attractive. Proof. See Appendix A. □
+
+Proposition 2 (Convexity of the dual objective) . The dual objective in Eq. (8) is convex with respect to the dual variable vector α ∈ RM .Proof. See Appendix B. □
+
+By Proposition 2, the dual objective in Eq. (8) is convex in α. Therefore, R OUTER WISE can solve the dual problem efficiently using the subgradient method. In each iteration, ROUTER WISE first computes the prompt-level assignments induced by the current dual prices according to 
+
+i∗(xj ; α) = arg max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+,
+
+and then counts how many prompts are assigned to each model. Let 
+
+ni(α) = 
+
+> N
+
+X
+
+> j=1
+
+1[i∗(xj ; α) = i]
+
+denote the number of prompts assigned to model i under the current dual vector α. A subgradient of g(α) with respect to 
+
+αi is then given by 
+
+1
+
+N
+
+ ci − ni(α).
+
+ROUTER WISE therefore updates the dual prices as 
+
+α(t+1)  
+
+> i
+
+= α(t) 
+
+> i
+
++ ηt
+
+1
+
+N
+
+ ni(α(t)) − ci
+
+,
+
+where ηt is the step size. Intuitively, if model i receives more prompts than its target count ci, its price is increased, making it less likely to be selected in subsequent iterations; if it is under-assigned, its price is decreased. 
+
+C. Latency Modeling for a Fixed System Setup 
+
+To optimize the relaxed objective in Eq. (7), R OUTER WISE 
+
+requires a latency model that predicts how each deployed model behaves under different resource allocations and traffic loads. In our setting, latency depends not only on the input load λ, but also on the serving configuration of the model, including its tensor parallelism level ( tp ) and assigned GPU compute share ( ρ). As a result, latency behavior is highly setup-dependent. Our profiling on deploying three models on A100 GPUs further show that latency characteristics vary substantially not only across setups, but also across model families. Figure 4 illustrates this behavior for three representative models under different tensor parallelism levels and GPU thread allocations. The latency-load relationship changes significantly across models and configurations, both in scale and in shape. More-over, the effect of a configuration knob is not uniform across models: for example, for Mistral 7B, a tensor parallelism level of 2 yields lower TTFT than 4 across a broad range of loads. This variability makes it difficult to construct a single unified latency predictor that generalizes accurately across all models, setups, and operating regimes. ROUTER WISE therefore adopts a setup-specific latency modeling strategy. We discretize the setup space into a finite set of feasible configurations. In our experiments, the tensor parallelism level is chosen from {1, 2, 4}, and the GPU thread percentage is selected from a predefined discrete set. For each model and each feasible setup, we profile the model under multiple input load levels and record latency statistics such as TTFT and TPOT. For a fixed model and setup, these measurements define a one-dimensional latency curve as a function of input load. ROUTER WISE approximates this curve using a piecewise-linear model constructed from the profiled operating points. Let θi denote a fixed setup of model i, and let ℓi(θi, λ i)
+
+denote the latency metric of interest under load λi. We model ℓi(θi, λ i) by linearly interpolating between neighboring profiled load points. This yields a simple and efficient repre-sentation while preserving the setup-specific latency behavior observed in profiling. Once a system setup Θ is fixed, the corresponding per-model latency functions {ℓi(θi, ·)}Mi=1 are also fixed. R OUTER -WISE then evaluates the latency term 
+
+L(Θ , w ) = 
+
+> M
+
+X
+
+> i=1
+
+wi ℓi(θi, λw i)
+
+for request-level average latency metrics. This provides the latency component required to solve the relaxed optimization problem for a fixed system setup. This setup-specific modeling strategy avoids imposing a sin-gle smooth latency model over a heterogeneous configuration space. Instead, R OUTER WISE treats each model–setup pair as a distinct operating regime and uses profiling to characterize its load-dependent latency accurately. 
+
+D. Optimization Procedure 
+
+We now describe the optimization procedure used to solve the R OUTER WISE pipeline introduced in Section IV-A. We begin by considering a fixed system setup Θ and a fixed Lagrange multiplier β, and show how to optimize the relaxed objective in Eq. (7) with respect to the routing fractions. We then sweep over β to recover the best routing solution for that setup that satisfies the latency constraint. Finally, we repeat this procedure across feasible system setups and select the setup that achieves the highest score while meeting the latency target. 
+
+Proposition 3 (Gradient of the score function) . Assume that 
+
+ˆS(w) is differentiable at the current routing fractions w. Under the continuous approximation ci = N w i, let α⋆ denote an optimal solution of the dual problem in Proposition 1. Then 
+
+∇w ˆS(w) = α⋆.
+
+Proof. See Appendix C. □
+
+Stage 1: Optimize routing fractions for fixed (Θ , β ). For a fixed system setup Θ and a fixed Lagrange multiplier β,ROUTER WISE solves 
+
+max 
+
+> w∈∆M
+
+J (Θ , w ; β) = ˆS(w) − β L(Θ , w ) − τ .
+
+Algorithm 1 OPTIMIZE FRACTIONS (Θ , β )
+
+Require: Fixed setup Θ, multiplier β, initial routing fractions 
+
+w(0) ∈ ∆M , step sizes {ηt}T −1 
+
+> t=0
+
+, maximum iterations T
+
+Ensure: Optimized routing fractions w⋆ 
+
+> 1:
+
+w ← w(0)  
+
+> 2:
+
+for t = 0 , 1, . . . , T − 1 do  
+
+> 3:
+
+Solve the dual problem for ˆS(w) and obtain α⋆ 
+
+> 4:
+
+Set g ˆS ← α⋆ 
+
+> 5:
+
+Evaluate L(Θ , w ) and ∇wL(Θ , w ) 
+
+> 6:
+
+Set g ← g ˆS − β∇wL(Θ , w ) 
+
+> 7:
+
+Update w ← Π∆M (w + ηtg) 
+
+> 8:
+
+end for  
+
+> 9:
+
+return w
+
+Since Θ is fixed, the optimization is carried out only over the routing fractions w. R OUTER WISE solves this problem using projected gradient ascent on the simplex ∆M .At each iteration, the score term ˆS(w) is evaluated using the dual-price formulation in Section IV-B. For the current routing fractions w, ROUTER WISE solves the corresponding dual problem to obtain the optimal dual prices α⋆. By Proposition 3, these dual prices give the gradient of the score term with respect to the routing fractions: 
+
+∇w ˆS(w) = α⋆.
+
+The latency term L(Θ , w ) is evaluated using the setup-specific piecewise-linear latency models described in Sec-tion IV-C. For request-level average latency metrics, 
+
+L(Θ , w ) = 
+
+> M
+
+X
+
+> i=1
+
+wi ℓi(θi, λw i),
+
+where ℓi(θi, λ i) denotes the latency of model i under setup 
+
+θi and load λi. Since each ℓi(θi, λ i) is piecewise linear in λi,its derivative with respect to load is given by the slope of the active segment. Therefore, 
+
+∂L (Θ , w )
+
+∂w i
+
+= ℓi(θi, λw i) + λw i
+
+∂ℓ i(θi, λ i)
+
+∂λ i λi=λw i
+
+.
+
+Combining the two terms, the gradient of the relaxed objective is 
+
+∇wJ (Θ , w ; β) = α⋆ − β∇wL(Θ , w ).
+
+ROUTER WISE then updates the routing fractions as 
+
+w(t+1) = Π ∆M
+
+
+
+w(t) + ηt∇wJ (Θ , w (t); β)
+
+
+
+,
+
+where ηt is the step size and Π∆M denotes projection onto the simplex ∆M defined in Eq. (1), i.e., after each gradient step, the updated vector may no longer represent a valid routing fraction vector since its entries may not remain nonnegative or sum to one. We therefore project it to the closest point in 
+
+∆M using the method of [18]. This procedure is summarized in Algorithm 1. 
+
+Stage 2: Search for the optimal β. For a fixed system setup Θ, different values of β produce different operating Algorithm 2 OPTIMIZE BETA (Θ) 
+
+Require: Fixed system setup Θ, arrival rate λ, latency target 
+
+τ , lower and upper bounds βmin , β max , latency tolerance 
+
+ε
+
+Ensure: Best routing fractions w⋆ and corresponding β⋆ for setup Θ 
+
+> 1:
+
+w⋆ ← ∅, β⋆ ← ∅ 
+
+> 2:
+
+while βmax − βmin > ε do  
+
+> 3:
+
+β ← (βmin + βmax )/2 
+
+> 4:
+
+w ← OPTIMIZE FRACTIONS (Θ , β ) 
+
+> 5:
+
+Evaluate L(Θ , w ) 
+
+> 6:
+
+if L(Θ , w ) > τ then  
+
+> 7:
+
+βmin ← β ▷ Latency too high; penalize more  
+
+> 8:
+
+else  
+
+> 9:
+
+βmax ← β 
+
+> 10:
+
+w⋆ ← w, β⋆ ← β 
+
+> 11:
+
+end if  
+
+> 12:
+
+end while  
+
+> 13:
+
+return (w⋆, β ⋆)
+
+points on the score-latency trade-off curve. Smaller values of 
+
+β place more emphasis on maximizing score, while larger values penalize latency more strongly and therefore favor lower-latency routing fractions. R OUTER WISE uses bisection to search for the value of β whose corresponding solution satisfies the latency target τ . At each step, it solves the relaxed problem for the current β, evaluates the resulting latency, and then adjusts the search interval accordingly. Once the target latency is met within a tolerance, R OUTER WISE returns the corresponding routing solution as the best achievable score for the fixed setup. The overall bisection-based search over β is summarized in Algorithm 2. 
+
+Stage 3: Evaluate and select the best setup. ROUTER WISE 
+
+selects the final system setup by enumerating candidate setups from a discretized setup space S. Specifically, for each model 
+
+i, we discretize its tensor parallelism level tp i and GPU compute fraction ρi, and construct S as the Cartesian product of these per-model configuration choices. Each candidate setup is then filtered through a compute-utilization pruning rule and a deployability check before optimization. For a candidate setup Θ = ( θ1, . . . , θ M ), model i con-tributes tp i shards, where tp i is taken directly from its setup 
+
+θi. R OUTER WISE first computes the total compute demand 
+
+C(Θ) = 
+
+> M
+
+X
+
+> i=1
+
+tp iρi
+
+and discards setups whose aggregate compute demand is below a prescribed utilization threshold, i.e., C(Θ) < Gρ min , as well as setups whose compute demand exceeds the total available budget, i.e., C(Θ) > G . It then checks whether the setup is deployable under GPU memory and placement constraints. Specifically, it constructs a shard memory list Q(Θ) by adding 
+
+mi(tp i) once for each shard of model i, and verifies that all shards can be placed on the G GPUs using first-fit decreasing (FFD), without co-locating multiple shards of the same model on the same GPU. Setups that fail this placement test are considered infeasible and are discarded. For each remaining feasible setup, ROUTER WISE runs OPTIMIZE BETA to obtain the best routing solution under the latency target. If the resulting latency satisfies τ , the corresponding score is compared against the best score found so far. The final output is the feasible setup-routing pair 
+
+(Θ ⋆, w ⋆) with the highest achievable score. The complete procedure is summarized in Algorithm 3. The complexity of ROUTER WISE is dominated by the search over candidate system setups. Let Ki denote the number of discretized configuration choices for model i, induced by the candidate tensor-parallelism levels and GPU thread percentages. A naive enumeration would therefore consider QMi=1 Ki system setups, which can be large even for a mod-erate number of models. However, in practice, R OUTER WISE 
+
+prunes a substantial fraction of these candidates before opti-mization. In particular, setups with aggregate compute demand below the utilization threshold or above the total available compute budget are discarded immediately, and many of the remaining candidates are further removed by the deployability check under GPU memory and placement constraints. Let eS ⊆ S denote the retained setup set after pruning. The overall com-plexity can then be written as O
+
+
+
+| eS| · COPTIMIZE BETA 
+
+
+
+, where 
+
+COPTIMIZE BETA is the cost of solving the routing problem for one retained setup. Since O PTIMIZE BETA performs a bisection search over β, and each iteration invokes O PTIMIZE FRAC -
+
+> TIONS
+
+, we have COPTIMIZE BETA = O(Tβ COPTIMIZE FRACTIONS ),where Tβ is the number of bisection steps. Thus, although the worst-case setup space is combinatorial in the number of discretized choices, the effective running time is governed by the much smaller set of retained setups after pruning. V. E VALUATION 
+
+A. Experimental Setup 
+
+We evaluate our R OUTER WISE framework on GPU clusters with G ∈ {4, 8} GPUs. All experiments are conducted assuming NVIDIA A100 80GB PCIe GPUs. These two cluster sizes allow us to study the behavior of the proposed method under both moderate and larger deployment budgets. While most prior routing work focuses on routing between two models [8]–[11], [19], we consider a more general multi-model setting with three models of different sizes and capa-bilities: mistral-7b-chat [20], WizardLM-13B-V1.2 
+
+[21], and Yi-34B-Chat [22]. These models are selected from the RouterBench dataset [17], which contains 36,000 prompts together with model outputs and model-specific qual-ity scores derived from benchmark correctness criteria. Each model is served using vLLM [23], and all latency profiling used to construct the setup-specific latency models is also conducted with vLLM. Following the routing setup described in Section II-B, we train a multi-head DeBERTa-v3-Large [16] router on RouterBench, where each head predicts the output quality of one candidate model. At inference time, given an 0.40 0.45 0.50 0.55                     
+
+> Best achievable score
+> 680
+> 700
+> 720
+> 740
+> 760
+> 780
+> 800
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Isolated
+> Best setup 0.35 0.40 0.45 0.50 0.55
+> Best achievable score
+> 350
+> 375
+> 400
+> 425
+> 450
+> 475
+> 500
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Isolated
+> Best setup 0.38 0.40 0.42 0.44 0.46 0.48 0.50 0.52 0.54
+> Best achievable score
+> 420
+> 440
+> 460
+> 480
+> 500
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Best setup 0.485 0.490 0.495 0.500 0.505
+> Best achievable score
+> 475
+> 480
+> 485
+> 490
+> 495
+> 500
+> 505
+> 510
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Best setup
+
+λ = 50 , τ = 800 λ = 60 , τ = 500 λ = 70 , τ = 500 λ = 80 , τ = 500 
+
+(a) G = 4 : Maximum achievable score in different setups with 4 GPUs. 0.53 0.54 0.55 0.56 0.57 0.58                      
+
+> Best achievable score
+> 385
+> 390
+> 395
+> 400
+> 405
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Isolated
+> Best setup 0.400 0.425 0.450 0.475 0.500 0.525 0.550
+> Best achievable score
+> 492.5
+> 495.0
+> 497.5
+> 500.0
+> 502.5
+> 505.0
+> 507.5
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Isolated
+> Best setup 0.515 0.520 0.525 0.530 0.535 0.540 0.545
+> Best achievable score
+> 392
+> 394
+> 396
+> 398
+> 400
+> 402
+> 404
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Best setup 0.505 0.510 0.515 0.520 0.525 0.530
+> Best achievable score
+> 400
+> 420
+> 440
+> 460
+> 480
+> 500
+> Latency (ms)
+> Retained setups
+> Retained setups
+> Latency target τ
+> Equal-Split
+> Size-Proportional
+> Best setup
+
+λ = 50 , τ = 400 λ = 60 , τ = 500 λ = 70 , τ = 400 λ = 80 , τ = 500 
+
+(b) G = 8 : Maximum achievable score in different setups with 8 GPUs. Fig. 5. Score-latency scatter plots of retained setups under two settings of G, where retained setups denote deployable setups that also pass the compute-utilization filter. Row (a) shows the case G = 4 , and row (b) shows the case G = 8 .
+
+input prompt, the router outputs a score for each model; these scores are used as the per-model utility estimates in ROUTER WISE and enter the dual-price formulation through the adjusted assignment rule si(x) − αi.For the system setup space, the tensor parallelism level of each model is selected from {1, 2, 4}. In addition, the GPU compute fraction assigned to each model, imple-mented through GPU thread percentage, is discretized into 
+
+{10 , 20 , 30 , . . . , 100 }. As described, shards of the same model are not allowed to be co-located on the same GPU. R OUTER -WISE enumerates candidate system setups from this dis-cretized configuration space and filters them through the feasibility checks described in Section IV-D. 
+
+B. Metrics and Baselines 
+
+Our evaluation aims to quantify the impact of resource allocation on the best achievable routing performance under latency constraints. In particular, we study how different feasible system setups affect the trade-off between output quality and latency, and whether jointly optimizing setup and routing yields better operating points than simpler allocation strategies. For a fixed GPU count, input load, and latency target, we evaluate each deployable setup that also passes the compute-utilization filter by solving for its best routing solution using ROUTER WISE . We then record the resulting achievable score and latency, and visualize the distribution of feasible setups in the score–latency plane. This analysis makes the role of resource allocation explicit: it shows how different deployment setups can lead to substantially different maximum achievable scores under the same latency budget. In doing so, it highlights an important factor that is largely overlooked in prior routing studies, which typically treat model cost and latency as fixed and therefore ignore the impact of resource allocation on routing performance. Existing multi-model routing methods typically treat the cost and latency of each candidate model as fixed, ignoring their dependence on deployment configuration, resource al-location, and induced load. Consequently, prior methods do not address the setup-selection component of our problem and do not provide direct baselines for joint resource allocation and routing. We therefore introduce three resource-allocation baselines for comparison. 
+
+Equal-Split Setup. This baseline allocates the available GPU compute budget equally across the deployed models. Con-cretely, for a cluster with G GPUs and M models, each model is assigned a target compute budget of G/M . The final setup is chosen from the same discretized configuration space as ROUTER WISE by selecting the feasible setup whose per-model allocations best match this equal-share target. 
+
+Size-Proportional Setup. This baseline allocates resources in proportion to model size. Let pi denote the parameter count of model i. The target compute budget of model i is then set proportional to pi, i.e., Gp i/ P
+
+k pk. As in the equal-split baseline, the final deployment is selected from the feasible discretized setup space by choosing the setup whose per-model allocations best match these size-proportional targets. 
+
+Isolated Setup. This baseline disables co-location and deploys model shards in isolation on dedicated GPUs whenever fea-sible. It reflects a conventional deployment strategy in which models do not share GPUs and therefore cannot benefit from fine-grained resource sharing. This baseline is included to quantify the benefit of co-located deployment and flexible Algorithm 3 SELECT SETUP 
+
+Require: Candidate setup space S, GPUs G, latency target τ
+
+Ensure: Best setup-routing pair (Θ ⋆, w ⋆) 
+
+> 1:
+
+BestScore ← −∞ , (Θ ⋆, w ⋆) ← ∅ 
+
+> 2:
+
+for each Θ = ( θ1, θ 2, . . . , θ M ) ∈ S do  
+
+> 3:
+
+C(Θ) ← PMi=1 θi.ρ θ i.tp  
+
+> 4:
+
+// Prune underutilized or over-budget setups  
+
+> 5:
+
+if C(Θ) < Gρ min or C(Θ) > G then  
+
+> 6:
+
+continue  
+
+> 7:
+
+end if ...  
+
+> 8:
+
+// Check deployability under memory and placement constraints  
+
+> 9:
+
+if FFD-F EASIBLE (Q(Θ) , G ) is false then  
+
+> 10:
+
+continue  
+
+> 11:
+
+end if  
+
+> 12:
+
+Q(Θ) ← [ ]  
+
+> 13:
+
+for i = 1 , . . . , M do  
+
+> 14:
+
+for r = 1 , . . . , θ i.tp do  
+
+> 15:
+
+append mi(θi.tp) to Q(Θ)  
+
+> 16:
+
+end for  
+
+> 17:
+
+end for  
+
+> 18:
+
+if FFD-Feasible (Q(Θ) , G ) is false then  
+
+> 19:
+
+continue  
+
+> 20:
+
+end if  
+
+> 21:
+
+(w, β ) ← OPTIMIZE BETA (Θ)  
+
+> 22:
+
+if L(Θ , w ) ≤ τ and ˆS(w) > BestScore then  
+
+> 23:
+
+BestScore ← ˆS(w) 
+
+> 24:
+
+(Θ ⋆, w ⋆) ← (Θ , w ) 
+
+> 25:
+
+end if  
+
+> 26:
+
+end for  
+
+> 27:
+
+return (Θ ⋆, w ⋆)
+
+resource allocation in R OUTER WISE .
+
+C. Evaluation Results 
+
+Figure 5 visualizes the score–latency operating points ob-tained under different retained system setups for each evalua-tion setting. Each point corresponds to the best routing solution found for one deployable setup that also passes the compute-utilization filter. In the experiments of Fig. 5, we set ρmin = 1. This choice reflects the fact that, under NVIDIA MPS, the thread percentage assigned to a process acts as a cap on the fraction of GPU compute resources that the corresponding model shard can use. Therefore, if the aggregate compute cap assigned to the processes sharing a GPU is below 100% , then part of the GPU compute capacity cannot be utilized concurrently, even when sufficient workload is available. By enforcing 
+
+ρmin = 1 , we exclude underutilized setups in which the total assigned compute cap leaves GPU resources idle, and focus the comparison on setups that can fully utilize the available compute budget. This makes the effect of resource allocation more meaningful: the differences observed in Fig. 5 are not due to trivially leaving GPU compute unused, but rather to how 1 2 3 4 5 6 7 8
+
+> GPUs
+> 200
+> 400
+> 600
+> Feasible configs
+
+(a) Three-model setting 1 2 3 4 5 6 7 8 
+
+> GPUs
+> 0
+> 5000
+> 10000
+> 15000
+> Feasible configs
+
+(b) Four-model setting  
+
+> Fig. 6. Scalability of the setup space as the number of GPUs increases. Each plot shows the number of retained system setups for a fixed model pool, where retained setups denote deployable setups that also pass the compute-utilization filter. Plot (a) corresponds to the three-model setting, and plot (b) corresponds to the four-model setting.
+
+the available compute and memory resources are distributed across models. A clear trend emerges from these plots: different retained setups can lead to substantially different achievable scores, even under the same GPU count, input load, and latency target. This variation is notable because all plotted setups are deploy-able and pass the compute-utilization filter, meaning that they do not leave obvious compute resources idle. In other words, even when GPU compute can be actively utilized through MPS-based sharing, the particular allocation of compute and memory across models still has a major effect on the best routing performance that can be achieved. In our experiments, even in settings where ρ = 1 and the full compute share can be activated, we observe average relative scores ranging from 0.30 to 0.56 across retained setups. This result shows that resource allocation is not merely a deployment detail, but a key factor in determining the maximum achievable output quality under latency constraints. We also observe that the number of retained setups is smaller for G = 8 than for G = 4 . With a larger GPU budget, candidate configurations can assign higher tensor-parallelism levels and larger compute shares to models more easily, so many setups quickly consume most of the available compute budget. This makes the utilization filter more selective and leaves a smaller set of retained setups. In contrast, the G = 4 
+
+case admits a larger variety of intermediate allocations, result-ing in a denser distribution of retained setups. In addition, as the input load increases, fewer retained setups are able to satisfy the latency target, since more configurations incur excessive delay under higher offered load. Consequently, the number of plotted setups also decreases with increasing load. 
+
+D. Scalability Analysis 
+
+Figure 6 shows how the number of retained system setups grows as the number of deployed models increases. For the three-model setting, the retained setup space contains roughly 700 candidates, while for the four-model setting it increases to about 16,000. Although the setup space grows substan-tially with the number of models, the optimization remains practically manageable in our setting: in our implementa-tion, evaluating one retained setup takes about one second on average, which allows R OUTER WISE to handle both the three-model and four-model cases within a reasonable time. This is particularly relevant because prior multi-model routing studies predominantly focus on two-model settings, whereas our results show that the proposed framework can scale to richer deployment scenarios with three and four candidate models. VI. C ONCLUSION 
+
+In this paper, we presented R OUTER WISE , a framework for jointly optimizing resource allocation and routing in latency-aware multi-model LLM serving. To the best of our knowledge, this is the first work to explicitly investigate how resource allocation affects routing performance in multi-model LLM systems. Unlike prior routing methods, which typically assume fixed per-model cost and latency, our formulation captures the fact that model latency depends strongly on both deployment configuration and induced load. We formalized this setting as a constrained joint optimization problem over system setup and routing fractions, and proposed a practical solution based on a dual-price formulation of the routing objective together with setup-specific latency models derived from profiling. Our results show that different retained setups on the same GPU cluster can yield substantially different achievable output quality, demonstrating that resource alloca-tion is not merely a systems detail but a key determinant of routing performance. We believe this work opens several promising directions for future research. One important direction is improving scalability to larger candidate model pools and larger cluster sizes through more efficient setup search or learned pruning strategies. Another is extending the framework to jointly reason about multiple input-load regimes, rather than opti-mizing for a single fixed arrival rate. A further direction is to study robustness under input distribution shift, where both routing behavior and system-level demand may change over time. More broadly, our work suggests that bringing systems considerations into routing can open the door to a richer class of methods for adaptive, deployment-aware multi-model LLM serving. VII. L IMITATIONS 
+
+Our current framework is designed for multi-model deploy-ments with up to four candidate models across different GPU cluster sizes. This already extends beyond the common bi-model setting used in much of the prior routing literature, but investigating how to efficiently support a larger number of de-ployed models remains an important direction for future work. In particular, as the number of candidate models grows, the setup space expands rapidly, which motivates the development of more scalable setup-search and pruning strategies. In addition, our formulation assumes that input prompts are drawn from a fixed underlying distribution, which is used both in router training and in estimating the routing objective. In practical deployments, however, the prompt distribution may change over time due to workload evolution or domain shift. Making the system robust to such input-distribution changes, and adapting routing and resource allocation decisions online as workloads evolve, is left for future work. VIII. A CKNOWLEDGEMENTS 
+
+We used AI-based tools to assist with proofreading and improving the clarity and presentation of the manuscript. REFERENCES [1] Z. Mo, J. Liao, H. Xu, Z. Zhou, and C. Xu, “Hetis: Serving llms in heterogeneous gpu clusters with fine-grained and dynamic parallelism,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , 2025, pp. 1710–1724. [Online]. Available: https://doi.org/10.1145/3712285.3759784 [2] T. Guo, X. Zhang, J. Du, Z. Chen, N. Xiao, and Y. Lu, “gllm: Global balanced pipeline parallelism systems for distributed llms serving with token throttling,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , 2025, pp. 1725–1741. [Online]. Available: https: //doi.org/10.1145/3712285.3759823 [3] OpenAI, “ChatGPT,” https://openai.com, 2025. [4] Anthropic, “Claude,” https://www.anthropic.com, 2025. [5] Meta AI, “The Llama 4 Herd: The beginning of a new era of natively multimodal AI innovation,” Meta AI Blog , April 2025, technical Release and Model Documentation. [Online]. Available: https://ai.meta.com/blog/llama-4-multimodal-intelligence/ [6] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv et al. , “Qwen3 technical report,” arXiv preprint arXiv:2505.09388 , 2025. [Online]. Available: https://doi.org/10.48550/arXiv.2505.09388 [7] D. Ding, A. Mallick, S. Zhang, C. Wang, D. Madrigal, M. D. C. H. Garcia, M. Xia, L. V. S. Lakshmanan, Q. Wu, and V. R¨ uhle, “BEST-Route: Adaptive LLM routing with test-time optimal compute,” in Proceedings of the International Conference on Machine Learning ,2025. [Online]. Available: https://doi.org/10.48550/arXiv.2506.22716 [8] K. Lu, H. Yuan, R. Lin, J. Lin, Z. Yuan, C. Zhou, and J. Zhou, “Routing to the expert: Efficient reward-guided ensemble of large language models,” in Proceedings of the 2024 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies , 2024, pp. 1964–1974. [Online]. Available: https://doi.org/10.18653/v1/2024.naacl-long.109 [9] L. Chen, M. Zaharia, and J. Zou, “FrugalGPT: How to use large language models while reducing cost and improving performance,” 
+
+Transactions on Machine Learning Research , 2023. [Online]. Available: https://doi.org/10.48550/arXiv.2305.05176 [10] I. Ong, A. Almahairi, V. Wu, W.-L. Chiang, T. Wu, J. E. Gonzalez, M. W. Kadous, and I. Stoica, “RouteLLM: Learning to route LLMs from preference data,” in Proceedings of the International Conference on Learning Representations , 2025. [Online]. Available: https://doi.org/10.48550/arXiv.2406.18665 [11] D. Ding, A. Mallick, C. Wang, R. Sim, S. Mukherjee, V. R¨ uhle, L. V. S. Lakshmanan, and A. H. Awadallah, “Hybrid LLM: Cost-efficient and quality-aware query routing,” in Proceedings of the International Conference on Learning Representations , 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2404.14618 [12] Y.-N. Chuang, P. K. Sarma, P. Gopalan, J. Boccio, S. Bolouki, X. Hu, and H. Zhou, “Learning to route LLMs with confidence tokens,” in 
+
+Proceedings of the International Conference on Machine Learning ,2025. [Online]. Available: https://doi.org/10.48550/arXiv.2410.13284 [13] H. H. Kasnavieh, G. Haffari, C. Leckie, and A. N. Toosi, “Introlm: Introspective language models via prefilling-time self-evaluation,” arXiv preprint arXiv:2601.03511 , 2026. [Online]. Available: https://doi.org/10.48550/arXiv.2601.03511 [14] Y. Xiang, X. Li, K. Qian, Y. Yang, D. Zhu, W. Yu, E. Zhai, X. Liu, X. Jin, and J. Zhou, “Aegaeon: Effective gpu pooling for concurrent llm serving on the market,” in Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles , 2025, pp. 1030–1045. [15] NVIDIA, NVIDIA CUDA Multi-Process Service , 2025, nVIDIA Deployment Guide, Release r590. [Online]. Available: https://docs. nvidia.com/deploy/mps/index.html [16] P. He, X. Liu, J. Gao, and W. Chen, “DeBERTa: Decoding-enhanced BERT with disentangled attention,” arXiv preprint arXiv:2006.03654 ,2020. [Online]. Available: https://doi.org/10.48550/arXiv.2006.03654 [17] Q. J. Hu, J. Bieker, X. Li, N. Jiang, B. Keigwin, G. Ranganath, K. Keutzer, and S. K. Upadhyay, “Routerbench: A benchmark for multi-LLM routing system,” in Agentic Markets Workshop at ICML 2024 ,2024. [Online]. Available: https://doi.org/10.48550/arXiv.2403.12031 [18] J. Duchi, S. Shalev-Shwartz, Y. Singer, and T. Chandra, “Efficient projections onto the l1-ball for learning in high dimensions,” in Proceedings of the 25th International Conference on Machine Learning , ser. ICML ’08. New York, NY, USA: Association for Computing Machinery, 2008, p. 272–279. [Online]. Available: https://doi.org/10.1145/1390156.1390191 [19] P. Aggarwal, A. Madaan, A. Anand, S. P. Potharaju, S. Mishra, P. Zhou, A. Gupta, D. Rajagopal, K. Kappaganthu, Y. Yang et al. ,“AutoMix: Automatically mixing language models,” Advances in Neural Information Processing Systems , 2023. [Online]. Available: https://doi.org/10.48550/arXiv.2310.12963 [20] Mistral AI Team, “Introducing Mistral 3,” Mistral AI Blog, December 2025, official Model Release and Technical Documentation. [Online]. Available: https://mistral.ai/news/mistral-3 [21] C. Xu, Q. Sun, K. Zheng, X. Geng, P. Zhao, C. Feng, and D. Tao, “Wizardlm: Empowering large language models to follow complex instructions,” arXiv preprint arXiv:2304.12244 , 2023. [Online]. Available: https://doi.org/10.48550/arXiv.2304.12244 [22] A. Young, B. Chen, B. Li, C. Cai, D. Cao, G. Ge, H. Li, H. Lin, N. Ning, J. Qu, S. Rajasekaran et al. , “Yi: Open foundation models by 01.ai,” arXiv preprint arXiv:2403.04652 , 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2403.04652 [23] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with pagedattention,” in Proceedings of the 29th Symposium on Operating Systems Principles , ser. SOSP ’23. New York, NY, USA: Association for Computing Machinery, 2023, p. 611–626. [Online]. Available: https://doi.org/10.1145/3600006.3613165 
+
+APPENDIX APROOF OF PROPOSITION 1In this appendix, we derive the dual-price formulation of the primal score-maximization problem. Recall the primal problem: 
+
+ˆS(w) = 1
+
+N max 
+
+> {zji }
+> N
+
+X
+
+> j=1
+> M
+
+X
+
+> i=1
+
+zji si(xj ) (9) subject to 
+
+zji ∈ { 0, 1}, ∀j, i, (10) 
+
+> M
+
+X
+
+> i=1
+
+zji = 1 , ∀j, (11) 
+
+> N
+
+X
+
+> j=1
+
+zji = ci, ∀i. (12) Here, zji = 1 indicates that prompt xj is assigned to model i,and ci is the target number of prompts assigned to model i.We derive the dual by dualizing only the target-count con-straints (12). Let αi ∈ R denote the dual variable associated with the constraint 
+
+> N
+
+X
+
+> j=1
+
+zji = ci.
+
+The corresponding Lagrangian is 
+
+J (Z, α ) = 1
+
+N
+
+> N
+
+X
+
+> j=1
+> M
+
+X
+
+> i=1
+
+zji si(xj )+ 1
+
+N
+
+> M
+
+X
+
+> i=1
+
+αi
+
+ci −
+
+> N
+
+X
+
+> j=1
+
+zji 
+
+ .
+
+(13) Rearranging (13) gives 
+
+J (Z, α ) = 1
+
+N
+
+
+
+> N
+
+X
+
+> j=1
+> M
+
+X
+
+> i=1
+
+zji 
+
+ si(xj ) − αi
+
+ +
+
+> M
+
+X
+
+> i=1
+
+αici
+
+ . (14) For fixed α, the term PMi=1 αici is constant with respect to the assignment variables. Therefore, maximizing J (Z, α )
+
+over Z reduces to maximizing 
+
+> N
+
+X
+
+> j=1
+> M
+
+X
+
+> i=1
+
+zji 
+
+ si(xj ) − αi
+
+
+
+subject to the remaining constraints 
+
+zji ∈ { 0, 1},
+
+> M
+
+X
+
+> i=1
+
+zji = 1 ∀j. 
+
+These constraints couple variables only within each prompt 
+
+j. Hence, the maximization decomposes across prompts. For a fixed prompt xj , assigning it to model i contributes 
+
+si(xj ) − αi
+
+to the objective. Since each prompt must be assigned to exactly one model, the optimal choice is 
+
+i∗(xj ; α) = arg max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+. (15) Substituting this optimal prompt-wise assignment into (14) yields the dual function 
+
+g(α) = max  
+
+> Z
+
+J (Z, α )= 1
+
+N
+
+
+
+> N
+
+X
+
+> j=1
+
+max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+ +
+
+> M
+
+X
+
+> i=1
+
+αici
+
+ . (16) Therefore, the dual problem is 
+
+min 
+
+> α∈RM
+
+g(α), (17) where g(α) is given by (16). This proves the dual-price characterization in Proposition 1. In addition, (15) shows that, for fixed dual prices α, the maximizing inner assignment is obtained independently for each prompt by selecting the model with the largest adjusted score si(xj ) − αi.APPENDIX BPROOF OF PROPOSITION 2In this appendix, we prove that the dual objective 
+
+g(α) = 1
+
+N
+
+
+
+> N
+
+X
+
+> j=1
+
+max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+ +
+
+> M
+
+X
+
+> i=1
+
+αici
+
+
+
+is convex in α ∈ RM .For each prompt xj , define 
+
+hj (α) = max  
+
+> i∈{ 1,...,M }
+
+ si(xj ) − αi
+
+.
+
+Then g(α) can be written as 
+
+g(α) = 1
+
+N
+
+
+
+> N
+
+X
+
+> j=1
+
+hj (α) + 
+
+> M
+
+X
+
+> i=1
+
+αici
+
+ .
+
+We first show that each function hj (α) is convex. For any fixed model i, the function 
+
+hj,i (α) = si(xj ) − αi
+
+is affine in α, since it is a constant si(xj ) plus a linear term 
+
+−αi. The function hj (α) is the pointwise maximum of the finite collection of affine functions {hj,i (α)}Mi=1 . A pointwise maximum of affine functions is convex. Therefore, each hj (α)
+
+is convex. Next, the term MX
+
+> i=1
+
+αici
+
+is linear in α, and every linear function is both convex and concave. Therefore, this term is convex. Finally, g(α) is obtained by summing the convex functions 
+
+{hj (α)}Nj=1 and the linear term PMi=1 αici, and then scaling the result by the positive constant 1/N . Since nonnegative weighted sums of convex functions remain convex, it follows that g(α) is convex in α.This proves Proposition 2. APPENDIX CPROOF OF PROPOSITION 3Let 
+
+V (c) = 1
+
+N max 
+
+> {zji }
+> N
+
+X
+
+> j=1
+> M
+
+X
+
+> i=1
+
+zji si(xj )
+
+denote the optimal value of the count-constrained score-maximization problem as a function of the target count vector 
+
+c = ( c1, . . . , c M ). By Proposition 1, V (c) admits the dual representation 
+
+V (c) = min 
+
+> α∈RM
+
+g(α; c),
+
+where 
+
+g(α; c) = 1
+
+N
+
+
+
+> N
+
+X
+
+> j=1
+
+max 
+
+> i
+
+ si(xj ) − αi
+
+ +
+
+> M
+
+X
+
+> i=1
+
+αici
+
+ .
+
+Assume that V (c) is differentiable at the current c, and let 
+
+α⋆(c) be an optimal dual solution. Since the dependence of 
+
+g(α; c) on c appears only through the linear term 
+
+1
+
+N
+
+> M
+
+X
+
+> i=1
+
+αici,
+
+the envelope theorem gives 
+
+∂V (c)
+
+∂c i
+
+= ∂g (α; c)
+
+∂c i α=α⋆ = α⋆i
+
+N .
+
+Now define ˆS(w) = V (c) under the continuous approxima-tion ci = N w i. Applying the chain rule, 
+
+∂ ˆS(w)
+
+∂w i
+
+=
+
+> M
+
+X
+
+> k=1
+
+∂V (c)
+
+∂c k
+
+∂c k
+
+∂w i
+
+.
+
+Because ck = N w k,
+
+∂c k
+
+∂w i
+
+= N 1[k = i].
+
+Therefore, 
+
+∂ ˆS(w)
+
+∂w i
+
+= α⋆i
+
+N · N = α⋆i .
+
+Hence, 
+
+∇w ˆS(w) = α⋆.
+
+This proves the proposition.

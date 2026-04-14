@@ -1,0 +1,1029 @@
+Title: Efficient Matrix Implementation for Rotary Position Embedding
+
+URL Source: https://arxiv.org/pdf/2604.09742v1
+
+Published Time: Tue, 14 Apr 2026 00:06:32 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+## Efficient Matrix Implementation for Rotary Position Embedding 
+
+Chen Minqi 1* Zhongqi Yue 2 Shihao Zhang 1 Yun Xu 1
+
+Peng Wu 1 Kaixiang Xu 1 Zeyi Huang 1 Hanwang Zhang 21Huawei Technologies 2Nanyang Technological University 
+
+Abstract 
+
+Rotary Position Embedding (RoPE) has become a core component of modern Transformer ar-chitectures across language, vision, and 3D do-mains. However, existing implementations rely on vector-level split and merge operations that intro-duce non-negligible computational overhead, often overlooked in attention optimization. The prob-lem is further amplified in multi-dimensional set-tings ( e.g ., 2D and 3D RoPE), where additional vector operations and uneven feature partitions de-grade hardware utilization. To overcome these lim-itations, we propose RoME (Rotary Matrix posi-tion Embedding), a mathematically equivalent yet computationally efficient reformulation of RoPE that replaces vector operations with unified ma-trix transformations. RoME eliminates dimension-specific operations, simplifies implementation, and enables fused parallel execution across Cube and Vector units on modern NPUs. Experiments show that RoME delivers substantial acceleration at both the operator and full-model levels. The implemen-tation is available here. 
+
+1. Introduction 
+
+Transformers have become the unified backbone across language, vision, and 3D domains, relying on positional embeddings to encode sequence or-der [7, 15, 22]. Traditional positional embeddings are tied to absolute positions [6, 18, 24], caus-
+
+> *
+
+Corresponding author: chenminqi@huawei.com 0 1 2 3 … 𝒅                                                                                  B
+
+> 012345678
+> 20 21 22 23 24 25 26 27 28
+> 40 41 42 43 44 45 46 47 48
+> 60 61 62 63 64 65 66 67 68
+> 𝐱 ∈ℝ𝒅
+> 𝐱 𝟏 ∈ℝ𝟐 𝐱 𝟐 ∈ℝ𝟐 𝐱 𝐝 /𝟐 ∈ℝ𝟐
+> split
+> …
+> 𝜽 𝒑 ,𝟏 𝜽 𝒑 ,𝟐 𝜽 𝒑 ,𝒅 /𝟐
+> 𝐱 𝟏 ∈ℝ𝟐 𝐱 𝟐 ∈ℝ𝟐 𝐱 𝐝 /𝟐 ∈ℝ𝟐
+> …
+> 0123…𝒅 𝐨𝐮𝐭𝐩𝐮𝐭
+> merge
+> 0123…𝒅 ′
+> 𝐱 ∈ℝ𝒅 ′
+> split
+> 𝐱 𝟏 ∈ℝ𝒅 𝟏 𝐱 𝐧 ∈ℝ𝒅 𝒏
+> …
+> RoPE
+> 𝐱 𝟏 ,𝒑
+> RoPE
+> 𝐱 𝒏 ,𝒑
+> 𝐱 𝟏 ∈ℝ𝒅 𝟏 𝐱 𝐧 ∈ℝ𝒅 𝒏
+> …
+> 0123…𝒅 ′𝐨𝐮𝐭𝐩𝐮𝐭
+> merge
+> ……
+> RoPE (𝐱 , 𝒑 )
+> 𝒏 -dimensional  RoPE (𝐱 , 𝒑 )
+
+Figure 1. (a) Steps to compute RoPE (x, p ) given an input feature x ∈ R d and its absolute position p for a 1-D sequence; (b) Steps for an n-D sequence, which involves an extra pair of split and merge. Note that Pni=1 di = d′.
+
+ing mismatches when sequences extend beyond the training length or undergo shifts. Rotary Position Embedding (RoPE) [20] addresses this by encoding positions through rotations that depend only on rel-ative offsets, making attention weights invariant to global shifts and enabling better generalization to unseen sequence lengths or spatial configurations. To understand RoPE, we consider its formula-tion for a 1-D sequence. Let qa, kb ∈ Rd de-note the query and key features of length d at se-quence positions a and b, respectively. RoPE ap-plies a position-dependent transformation RoPE (·)
+
+to each feature such that the resulting attention weight, RoPE (qa, a )⊤RoPE (kb, b ), depends only on the relative offset (b − a) rather than their ab-solute positions. As illustrated in Figure 1a, the transformation consists of three steps: (1) split the 1                              
+
+> arXiv:2604.09742v1 [cs.LG] 10 Apr 2026 Table 1. A performance profiling analysis based on Flux [12] inference on Ascend 910B3. RoPE-related computations contributes 44% of the total vector oper-ator cost, making it a primary performance limiter.
+> Operators s%FA/FAG 0.348 34.8% Cube 0.452 42.6%
+> Vector 0.238 22.5%
+> Speed Gap 0.001 0.1% Overall 1.059 100%
+> Type s%
+> RoPE 0.11 44%
+> GeLU 0.026 11% LN 0.022 9% Trans 0.021 8% Concat 0.021 8% Mul 0.13 6% ......
+
+input into groups of 2D vectors ( e.g ., by interleav-ing dimensions), (2) rotate each vector by an angle determined by its absolute position, and (3) merge 
+
+all rotated vectors back to the original layout. After transformation, attention is computed in the stan-dard way, e.g ., using FlashAttention [4]. To ex-tend RoPE to n-dimensional sequence ( e.g ., n=2 
+
+for images, n=3 for videos), one introduces an ad-ditional set of split and merge operations, color-coded in red to distinguish them from those within RoPE. Specifically, the input is first split along the feature dimension into n parts, RoPE is applied in-dependently to each part, and the outputs are then merged back into the original structure [3, 17], as shown in Figure 1b. While the rotation in RoPE can be efficiently implemented using matrix operations, the accom-panying split and merge steps—implemented as vector operations—introduce non-negligible com-putational overhead. This is often overlooked in prior works that primarily optimize the attention kernel itself. As shown in Table 1, our profil-ing of a video generation model reveals that vec-tor operations account for 22.5% of total computa-tion, with RoPE alone contributing 44%. The in-efficiency arises from three factors: (1) split op-erations are hardware-unfriendly ( e.g ., interleav-ing is suboptimal on Ascend devices); (2) higher-dimensional RoPE ( n > 1) introduces additional split and merge operations; and (3) for n=3 , fea-ture dimensions are typically uneven after splitting (e.g ., d=128 becomes 44, 44, and 40), further de-grading hardware utilization (Section 5.3). To address these inefficiencies, we propose a mathematically equivalent yet computationally op-timized formulation, termed Rotary Matrix po-sition Embedding ( RoME ), which replaces the vector-level split and merge operations in RoPE with efficient matrix operations. We show that various RoPE implementations, differing in their splitting or interleaving strategies, can be unified under this matrix formulation. Furthermore, the same formulation naturally generalizes to 2D and 3D sequences, eliminating the need for dimension-specific split and merge operations. Our main con-tributions are summarized as follows: • We propose RoME , a matrix-based reformula-tion of RoPE that is mathematically equivalent yet computationally efficient. To the best of our knowledge, this is the first work to analyze RoPE at the operator level and study its interaction with hardware efficiency. • For further acceleration, we implement a fused operator design and parallelize computations across the Cube and Vector units on modern NPUs. • With these optimizations, RoME achieves up to 
+
+3× speedup on origin RoPE implement, 1.48 ×
+
+on fused operators, and an overall 5% improve-ment in both training and inference throughput. • RoME also greatly simplifies implementation, reducing the codebase for RoPE variants from 14k lines to about 100 lines. 
+
+2. Related Work 
+
+Rotary Position Embedding(RoPE). RoPE is first proposed to for natural language Process-ing [20] to impove ability for machine translation tasks. As times go on, researches find it’s gen-eralization ability and it quickly becomes one of the industry standards for LLM networks design-ing [8, 14, 27]. Due to the explosive growth in the multimodal domain with transformer blocks, tech-nique like RoPE are introduce step by step into these fields. A new version named RoPE2D is introduced into vision transformer [9], which in-spire researches on generation domain with mul-timodal. The sequel of stable diffusion3 named FLux [12] first introduce RoPE to generation do-2main and achieve promising result. After that, most image and video generation task(QwenImage [25], HunYuanVideo [11] and Wan [23]) take RoPE as a default selection for architecture design. 
+
+Transformer Acceleration. Since Transformer block becomes one of most import component for model designing, massive works are designed for it’s acceleration. Such as quantization [13, 21, 26], sparse-attention [14, 16, 31] and hardware affinity designing algorithms [4, 5, 28–30]. The success of FlashAttention [4] indicating that hardware affinity designing is critical for transformer acceleration. Thus, by carefully analysis most famous net with transformer, we believe RoPE acceleration is the most import task beside with FlashAttention accel-eration. 
+
+3. Preliminaries 
+
+Rotary Position Embedding. Rotary Position Embedding (RoPE) [20] divides the d-dimensional feature space into d/ 2 two-dimensional subspaces, and encodes positional information by applying a rotation within each subspace. Formally, for an in-put feature vector x ∈ Rd at position p, RoPE per-forms RoPE (x, p ) = R(θp) x, (1) where θp = [ θp, 1, . . . , θ p,d/ 2] and R(θp) is a block-diagonal rotation matrix defined as: 
+
+
+
+cos θp, 1 − sin θp, 1 · · · 0 0sin θp, 1 cos θp, 1 · · · 0 0
+
+... ... . . . ... ...
+
+0 0 · · · cos θp,d/ 2 − sin θp,d/ 2
+
+0 0 · · · sin θp,d/ 2 cos θp,d/ 2
+
+
+
+(2) where θp,i = pω i, and ωi denotes the fre-quency associated with the i-th two-dimensional subspace. In practice, ωi is typically set to 
+
+10000 −2( i−1) /d . Intuitively, each pair of adjacent dimensions (x2i, x 2i+1 ) is rotated by a distinct an-gle proportional to its position p, enabling position-dependent phase modulation while preserving the vector norm and cosine similarity. 
+
+Implementation. In practice, the RoPE opera-tion is applied to a sequence of embeddings X =[x1, . . . , xs] ∈ Rs×d, where s denotes the sequence length. The standard implementation exploits the sparsity of R(θp) and converts the matrix multi-plication in Equation 3 into efficient element-wise vector operations using tensor slicing and concate-nation: 
+
+X1, X2 = split (X, −1, 2) ,
+
+Xnew = merge (−X2, X1),
+
+output = cos( Θ) ⊙ X + sin( Θ) ⊙ Xnew ,
+
+(3) where Θ = [ θ1, . . . , θs] ∈ Rs×d/ 2 represents the collection of rotation angles for all positions in the sequence. The split and merge operations have several implementations, which differ in how the feature dimensions are paired: • Half: The input feature is divided into two equal halves, and pairs are defined as 
+
+(x1, x d/ 2+1 ), (x2, x d/ 2+2 ), . . . , (xd/ 2, x d).• Interleave: Adjacent dimensions are paired as (x0, x 1), (x2, x 3), . . . , (xd−1, x d), leading to better cache locality and often higher hardware efficiency ( e.g ., fewer memory-bound vector op-erations). • Others: Other implementations include quar-ter [19] and interleave-half ( e.g ., in Mistral [10] and DeepSeek [14]). We include their details in Appendix. These variants preserve the mathematical structure of RoPE while balancing efficiency and representa-tional diversity. 
+
+2D and 3D Extensions. In multimodal and gen-erative models, RoPE has been extended beyond 1D token sequences to encode spatial and tempo-ral structures. This is typically achieved by parti-tioning the hidden dimension as d = dt + dh + dw
+
+and applying RoPE independently along the tem-poral ( dt), height ( dh), and width ( dw) axes. The 2D case can be derived analogously by omitting the temporal axis. This factorized design enables RoPE to model spatial and temporal dependencies in a separable manner, improving motion consistency and maintaining equivariance to local spatiotempo-ral shifts. Such 3D RoPE variants are now widely 3RoPE -3D slice       
+
+> slice
+> concat
+> mul
+> slice
+> slice neg
+> concat mul
+> add
+> sin_h
+> cos_h
+> rotate
+> ROPE ：h
+> ROPE ：w
+> slice ROPE ：t
+> RoME
+> matm ul mul
+> mul
+> add
+> sin
+> cos
+> unified
+> 𝐱 𝐱
+> 𝐱 𝐱
+> 𝐱 𝟏
+> 𝐱 𝟐
+> 𝐱 𝟑
+> 𝐱 𝐫
+
+Figure 2. Illustration of our efficient matrix RoPE implementation (RoME). RoME replaces the complex and memory-intensive operations commonly used in various standard RoPE implementations, like rearrange , chunk , cat , and 
+
+flatten , with a single structured rotation matrix M. This unified matrix formulation substantially accelerates both small and fused operators, while also simplifying the overall implementation. 
+
+adopted in diffusion-based video generators and vision–language models [11, 12, 17, 23], provid-ing unified positional modeling across modalities. However, the repeated division and concatenation of hidden dimensions introduce substantial com-putational overhead on modern NPUs. To address this, we propose a mathematically equivalent yet computationally efficient alternative that replaces these costly data operations with a structured rotation matrix .
+
+4. RoME: An Efficient and Generaliz-able RoPE Implementation. 
+
+We propose RoME , an efficient and generaliz-able implementation of Rotary Position Embed-ding (RoPE) for Transformer training and infer-ence. RoME streamlines the computation in four steps: 1. Matrix-based transformation. The costly data operations in standard RoPE imple-mentations—such as rearrange , chunk , cat ,and flatten —are replaced by a single efficient matrix multiplication. 2. Unified multidimen-sional formulation. For higher-dimensional vari-ants (e.g., RoPE-2D and RoPE-3D), RoME in-troduces a mathematically equivalent matrix com-position method that removes repeated slicing and concatenation, providing a unified and effi-cient formulation. 3. Operator fusion. The sequence of element-wise mul , add , and mul 
+
+operations is fused into one composite operator (mul add mul ), reducing memory transfers and kernel fragmentation. 4. Cube–Vector co-parallel computation. Matrix multiplications (Steps 1–2) are executed on Cube units, while the fused opera-tor (Step 3) runs on Vector units. We execute them in parallel for accelerated training and inference. 
+
+4.1. Matrix-based RoPE transformation 
+
+As shown in Figure 2, we observe that the costly data operations in standard RoPE implementations can be compactly expressed as a linear transforma-tion: 
+
+xnew = Mx , (4) where M is a matrix. For the interleave RoPE im-plementation, M is a is a block-diagonal matrix composed of 2 × 2 rotation generators: 
+
+M =
+
+ 0 1
+
+−1 0
+
+
+
+> block diag
+
+, (5) For the half RoPE implementation: 
+
+M =
+
+ 0 I
+
+−I 0
+
+
+
+, (6) where the shape of I is d/ 2 × d/ 2. Please find M
+
+for other implementation in Appendix. Substituting into the RoPE formulation, we ob-tain: output = cos θx + sin θ Mx . (7) This reveals that RoPE is equivalent to applying a parameterized orthogonal transformation, which 4completely eliminates costly slicing operations. Compared with the standard RoPE formulation (Eq. 3), our matrix-based design performs the ro-tation independently at each position, rather than jointly across all positions Θ. This brings several advantages: • Elimination of slicing overhead. The opera-tions of chunk and cat are replaced by a sin-gle matrix multiplication, avoiding memory frag-mentation. • Better parallelization. The structure of M al-lows batched matrix multiplication, leveraging hardware acceleration efficiently. • Mathematical clarity. The rotation is expressed explicitly as a linear operator, making theoret-ical extensions (e.g., higher-dimensional RoPE, video spatio-temporal RoPE) easier to formulate. 
+
+4.2. Unified multidimensional formulation 
+
+For higher-dimensional inputs such as videos or spatial-temporal features, conventional RoPE ap-plies rotary encoding independently along each di-vided dimensions ( e.g ., height, width, and tempo-ral), resulting in multiple rounds of slicing, reshap-ing, and rotation. This processing introduces re-dundant data movement and kernel launches, limit-ing computational efficiency on large tensors. In contrast, RoME reformulates multidimen-sional rotary embeddings into a unified matrix rep-resentation. Instead of performing separate ro-tations for each axis, RoME constructs a block-diagonal matrix that directly combines the corre-sponding rotation matrices of each dimension: 
+
+M3D = diag (Mt, Mh, Mw) , (8) where Mt, Mh, Mw are the rotation matrices in Eq 7 on the divided dimensions, encoding temporal, height, and width positional information, respec-tively. An example is shown in Figure 3. This formulation enables all rotations to be applied si-multaneously through a single matrix multiplica-tion, without costly tensor slicing and concatena-tion operations. Furthermore, this approach naturally general-izes to higher-dimensional cases, where RoME 𝑴 𝟑𝑫 (𝐡𝐚𝐥𝐟 )                                                                                                                                                        
+
+> 012345678910 11 12 13 14 15 16 17 18 19
+> 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39
+> 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59
+> 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79
+> -3-4-5012-9-10 -11 678-16 -17 -18 -19 12 13 14 15
+> -23 -24 -25 20 21 22 -29 -30 -31 26 27 28 -36 -37 -38 -39 32 33 34 35
+> -43 -44 -45 40 41 42 -49 -50 -51 46 47 48 -56 -57 -58 -59 52 53 54 55
+> -63 -64 -65 60 61 62 -69 -70 -71 66 67 68 -76 -77 -78 -79 72 73 74 75
+
+@                                                                                                                                                                                                                                                                                                                                                                                            
+
+> 00010000000000000000
+> 00001000000000000000
+> 00000100000000000000
+> -10000000000000000000
+> 0-1000000000000000000
+> 00-100000000000000000
+> 00000000010000000000
+> 00000000001000000000
+> 00000000000100000000
+> 000000-10000000000000
+> 0000000-1000000000000
+> 00000000-100000000000
+> 00000000000000001000
+> 00000000000000000100
+> 00000000000000000010
+> 00000000000000000001
+> 000000000000-10000000
+> 0000000000000-1000000
+> 00000000000000-100000
+> 000000000000000-10000
+
+Figure 3. An example of transforming input x by M3D .Sequence length and hidden dimension is 4 and 20, re-spectively. 
+
+constructs 
+
+MnD = diag (M1, M2, . . . , Mn) , (9) for n-dimensional positional encodings. By treat-ing each dimension’s positional rotation as an in-dependent block on the diagonal, RoME provides a mathematically consistent and hardware-efficient formulation that maintains the expressive power of multidimensional rotary embeddings while mini-mizing memory access overhead. 
+
+4.3. Operator fusion for performance opti-mization 
+
+According to Eq. 7, the mathematical formulation of rotary position embedding involves two multi-plications and one addition. By applying operator fusion, these three operations can be combined into a single fused operator, mul add mul , which sig-nificantly improves computational efficiency. 5cube  
+
+> vector
+> cube
+> vector
+> cube cube
+> vector
+> ...... Figure 4. Illustration of our Cube Vector co-parallel com-putation.
+
+4.4. Cube Vector co-parallel computation 
+
+After applying our proposed scheme, RoPE involves only two operators: matmul and 
+
+mul add mul . Among them, matmul is exe-cuted on the Cube unit, while mul add mul runs on the Vector unit. As shown in Figure 4, by prop-erly scheduling the computation pipeline, these two operations can be processed in parallel, effectively improving hardware utilization. 
+
+5. Experiments 
+
+5.1. Settings 
+
+Setup. We evaluate RoME under both operator-level and model-level settings. The following con-figurations are used unless otherwise specified: * Environment. Experiments are conducted on 8× Ascend 910B3 NPUs (64 GB each) using the CANN and PyTorch environments. Single-operator and lightweight model tests can also be run on a single card if memory permits. * Dataset. Since our focus is acceleration rather than accuracy, we randomly sample data from real-world datasets. Typical preprocessing steps are applied to align inputs with hardware-friendly dimensions ( e.g ., resizing video inputs from 270P to 272P). * Model. We benchmark representative models such as Wan 2.2 [23] under MindSpeed-MM, MindSpeed-LLM, and VLLM frameworks. For single-operator evaluation, the testing code is available in the open-source repository 
+
+gitcode/cann/ops-transformer/ .Integration with these frameworks requires 
+
+torch.compile or our custom pybind 
+
+interface. * Shape configuration. Unless stated otherwise, we set the batch size to B=1 per card and head dimension D=128 . For single-operator exper-iments, we use the representative configuration 
+
+[B, N, S, D ] = [1 , 24 , 28800 , 128] , where B
+
+denotes batch size, N the number of attention heads, S the sequence length, and D the head dimension. 
+
+Baselines. We compare RoME against standard RoPE implementations from widely used open-source frameworks [1, 2]. Most implementations follow Equation 3, combining PyTorch low-level APIs for splitting, rotating, and merging features. In cases where fused kernels are available, we use these optimized versions as stronger baselines to ensure a fair comparison. For model-level bench-marks, we use TTFT(Time to First Token [8]) as the baseline for LLMs, and the one-step inference latency as the baseline for video generation models. 
+
+Metrics. We report both speedup times t0/t and 
+
+speedup percentage (t0 − t)/t 0, where t0 denotes the baseline runtime and t denotes the optimized runtime using RoME. 
+
+5.2. Main results 
+
+Table 2 summarizes the single-operator results, showing that RoME consistently outperforms stan-dard RoPE implementations across most configura-tions. We then integrate RoME into several widely used models and evaluate it on multiple tasks. As shown in Table 3, RoME delivers a 3% –10% in-ference speedup in most cases. An exception is the 
+
+Hunyuan Video model, where the observed speedup is below 1% . Profiling reveals that this model already employs heavily optimized, case-specific fused kernels with a 1D RoPE implementation, leaving little headroom for further acceleration. In such scenarios, the key advantage of RoME lies in its generality : it requires no deep, model-specific kernel engineering, while still achieving compet-itive performance compared to highly specialized fused operators. As shown in Table 4, training also benefits from RoME, since the backward pass faces the 6Table 2. Time taken for a single operator (applying position embedding) and speedup times for RoME compared with different RoPE implementations. RoPE refers to it’s origin application and 2D/3D sequels [9, 17, 20]. RoPE+fuse refers to model-specific optimization implemented in [1, 2], where 2D and 3D operators are fused for efficient computation. 
+
+Mode Dimension RoPE RoPE+fuse RoME vs. RoPE vs. RoPE+fuse 
+
+interleave 2D (dim=64+64) 5.2ms 2.0ms 
+
+1.6ms 
+
+3.3x 1.3x 3D (dim=44+44+40) 5.7ms 3.6x half 2D (dim=64+64) 5.0ms 2.2ms 2.1x 1.4x 3D (dim=44+44+40) 5.8ms 9.9ms 3.6x 6.2x                                                                                             
+
+> Table 3. Acceleration in inference by applying RoME vs. RoPE.
+> Task Model Parameters QKShape[BNSD] Baseline(ms) RoME(ms) Speedup
+> LLM Llama3.1 8B [1 ,24 ,8192 ,128] 50 .848 .14.7%
+> VLM internvl3 8B [1 ,28 ,1846 ,128] 174 166 4.5%
+> Edit FLUX.1-Kontext 12B [1 ,24 ,8704 ,128] 1059 978 8.3%
+> T2I Qwen-Image 20B [1 ,24 ,6032 ,128] 1457 1401 4%
+> T2V HunyuanVideo 13B [1 ,24 ,42840 ,128] /540 P14410 14400 0.1% [1 ,24 ,8192 ,128] /720 P40120 40100 0.1%
+> Wan2.2 1.3B [1 ,12 ,6630 ,128] /272 P209 199 3.9% [1 ,12 ,17550 ,128] /480 P790 759 3.4%
+> 14B [1 ,40 ,6630 ,128] /272 P1170 1120 4.3% [1 ,40 ,17550 ,128] /480 P4500 4350 3.3%
+> Table 4. Time taken for each training step using RoPE vs RoME. Model is wan2.2/1.3B .
+> Inputs RoPE (s) RoME (s) Speedup
+> 272 P1.27 1.22 4% 480 P3.37 3.30 2.3%
+
+same bottlenecks as the forward pass. For exam-ple, applying RoME to the wan2.2/1.3B model yields clear end-to-end training improvements, fur-ther supporting the effectiveness of our approach. 
+
+5.3. Ablation 
+
+Theoretical and empirical complexity analysis. 
+
+Let the hidden dimension be d and the sequence length be s. In the conventional RoPE implemen-tation, the rotation is realized through a sequence of vector-level operations such as elementwise ad-dition, interleaving, and concatenation. Although these operations have an arithmetic complexity of 
+
+O(sd ), they require multiple kernel launches and incur substantial memory I/O, which often be-comes the dominant cost in practice. In contrast, our matrix-based formulation replaces these vector operations with a single matrix multiplication: 
+
+Y = RX , R = cos θ I + sin θ M, (10) where R is a structured block-diagonal rotation matrix derived from the RoPE angles. This ap-proach maintains the same theoretical arithmetic complexity of O(sd ) but significantly reduces memory movement and allows for effective kernel fusion. As a result, the matrix-based implementa-tion achieves empirically faster execution on both Ascend(NPU) and GPU architectures. 
+
+Breakdown of Various Implementations. Ta-ble 5 presents a theoretical and empirical com-parison of three RoPE implementations: (1) the conventional chunk+cat design, (2) our matrix-based formulation using a block-diagonal rotation matrix M, and (3) the fully explicit rotation ap-proach that constructs a dense d × d matrix R.The explicit rotation method directly instantiates 
+
+R = cos θ I + sin θ M and applies a dense ma-trix multiplication, which substantially increases 7Table 5. Comparison of RoPE implementations. Our matrix-based approach achieves the best trade-off between effi-ciency and simplicity, reducing vector-operator cost that accounts for over 50% of the forward-time MFU bottleneck.                        
+
+> Chunk+Cat Matrix ( M)Direct Rotation ( R)Algorithmic complexity O(d)O(d)O(d2)
+> Memory access pattern Non-contiguous Contiguous Dense matmul Kernel launches 3–4 ops 1 fused op 1 heavy op Parallel efficiency Low High Moderate Implementation simplicity Moderate High Low Fusibility into attention No Yes Difficult Empirical speed (Ascend 910B3) 1.00 ×≥3.7 ×0.01 ×
+
+Table 6. Ablation study for each modules in RoME. Using none of them corresponds to standard RoPE.                                           
+
+> Method RoPE RoME (Ours)
+> Matrix transfer -✓--✓✓-✓
+> Input fusion --✓-✓-✓✓
+> Operator fusion ---✓-✓✓✓
+> Infer Cost(ms) 6.0 5.7 4.7 7.7 2.8 3.7 2.1 1.6
+> vs. RoPE -1.1x 1.3x 0.8x 2.1x 1.6x 2.8x 3.7x
+
+both arithmetic cost and memory traffic. In con-trast, our block-diagonal formulation achieves the same linear rotation behavior while maintaining 
+
+O(d) complexity and avoiding the excessive kernel launches associated with chunk+cat . As the ta-ble shows, this structure significantly reduces over-head in practice, leading to superior empirical effi-ciency. 
+
+Module-level Ablations for RoME. To better understand the contribution of each component in RoME, we decompose the method into three parts: (1) the mathematically equivalent matrix-based transformation, (2) the natural ability to fuse 2D/3D positional encoding into a single 1D operation, and (3) fully or partially fused kernel optimizations. We conduct profiling on 3D interleaved RoPE using the original shape [1 , 24 , 28800 , 128] and its decomposed components: h=[1 , 24 , 28800 , 44] ,
+
+w=[1 , 24 , 28800 , 44] , and t=[1 , 24 , 28800 , 40] . As shown in Table 6, the matrix-based replacement provides consistent improvements across all set-tings. The fused operator and 3D →1D conversion yield additional speedups for certain combinations. However, without converting 3D RoPE to its 1D equivalent, fused operators may occasionally de-grade performance, since some 3D RoPE imple-mentations are difficult to map exactly to a 1D for-mulation [17]. Overall, RoME achieves the best performance when all components are applied to-gether, demonstrating strong efficiency gains. 
+
+6. Conclusion 
+
+We presented RoME, a mathematically equivalent yet computationally efficient reformulation of Ro-tary Position Embedding. By replacing RoPE’s vector-level split and merge operations with a unified matrix transformation, RoME signifi-cantly reduces memory movement, improves ker-nel fusion, and simplifies implementation across a wide range of models. Our analysis shows that many of the inefficiencies in existing RoPE implementations arise not from the rotation itself but from the surrounding dataflow, particularly in multi-dimensional (2D/3D) settings. RoME ad-dresses these bottlenecks in a principled manner, enabling efficient execution on both Ascend(NPUs) and GPUs architectures. Our matrix-based for-mulation also opens avenues for further general-izing RoPE to richer multi-dimensional modali-ties, including long-context video generation, 3D scene understanding, and spatiotemporal founda-tion models. 8Efficient Matrix Implementation for Rotary Position Embedding 
+
+## Supplementary Material 
+
+A.7. Different Type of RoME Implement 
+
+Algorithms : ∀RoPE, ∃ (d, d ) − size Matrix M to make it mathematical equivalent to RoME(Eq. 7). Thus, the key for RoME is to find the (d, d ) − size 
+
+Matrix M. Unless otherwise specified, the RoME satisfy Eq. 7. 
+
+A.7.1. 1D-RoME 
+
+Half. As mention in main body, half-mode RoPE can be written as Eq. A11 
+
+x1, x 2 = torch.chunk (x, 2, dim = −1) 
+
+xnew = torch.cat (( −x2, x 1), dim = −1) 
+
+rope out = x ∗ cos + xnew ∗ sin 
+
+(A11) For this mode, we can find a matrix M: 
+
+M =
+
+ 0 I
+
+−I 0
+
+
+
+, (A12) where the shape of I is d/ 2 × d/ 2.
+
+Interleave. Similar as half mode: 
+
+x = rearrange (x, ... (dj )− > ...dj, j = 2) 
+
+x1, x 2 = torch.chunk (x, 2, dim = −1) 
+
+xnew = torch.cat (( −x2, x 1), dim = −1) .f latten (−2) 
+
+rope out = x ∗ cos + xnew ∗ sin 
+
+(A13) For this mode, M is a is a block-diagonal matrix composed of 2 × 2 rotation generators: 
+
+M =
+
+ 0 1
+
+−1 0
+
+
+
+block diag 
+
+, (A14) 
+
+Interleave-Half. This mode combines the ideas of interleave and half . First, all even-indexed di-mensions are moved to the first half of the feature vector, and all odd-indexed dimensions to the sec-ond half. The resulting vector is then processed in the same manner as in the half mode. Formally: [6, 6] 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+> -5-4-3
+> -11 -10 -9
+> -17 -16 -15
+> -23 -22 -21
+> 210
+> 876
+> 14 13 12
+> 20 19 18
+
+Get left 
+
+half [S, D]=[4, 6] 
+
+Get right 
+
+half 
+
+Rearrange a 
+
+new tensor 
+
+> 210-5-4-3
+> 876-11 -10 -9
+> 14 13 12 -17 -16 -15
+> 20 19 18 -23 -22 -21
+
+output = cos ∗ x + sin ∗ x_new 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+> 001000
+> 010000
+> 100000
+> 00000-1
+> 0000-10
+> 000-100
+
+@
+
+> [S, D]=[4, 6]
+> 210-5-4-3
+> 876-11 -10 -9
+> 14 13 12 -17 -16 -15
+> 20 19 18 -23 -22 -21
+
+output = cos ∗ x + sin ∗ x_new 
+
+half -rope Vector Rotate 
+
+half -rope Cube Rotate 
+
+Figure A5. An example of RoPE-half. [6, 6] 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+> -5-3-1
+> -11 -9-7
+> -17 -15 -13
+> -23 -21 -19
+> 420
+> 10 86
+> 16 14 12
+> 22 20 18
+
+Get odd 
+
+> [S, D]=[4, 6]
+
+Get even Rearrange a 
+
+new tensor 
+
+> 4-52-30-1
+> 10 -11 8-96-7
+> 16 -17 14 -15 12 -13
+> 22 -23 20 -21 18 -19
+
+output = cos ∗ x + sin ∗ x_new 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+> 000010
+> 00000-1
+> 001000
+> 000-100
+> 100000
+> 0-10000
+
+@
+
+> [S, D]=[4, 6]
+> 4-52-30-1
+> 10 -11 8-96-7
+> 16 -17 14 -15 12 -13
+> 22 -23 20 -21 18 -19
+
+output = cos ∗ x + sin ∗ x_new 
+
+Interleave -rope Vector Rotate 
+
+Interleave -rope Cube Rotate 
+
+Figure A6. An example of RoPE-interleave. 
+
+1x = rearrange (x, . . . (d j ) → . . . d j, j =2) 
+
+x1, x 2 = torch.chunk (x, 2, dim =−1) 
+
+.squeeze (dim =−1) 
+
+x = torch.cat (( x1, x 2), dim =−1) 
+
+xnew = torch.cat (( −x2, x 1), dim =−1) 
+
+rope out = x · cos + xnew · sin 
+
+(A15) This mode is a special case and cannot be di-rectly expressed using Eq. 7. However, we can derive an analogous formulation using the matrix-based viewpoint, which we denote as the RoME-extension :output = cos θ M1x + sin θ M2x. (A16) Here, M1 is a (d × d) permutation matrix, and 
+
+M2 is a modified permutation matrix in which half of the entries 1 are replaced with −1. Their defini-tions are: 
+
+M1 =
+
+
+
+mij = 1 , j < d 
+
+> 2
+
+, i = 2 j, mij = 1 , j ≥ d 
+
+> 2
+
+, i = 2( j − d 
+
+> 2
+
+) + 1 ,mij = 0 , otherwise ,
+
+(A17) 
+
+M2 =
+
+
+
+mij = −1, j < d 
+
+> 2
+
+, i = 2 j + 1 ,mij = 1 , j ≥ d 
+
+> 2
+
+, i = 2( j − d 
+
+> 2
+
+),mij = 0 , otherwise ,
+
+(A18) where mij denotes the element at row 0 ≤ i < d 
+
+and column 0 ≤ j < d .If d 
+
+> 2
+
+is a chip-friendly size, the RoME-extension can be expressed more efficiently as: 
+
+x1, x2 = M11 x, M12 x
+
+output 1 = cos 1 θ x1 − sin 1 θ x2
+
+output 2 = cos 2 θ x2 + sin 2 θ x1
+
+output = cat (output 1, output 2)
+
+(A19) where M11 and M12 correspond to the left and right halves of the columns of M1, respectively. Similarly, cos 1, cos 2, sin 1, sin 2 are the correspond-ing halves of cos and sin . The final cat opera-tion incurs no overhead because d 
+
+> 2
+
+is a hardware-friendly dimension, making output 1 and output 2
+
+contiguous in memory. 
+
+Quarter. Similar as half mode: 
+
+x1, x 2, x 3, x 4 = torch.chunk (x, 4, dim = −1) 
+
+xnew = torch.cat (( −x2, x 1, −x4, x 3), dim = −1) 
+
+rope out = x ∗ cos + xnew ∗ sin 
+
+(A20) For this mode, we can find a matrix M: 
+
+M =
+
+
+
+0 I 0 0
+
+−I 0 0 00 0 0 I0 0 −I 0
+
+ , (A21) where the shape of I is d/ 4 × d/ 4.
+
+Extensions. Besides with the modes mentioned in pre-paragraph, there are new type of RoPE de-signing, e.g., GLM-4.6. If want better perfor-mance, tranditional way is to write new fused op-erators for each new design. However, for RoME, we can get a proper performance with a new M de-signing, no need engineering problem. 
+
+A.7.2. 3D-RoME 
+
+In this section, we introduce 3D-RoME . (2D-RoME can be viewed as a special case of 3D-RoME where the temporal dimension t has size zero.) A naive implementation of 3D-RoPE applies standard 1D-RoPE independently along the height, width, and temporal dimensions ( h/w/t ). In the-ory, this appears to have the same arithmetic cost as 1D-RoPE, since the hidden dimension decom-poses as d = dh + dw + dt. However, in prac-tice, 3D-RoPE introduces additional slicing and concatenation operations . Moreover, although d is typically chosen to be a chip-friendly dimension, the sub-dimensions dh, dw, and dt are often not 
+
+hardware-friendly, resulting in inefficient kernels 2Get odd 
+
+[S, D]=[4, 6] 
+
+Get even 
+
+output = cos ∗ x_part1 + sin ∗ x_part2 
+
+interleave -half -rope Vector Rotate 
+
+interleave -half -rope Cube Rotate 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+> 531
+> 11 97
+> 17 15 13
+> 23 21 19
+> 420
+> 10 86
+> 16 14 12
+> 22 20 18
+> 531420
+> 11 9710 86
+> 17 15 13 16 14 12
+> 23 21 19 22 20 18
+> 420-5-3-1
+> 10 86-11 -9-7
+> 16 14 12 -17 -15 -13
+> 22 20 18 -23 -21 -19
+
+[S, D]=[4, 6] 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+
+output = cos ∗ x_part1 + sin ∗ x_part2 
+
+@
+
+> 000001
+> 001000
+> 000010
+> 010000
+> 000100
+> 100000
+> 001000
+> 00000-1
+> 010000
+> 0000-10
+> 100000
+> 000-100
+> 531420
+> 11 9710 86
+> 17 15 13 16 14 12
+> 23 21 19 22 20 18
+> 420-5-3-1
+> 10 86-11 -9-7
+> 16 14 12 -17 -15 -13
+> 22 20 18 -23 -21 -19
+
+@
+
+interleave -half -rope Cube Rotate Optimal 
+
+[S, D]=[4, 6] 
+
+> 543210
+> 11 10 9876
+> 17 16 15 14 13 12
+> 23 22 21 20 19 18
+
+output 1 = cos 1 ∗ x! − sin 1 ∗ x"
+
+output 2 = cos 2 ∗ x" + sin 2 ∗ x!
+
+output = 𝑐𝑎𝑡 (𝑜𝑢𝑡𝑝𝑢𝑡 1, 𝑜𝑢𝑡𝑝𝑢𝑡 2)
+
+@
+
+> 001
+> 000
+> 010
+> 000
+> 100
+> 000
+> 000
+> 001
+> 000
+> 010
+> 000
+> 100
+> 420
+> 10 86
+> 16 14 12
+> 22 20 18
+
+@
+
+> 531
+> 11 97
+> 17 15 13
+> 23 21 19
+
+x1
+
+x2Figure A7. An example of RoPE-interleave-half. [8, 8] 
+
+> 76543210
+> 15 14 13 12 11 10 98
+> 23 22 21 20 19 18 17 16
+> 31 30 29 28 27 26 25 24
+> 10
+> 98
+> 17 16
+> 25 24
+
+[S, D]=[4, 8] 
+
+Rearrange a 
+
+new tensor 
+
+output = cos ∗ x + sin ∗ x_new 
+
+> 00000
+
+100
+
+> 0000
+
+1000
+
+> 0000000
+
+-1
+
+> 000000
+
+-10
+
+> 0
+
+1000000
+
+10000000
+
+> 000
+
+-10000
+
+> 00
+
+-100000
+
+@
+
+[S, D]=[4, 8] 
+
+output = cos ∗ x + sin ∗ x_new 
+
+quarter -rope Vector Rotate 
+
+quarter -rope Cube Rotate   
+
+> 54-7-610-3-2
+> 13 12 -15 -14 98-11 10
+> 21 20 -23 -22 17 16 -19 -18
+> 29 28 -31 -30 25 24 -27 -26
+> -3-2
+> -11 10
+> -19 -18
+> -27 -26 54
+> 13 12
+> 21 20
+> 29 28 -7-6
+> -15 -14
+> -23 -22
+> -31 -30
+> 76543210
+> 15 14 13 12 11 10 98
+> 23 22 21 20 19 18 17 16
+> 31 30 29 28 27 26 25 24
+> 54-7-610-3-2
+> 13 12 -15 -14 98-11 10
+> 21 20 -23 -22 17 16 -19 -18
+> 29 28 -31 -30 25 24 -27 -26
+
+Figure A8. An example of RoPE-quarter. 
+
+and degraded performance. Therefore, it is desir-able to design an algorithm that maintains full com-patibility with the chip-friendly dimension d. Our proposed 3D-RoME satisfies this requirement ex-actly. As shown in Fig. A9, the original 3D-RoPE implementation calls the RoPE operator three sep-arate times and contains many hardware-unfriendly operations. Using the RoME formulation of Eq. 7, the only remaining challenge is constructing the ap-propriate structured matrix M. Consider the two common RoPE modes— half and interleave . Since the interleave mode simply swaps neighboring even and odd dimensions, it is noteworthy that the 3D version of M is identical to the 1D counterpart. For the half mode, the 3D-M can be written as follows: 
+
+M =
+
+
+
+0 Ih 0 0 0 0
+
+−Ih 0 0 0 0 00 0 0 Iw 0 00 0 −Iw 0 0 00 0 0 0 0 It
+
+0 0 0 0 −It 0
+
+
+
+,
+
+(A22) where the shape of Ih is dh
+
+2 × dh
+
+2 , Iw is dw
+
+2 × dw
+
+2 ,
+
+It is dt
+
+2 × dt
+
+2 .
+
+A.8. Additional Experiments References 
+
+[1] Ascend. Ascend/mindspeed, 2025. 6, 7 [2] Ascend. vllm-ascend, 2025. 6, 7 
+
+3RoPE -3D   
+
+> Mul
+> Slice
+> Slice neg
+> concat mul
+> add
+
+sin_w 
+
+cos_w 
+
+rotate 
+
+q     
+
+> （1,24, 28800,128)
+> Slice
+> Slice
+> Slice
+> q1
+> （1,24, 28800, 44)
+> q2
+> （1,24, 28800, 44)
+> q3
+> （1,24, 28800, 40)
+> concat
+
+q          
+
+> （1,24, 28800,128)
+> ROPE -3D ：split D -axis
+> into h/w/t todo Rope
+> respectively
+> （1,1, 28800, 44)
+> Mul
+> Slice
+> Slice neg
+> concat mul
+> add
+> （1,24, 28800, 22)
+> （1,24, 28800, 22)
+> （1,24, 28800, 44)
+
+sin_h （1,1, 28800, 44) 
+
+cos_h 
+
+rotate    
+
+> （1,24, 28800, 44)
+> ROPE -3D ：
+> cat result
+> into a
+> tensor
+> Mul
+> Slice
+> Slice neg
+> concat mul
+> add
+
+sin_t 
+
+cos_t 
+
+rotate 
+
+ROPE 
+
+ROPE 
+
+ROPE Figure A9. An example of RoPE-3D algorithm. [3] Xiangxiang Chu, Jianlin Su, Bo Zhang, and Chun-hua Shen. Visionllama: A unified llama backbone for vision tasks, 2024. 2 [4] Tri Dao. FlashAttention-2: Faster attention with better parallelism and work partitioning. In Inter-national Conference on Learning Representations (ICLR) , 2024. 2, 3 [5] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher R´ e. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Pro-cessing Systems (NeurIPS) , 2022. 3 [6] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidi-rectional transformers for language understanding, 2019. 1 [7] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is worth 16x16 words: Transformers for image recognition at scale, 2021. 1 [8] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, and et al. The llama 3 herd of models, 2024. 2, 6 [9] Byeongho Heo, Song Park, Dongyoon Han, and Sangdoo Yun. Rotary position embedding for vi-sion transformer, 2024. 2, 7 [10] Albert Q. Jiang, Alexandre Sablayrolles, and et al. Mistral 7b, 2023. 3 [11] Weijie Kong, Qi Tian, Zijian Zhang, and et al. Hun-yuanvideo: A systematic framework for large video generative models, 2025. 3, 4 
+
+4RoPE -half -3D 
+
+> 19 18 17 16 15 14 13 12 11 10 9876543210
+> 39 38 37 36 35 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20
+> 59 58 57 56 55 54 53 52 51 50 49 48 47 46 45 44 43 42 41 40
+> 79 78 77 76 75 74 73 72 71 70 69 68 67 66 65 64 63 62 61 60
+> 543210
+> 25 24 23 22 21 20
+> 45 44 43 42 41 40
+> 65 64 63 62 61 60
+> 11 10 9876
+> 31 30 29 28 27 26
+> 51 50 49 48 47 46
+> 71 70 69 68 67 66
+> 19 18 17 16 15 14 13 12
+> 39 38 37 36 35 34 33 32
+> 59 58 57 56 55 54 53 52
+> 79 78 77 76 75 74 73 72
+> 001000
+> 010000
+> 100000
+> 00000-1
+> 0000-10
+> 000-100
+> 001000
+> 010000
+> 100000
+> 00000-1
+> 0000-10
+> 000-100
+> 00010000
+> 00100000
+> 01000000
+> 10000000
+> 0000000-1
+> 000000-10
+> 00000-100
+> 0000-1000
+> 15 14 13 12 -19 -18 -17 -16 876-11 -10 -9210-5-4-3
+> 35 34 33 32 -39 -38 -37 -36 28 27 26 -31 -30 -29 22 21 20 -25 -24 -23
+> 55 54 53 52 -59 -58 -57 -56 48 47 46 -51 -50 -49 42 41 40 -45 -44 -43
+> 75 74 73 72 -79 -78 -77 -76 68 67 66 -71 -70 -69 62 61 60 -65 -64 -63
+> 210-5-4-3
+> 22 21 20 -25 -24 -23
+> 42 41 40 -45 -44 -43
+> 62 61 60 -65 -64 -63
+> 876-11 -10 -9
+> 28 27 26 -31 -30 -29
+> 48 47 46 -51 -50 -49
+> 68 67 66 -71 -70 -69
+> 15 14 13 12 -19 -18 -17 -16
+> 35 34 33 32 -39 -38 -37 -36
+> 55 54 53 52 -59 -58 -57 -56
+> 75 74 73 72 -79 -78 -77 -76
+
+@ @ @
+
+RoPE -half -3D 
+
+> 19 18 17 16 15 14 13 12 11 10 9876543210
+> 39 38 37 36 35 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20
+> 59 58 57 56 55 54 53 52 51 50 49 48 47 46 45 44 43 42 41 40
+> 79 78 77 76 75 74 73 72 71 70 69 68 67 66 65 64 63 62 61 60
+> 15 14 13 12 -19 -18 -17 -16 876-11 -10 -9210-5-4-3
+> 35 34 33 32 -39 -38 -37 -36 28 27 26 -31 -30 -29 22 21 20 -25 -24 -23
+> 55 54 53 52 -59 -58 -57 -56 48 47 46 -51 -50 -49 42 41 40 -45 -44 -43
+> 75 74 73 72 -79 -78 -77 -76 68 67 66 -71 -70 -69 62 61 60 -65 -64 -63
+
+Slice 
+
+Concat 
+
+@
+
+> 00000000000000001000
+> 00000000000000010000
+> 00000000000000100000
+> 0000000000000000000-1
+> 000000000000000000-10
+> 00000000000000000-100
+> 00000000001000000000
+> 00000000010000000000
+> 00000000100000000000
+> 0000000000000-1000000
+> 000000000000-10000000
+> 00000000000-100000000
+> 00010000000000000000
+> 00100000000000000000
+> 01000000000000000000
+> 10000000000000000000
+> 0000000-1000000000000
+> 000000-10000000000000
+> 00000-100000000000000
+> 0000-1000000000000000
+
+@
+
+[S, D]=[4, 20] [S, D]=[4, 20] 
+
+[20, 20] 
+
+[3, 3] [3, 3] 
+
+[4, 4] 
+
+D Can not be equally divide Figure A10. An example of RoPE-3D matrix. [12] Black Forest Labs, Stephen Batifol, Andreas Blattmann, Frederic Boesel, Saksham Consul, Cyril Diagne, Tim Dockhorn, Jack English, Zion English, Patrick Esser, et al. Flux. 1 kon-text: Flow matching for in-context image gener-ation and editing in latent space. arXiv preprint arXiv:2506.15742 , 2025. 2, 4 [13] Muyang Li, Yujun Lin, Zhekai Zhang, Tianle Cai, Xiuyu Li, Junxian Guo, Enze Xie, Chenlin Meng, Jun-Yan Zhu, and Song Han. Svdquant: Absorbing outliers by low-rank components for 4-bit diffusion models. arXiv preprint arXiv:2411.05007 , 2024. 3 [14] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 , 2024. 2, 3 [15] Yingfei Liu, Tiancai Wang, Xiangyu Zhang, and Jian Sun. Petr: Position embedding transformation for multi-view 3d object detection, 2022. 1 [16] Chao Lou, Zixia Jia, Zilong Zheng, and Kewei Tu. Sparser is faster and less is more: Efficient sparse attention for long-range transformers, 2024. 3 [17] Guoqing Ma, Haoyang Huang, Kun Yan, and et al. Step-video-t2v technical report: The practice, chal-lenges, and future of video foundation model, 2025. 2, 4, 7, 8 [18] Alec Radford and Karthik Narasimhan. Improving language understanding by generative pre-training. 2018. 1 [19] Luohe Shi, Zuchao Li, Lefei Zhang, Guom-ing Liu, Baoyuan Qi, and Hai Zhao. Kv-latent: Dimensional-level kv cache reduction with frequency-aware rotary positional embedding, 2025. 3 [20] Jianlin Su, Yu Lu, Shengfeng Pan, Bo Wen, and Yunfeng Liu. Roformer: Enhanced transformer with rotary position embedding. Neurocomputing ,2024. 1, 2, 3, 7 [21] Yuxuan Sun, Ruikang Liu, Haoli Bai, Han Bao, Kang Zhao, Yuening Li, Jiaxin Hu, Xianzhi Yu, Lu Hou, Chun Yuan, et al. Flatquant: Flat-ness matters for llm quantization. arXiv preprint arXiv:2410.09426 , 2024. 3 [22] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need, 2023. 1 [23] Team Wan, Ang Wang, Baole Ai, Bin Wen, and et al. Wan: Open and advanced large-scale video gen-erative models. arXiv preprint arXiv:2503.20314 ,2025. 3, 4, 6 [24] Yu-An Wang and Yun-Nung Chen. What do posi-tion embeddings learn? an empirical study of pre-
+
+5trained language model positional encoding, 2020. 1[25] Chenfei Wu, Jiahao Li, Jingren Zhou, and et al. Qwen-image technical report, 2025. 3 [26] Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Ac-curate and efficient post-training quantization for large language models. In International conference on machine learning , pages 38087–38099. PMLR, 2023. 3 [27] An Yang, Anfeng Li, Baosong Yang, and et al. Qwen3 technical report, 2025. 2 [28] Jintao Zhang, Haofeng Huang, Pengle Zhang, Jia Wei, Jun Zhu, and Jianfei Chen. Sageattention2: Efficient attention with thorough outlier smoothing and per-thread int4 quantization. arXiv preprint arXiv:2411.10958 , 2024. 3 [29] Jintao Zhang, Jia Wei, Haofeng Huang, Pengle Zhang, Jun Zhu, and Jianfei Chen. Sageat-tention: Accurate 8-bit attention for plug-and-play inference acceleration. arXiv preprint arXiv:2410.02367 , 2024. [30] Jintao Zhang, Jia Wei, Pengle Zhang, Xiaoming Xu, Haofeng Huang, Haoxu Wang, Kai Jiang, Jun Zhu, and Jianfei Chen. Sageattention3: Microscal-ing fp4 attention for inference and an exploration of 8-bit training. arXiv preprint arXiv:2505.11594 ,2025. 3 [31] Tianchen Zhao, Ke Hong, Xinhao Yang, Xue-feng Xiao, Huixia Li, Feng Ling, Ruiqi Xie, Siqi Chen, Hongyu Zhu, Yichong Zhang, and Yu Wang. Paroattention: Pattern-aware reordering for effi-cient sparse and quantized attention in visual gen-eration models, 2025. 3 
+
+6
