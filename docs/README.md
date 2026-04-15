@@ -6,91 +6,64 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-14
-- 运行时间：2026-04-14 20:13:48 UTC
+- 最新运行日期：2026-04-15
+- 运行时间：2026-04-15 20:35:48 UTC
 - 运行状态：成功
-- 本次总论文数：23
-- 精读区：12
-- 速读区：11
+- 本次总论文数：14
+- 精读区：6
+- 速读区：8
 
 ### 今日简报（AI）
-今日深度研读 23 篇前沿论文，重点攻克分布式边缘云推理优化与投机采样树扩展等 LLM 性能瓶颈。
-满分佳作 ConfigSpec 与 SMART 揭示了通过配置优化与智能树扩展，能显著提升边缘云协作及投机采样的推理效率。
-建议优先关注投机采样在复杂环境下的落地，并同步了解多轮对话与视频大模型的轻量化量化方案。
-- 详情：[/202604/14/README](/202604/14/README)
+今日深度复盘 14 篇前沿论文，重点攻克 Flash Attention 算子优化与投机解码加速方案。
+VFA 通过预计算全局最大值缓解向量运算压力，而 Block Diffusion 树结构则为投机解码带来了显著的性能飞跃。
+推荐开发者优先研读这两项满分成果，掌握大模型推理侧从底层算子到解码策略的最新演进。
+- 详情：[/202604/15/README](/202604/15/README)
 
 ### 精读区论文标签
-1. [ConfigSpec: Profiling-Based Configuration Selection for Distributed Edge--Cloud Speculative LLM Serving](/202604/14/2604.09722v1-configspec-profiling-based-configuration-selection-for-distributed-edge--cloud-speculative-llm-serving)  
+1. [VFA: Relieving Vector Operations in Flash Attention with Global Maximum Pre-computation](/202604/15/2604.12798v1-vfa-relieving-vector-operations-in-flash-attention-with-global-maximum-pre-computation)  
    标签：评分：10.0/10、query:llm
-   evidence：分布式投机大模型服务的配置选择
-2. [SMART: When is it Actually Worth Expanding a Speculative Tree?](/202604/14/2604.09731v1-smart-when-is-it-actually-worth-expanding-a-speculative-tree)  
+   evidence：向量缓解Flash Attention (VFA) 减少注意力机制中的非矩阵乘法延迟
+2. [Accelerating Speculative Decoding with Block Diffusion Draft Trees](/202604/15/2604.12989v1-accelerating-speculative-decoding-with-block-diffusion-draft-trees)  
    标签：评分：10.0/10、query:llm
-   evidence：投机解码树构建的系统感知边际分析
-3. [SpecMoE: A Fast and Efficient Mixture-of-Experts Inference via Self-Assisted Speculative Decoding](/202604/14/2604.10152v1-specmoe-a-fast-and-efficient-mixture-of-experts-inference-via-self-assisted-speculative-decoding)  
-   标签：评分：10.0/10、query:llm
-   evidence：针对MoE推理的自辅助投机解码
-4. [IceCache: Memory-efficient KV-cache Management for Long-Sequence LLMs](/202604/14/2604.10539v1-icecache-memory-efficient-kv-cache-management-for-long-sequence-llms)  
-   标签：评分：10.0/10、query:llm
-   evidence：结合 PagedAttention 的高效 KV 缓存管理
-5. [ZoomR: Memory Efficient Reasoning through Multi-Granularity Key Value Retrieval](/202604/14/2604.10898v1-zoomr-memory-efficient-reasoning-through-multi-granularity-key-value-retrieval)  
-   标签：评分：10.0/10、query:llm
-   evidence：针对长输出的动态KV缓存选择与压缩
-6. [CASK: Core-Aware Selective KV Compression for Reasoning Traces](/202604/14/2604.10900v1-cask-core-aware-selective-kv-compression-for-reasoning-traces)  
-   标签：评分：10.0/10、query:llm
-   evidence：针对长文本推理链的KV缓存压缩
-7. [Quantization Dominates Rank Reduction for KV-Cache Compression](/202604/14/2604.11501v1-quantization-dominates-rank-reduction-for-kv-cache-compression)  
-   标签：评分：10.0/10、query:llm
-   evidence：比较量化与秩削减的KV缓存压缩研究
-8. [MoBiE: Efficient Inference of Mixture of Binary Experts under Post-Training Quantization](/202604/14/2604.06798v2-mobie-efficient-inference-of-mixture-of-binary-experts-under-post-training-quantization)  
+   evidence：利用草稿树加速投机解码
+3. [Efficient Inference for Large Vision-Language Models: Bottlenecks, Techniques, and Prospects](/202604/15/2604.05546v2-efficient-inference-for-large-vision-language-models-bottlenecks-techniques-and-prospects)  
    标签：评分：9.0/10、query:llm
-   evidence：通过二值化和SVD实现MoE大模型的高效推理
-9. [A-IO: Adaptive Inference Orchestration for Memory-Bound NPUs](/202604/14/2604.09752v1-a-io-adaptive-inference-orchestration-for-memory-bound-npus)  
+   evidence：大型视觉语言模型效率技术的系统分类与综述
+4. [PipeLive: Efficient Live In-place Pipeline Parallelism Reconfiguration for Dynamic LLM Serving](/202604/15/2604.12171v1-pipelive-efficient-live-in-place-pipeline-parallelism-reconfiguration-for-dynamic-llm-serving)  
    标签：评分：9.0/10、query:llm
-   evidence：解决NPU上投机解码的内核同步开销问题
-10. [LoopGuard: Breaking Self-Reinforcing Attention Loops via Dynamic KV Cache Intervention](/202604/14/2604.10044v1-loopguard-breaking-self-reinforcing-attention-loops-via-dynamic-kv-cache-intervention)  
+   evidence：通过流水线并行优化动态LLM服务的吞吐量和延迟
+5. [SpecBound: Adaptive Bounded Self-Speculation with Layer-wise Confidence Calibration](/202604/15/2604.12247v1-specbound-adaptive-bounded-self-speculation-with-layer-wise-confidence-calibration)  
    标签：评分：9.0/10、query:llm
-   evidence：通过动态KV缓存干预打破重复循环
-11. [RouterWise: Joint Resource Allocation and Routing for Latency-Aware Multi-Model LLM Serving](/202604/14/2604.10907v1-routerwise-joint-resource-allocation-and-routing-for-latency-aware-multi-model-llm-serving)  
+   evidence：用于LLM推理的自适应有界自我投机解码
+6. [Latent-Condensed Transformer for Efficient Long Context Modeling](/202604/15/2604.12452v1-latent-condensed-transformer-for-efficient-long-context-modeling)  
    标签：评分：9.0/10、query:llm
-   evidence：针对延迟敏感型大模型推理的联合资源分配与路由
-12. [Flow-Controlled Scheduling for LLM Inference with Provable Stability Guarantees](/202604/14/2604.11001v1-flow-controlled-scheduling-for-llm-inference-with-provable-stability-guarantees)  
-   标签：评分：9.0/10、query:llm
-   evidence：通过流量控制调度优化大模型服务的吞吐量与稳定性
+   evidence：通过潜空间压缩减少KV缓存
 
 ### 速读区论文标签
-1. [MT-OSC: Path for LLMs that Get Lost in Multi-Turn Conversation](/202604/14/2604.08782v1-mt-osc-path-for-llms-that-get-lost-in-multi-turn-conversation)  
+1. [Does Visual Token Pruning Improve Calibration? An Empirical Study on Confidence in MLLMs](/202604/15/2604.12035v1-does-visual-token-pruning-improve-calibration-an-empirical-study-on-confidence-in-mllms)  
    标签：评分：8.0/10、query:llm
-   evidence：多轮对话推理中的高效上下文压缩
-2. [Tango: Taming Visual Signals for Efficient Video Large Language Models](/202604/14/2604.09547v2-tango-taming-visual-signals-for-efficient-video-large-language-models)  
+   evidence：多模态大模型高效推理中视觉令牌剪枝的实证研究
+2. [LoSA: Locality Aware Sparse Attention for Block-Wise Diffusion Language Models](/202604/15/2604.12056v1-losa-locality-aware-sparse-attention-for-block-wise-diffusion-language-models)  
    标签：评分：8.0/10、query:llm
-   evidence：针对高效视频LLM的Token剪枝
-3. [ReSpinQuant: Efficient Layer-Wise LLM Quantization via Subspace Residual Rotation Approximation](/202604/14/2604.11080v1-respinquant-efficient-layer-wise-llm-quantization-via-subspace-residual-rotation-approximation)  
+   evidence：扩散语言模型的局部感知稀疏注意力
+3. [RPRA: Predicting an LLM-Judge for Efficient but Performant Inference](/202604/15/2604.12634v1-rpra-predicting-an-llm-judge-for-efficient-but-performant-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：高效的逐层LLM量化框架
-4. [Decoupled Similarity for Task-Aware Token Pruning in Large Vision-Language Models](/202604/14/2604.11240v1-decoupled-similarity-for-task-aware-token-pruning-in-large-vision-language-models)  
-   标签：评分：8.0/10、query:llm
-   evidence：视觉语言模型中的任务感知令牌剪枝
-5. [EdgeCIM: A Hardware-Software Co-Design for CIM-Based Acceleration of Small Language Models](/202604/14/2604.11512v1-edgecim-a-hardware-software-co-design-for-cim-based-acceleration-of-small-language-models)  
-   标签：评分：8.0/10、query:llm
-   evidence：基于存内计算的大模型加速软硬件协同设计
-6. [MemCoT: Test-Time Scaling through Memory-Driven Chain-of-Thought](/202604/14/2604.08216v2-memcot-test-time-scaling-through-memory-driven-chain-of-thought)  
+   evidence：预测模型能力以实现高效推理路由
+4. [Beyond Accuracy: Unveiling Inefficiency Patterns in Tool-Integrated Reasoning](/202604/15/2604.05404v2-beyond-accuracy-unveiling-inefficiency-patterns-in-tool-integrated-reasoning)  
    标签：评分：7.0/10、query:llm
-   evidence：长上下文推理的测试时内存扩展
-7. [Agentic Compilation: Mitigating the LLM Rerun Crisis for Minimized-Inference-Cost Web Automation](/202604/14/2604.09718v1-agentic-compilation-mitigating-the-llm-rerun-crisis-for-minimized-inference-cost-web-automation)  
+   evidence：硬件感知的效率指标用于工具集成LLM推理及KV缓存管理
+5. [Dead Weights, Live Signals: Feedforward Graphs of Frozen Language Models](/202604/15/2604.08335v1-dead-weights-live-signals-feedforward-graphs-of-frozen-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：最小化Web自动化智能体的推理成本
-8. [Efficient Matrix Implementation for Rotary Position Embedding](/202604/14/2604.09742v1-efficient-matrix-implementation-for-rotary-position-embedding)  
+   evidence：冻结大语言模型的前馈图架构以实现高效推理
+6. [Active Imitation Learning for Thermal- and Kernel-Aware LFM Inference on 3D S-NUCA Many-Cores](/202604/15/2604.11948v1-active-imitation-learning-for-thermal--and-kernel-aware-lfm-inference-on-3d-s-nuca-many-cores)  
    标签：评分：7.0/10、query:llm
-   evidence：注意力机制中RoPE的高效矩阵实现
-9. [POINTS-Long: Adaptive Dual-Mode Visual Reasoning in MLLMs](/202604/14/2604.11627v1-points-long-adaptive-dual-mode-visual-reasoning-in-mllms)  
-   标签：评分：7.0/10、query:llm
-   evidence：动态视觉Token缩放实现高效推理
-10. [Dynamic Ranked List Truncation for Reranking Pipelines via LLM-generated Reference-Documents](/202604/14/2604.09492v1-dynamic-ranked-list-truncation-for-reranking-pipelines-via-llm-generated-reference-documents)  
+   evidence：优化多核CPU上的大模型推理
+7. [Position-Agnostic Pre-Projection for Transformer Attention: Nonlinear Feature Construction and Content Skip Before Q/K/V](/202604/15/2604.10791v1-position-agnostic-pre-projection-for-transformer-attention-nonlinear-feature-construction-and-content-skip-before-qkv)  
    标签：评分：6.0/10、query:llm
-   evidence：通过排序列表截断实现高效重排序
-11. [SinkTrack: Attention Sink based Context Anchoring for Large Language Models](/202604/14/2604.10027v1-sinktrack-attention-sink-based-context-anchoring-for-large-language-models)  
+   evidence：Transformer注意力机制块的改进
+8. [ProbeLogits: Kernel-Level LLM Inference Primitives for AI-Native Operating Systems](/202604/15/2604.11943v1-probelogits-kernel-level-llm-inference-primitives-for-ai-native-operating-systems)  
    标签：评分：6.0/10、query:llm
-   evidence：基于注意力汇聚的上下文锚定
+   evidence：内核级大模型推理原语
 
 
 <div class="dpr-home-promo-card">

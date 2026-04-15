@@ -1,0 +1,1053 @@
+Title: PipeLive: Efficient Live In-place Pipeline Parallelism Reconfiguration for Dynamic LLM Serving
+
+URL Source: https://arxiv.org/pdf/2604.12171v1
+
+Published Time: Wed, 15 Apr 2026 00:20:23 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# PipeLive: Efficient Live In-place Pipeline Parallelism Reconfiguration for Dynamic LLM Serving 
+
+Xu BAI 
+
+bxb1@student.unimelb.edu.au 
+
+DisNet Lab University of Melbourne Melbourne, VIC, Australia 
+
+Muhammed Tawfiqul Islam 
+
+tawfiqul.islam@unimelb.edu.au 
+
+DisNet Lab University of Melbourne Melbourne, VIC, Australia 
+
+Chen Wang 
+
+Chen.Wang1@ibm.com 
+
+IBM Research Yorktown Heights, NY, USA 
+
+Adel N. Toosi 
+
+adel.toosi@unimelb.edu.au 
+
+DisNet Lab University of Melbourne Melbourne, VIC, Australia 
+
+Abstract 
+
+Pipeline parallelism (PP) is widely used to partition layers of large language models (LLMs) across GPUs, enabling scalable inference for large models. However, existing systems rely on static PP configurations that fail to adapt to dynamic set-tings, such as serverless platforms and heterogeneous GPU environments. Reconfiguring PP by stopping and redeploy-ing service incurs prohibitive downtime, so reconfiguration must instead proceed live and in place, without interrupt-ing inference. However, live in-place PP reconfiguration is fundamentally challenging. GPUs are already saturated with model weights and KV cache, leaving little room for new layer placements and necessitating KV cache resizing, at odds with systems like vLLM that preallocate for throughput. Moreover, maintaining KV consistency during execution is difficult: stop-and-copy introduces large pauses, while back-ground synchronization risks inconsistency as states evolve. We present PipeLive , which enables live in-place PP recon-figuration with minimal disruption. PipeLive introduces a redesigned KV cache layout together with a co-designed ex-tension to PageAttention, forming a unified mechanism for live KV resizing. It further adopts an incremental KV patch-ing mechanism, inspired by live virtual machine migration, to synchronize KV states between source and target config-urations and identify a safe switch point. PipeLive achieves a 2.5× reduction in time-to-first-token (TTFT) without KV cache overflow compared to disabling KV resizing. Further-more, compared to a variant without KV patching, it reduces reconfiguration overhead from seconds to under 10 ms, and improves TTFT and time-per-output-token (TPOT) by up to 54.7% and 14.7%, respectively. 
+
+Keywords: Large Language Model, Model Serving, Pipeline Parallelism 
+
+1 Introduction 
+
+Large language models (LLMs) [ 2 , 17 , 23 ] have advanced rapidly in recent years. Due to their large parameter sizes and high computational demands, serving a single model often requires coordinating multiple GPUs. Pipeline paral-lelism (PP) [ 16 , 20 ] is a widely adopted strategy that parti-tions model layers across GPUs to scale inference. In such deployments, the selection of a PP configuration that defines the partitioning of model layers across GPUs significantly affects system performance [ 31 ]. Existing LLM inference sys-tems [ 9 , 12 , 29 , 32 ] typically rely on offline profiling to select a fixed PP configuration, as they are optimized for through-put with preallocated model weights and KV cache. As a result, reconfiguring the PP configuration, which changes how model layers are mapped across GPUs, requires full service restarts that incur minutes-long downtime, discard in-flight computation, and operate at a timescale fundamen-tally mismatched with second-level workload dynamics [ 6 ]. This limitation becomes particularly pronounced under dynamic workloads. For example, in heterogeneous GPU environments, input-heavy requests dominated by long prompts require substantial compute for attention, whereas generation-heavy requests dominated by autoregressive de-coding are memory-bandwidth-bound due to frequent KV cache accesses [ 21 ]. Consequently, input-heavy workloads fa-vor assigning more layers to compute-strong GPUs, whereas generation-heavy workloads favor GPUs with higher mem-ory bandwidth. Furthermore, workload shifts alter the under-lying KV cache memory capacity, amplifying performance variability and causing a configuration that is optimal for one workload to perform poorly under another workload. These observations highlight the need for dynamic PP con-figuration. This need is not limited to heterogeneous envi-ronments but also arises in homogeneous settings. Even with identical GPUs, workload intensity and request rates vary over time, making vertical scaling and elasticity essential for efficient LLM serving. For instance, redistributing model lay-ers across varying numbers of GPUs enables autoscaling in response to changing demand [ 13 ]. However, without live PP reconfiguration, such elasticity can only be achieved at the cost of significant disruption to ongoing inference. In other  
+
+> 1
+> arXiv:2604.12171v1 [cs.DC] 14 Apr 2026 Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi
+
+words, enabling live in-place PP reconfiguration allows the system to dynamically switch between workload-optimal configurations, adapting to changing conditions at runtime with minimal disruption and overhead. Achieving such live, in-place PP reconfiguration is practi-cally challenging due to several key factors. First, the system must keep the initial configuration running while preparing the target configuration, leading to the temporary coexis-tence of model weights and KV states from both configu-rations. Existing state-of-the-art systems [ 12 , 32 ] typically preallocate GPU memory for KV cache and weights, leaving no room for dynamically reclaiming KV cache memory to accommodate the weights and KV states of newly loaded layers, thereby rendering in-place PP reconfiguration infea-sible. Second, in-place PP reconfiguration requires resizing the live KV cache, which is fundamentally constrained by the contiguous memory layout used in existing systems. State-of-the-art LLM serving systems [ 12 , 32 ] adopt PageAtten-tion [ 12 ], which organizes KV cache into fixed-size blocks but preallocates each layer’s KV cache as a contiguous region in GPU memory for optimized inference throughput. This fundamentally precludes dynamic resizing, as GPU memory cannot be resized in place. A natural approach to enable resizing is to adopt block-level KV allocation, allowing KV cache to grow or shrink by allocating or releasing blocks at runtime. However, GPU memory is allocated at a much coarser granularity than typical KV blocks, making naive block-level allocation prohibitively inefficient due to severe internal fragmentation. Together, these issues make efficient KV cache resizing during reconfiguration fundamentally challenging. Third, PP reconfiguration must preserve KV state consis-tency without completely blocking the incoming request or ongoing model inference. Because KV cache migration volumes are large, stop-and-copy transfers incur prohibitive pauses, while in-flight transfers will sacrifice consistency in the KV Cache. The challenge is to ensure KV consistency without introducing synchronization overhead. Taken together, these challenges make live, in-place PP reconfiguration non-trivial to achieve in practice. To address these challenges, we present PipeLive , an open-source LLM serving system that enables efficient and low-disruption live, in-place PP reconfiguration, allowing systems to adapt to dynamic workloads at runtime. To handle the complex KV cache resizing and migration on GPUs during in-place recon-figuration, we design a robust coordination protocol that orchestrates these operations, ensuring the safe coexistence of source and target configurations. To support efficient KV resizing, we extend PageAttention with non-contiguous KV block access to enable block-level KV allocation, and introduce layer stacking to pack multiple layers’ KV states into a single allocation unit, thereby aligning logical KV blocks with GPU allocation granularity and mitigating in-ternal fragmentation. To minimize disruption, we further introduce a KV patching mechanism, inspired by VM live migration [ 3 ], which incrementally migrates KV states be-tween source and target layers during inference, reducing divergence to a small residual that can be reconciled with a short final pause. We summarize our main contributions as follows: 
+
+• We present PipeLive , a unified system for live, in-place PP reconfiguration, built on top of the widely used open-source LLM serving framework vLLM [12]. 
+
+• We design a robust coordination protocol to enable safe and efficient in-place PP reconfiguration. 
+
+• We develop a dynamic KV cache management mecha-nism for reconfiguration by extending PagedAttention with non-contiguous KV block access and introducing a layer-stacking technique for efficient KV resizing. 
+
+• We introduce an incremental KV patching mechanism that preserves KV consistency and minimizes service disruption during PP reconfiguration. 
+
+2 Background and Motivation 
+
+2.1 LLM Inference 
+
+Compared to conventional AI workloads, LLMs’ inferences operate on variable-length inputs and produce variable-length outputs [ 30 ]. Prompt processing is referred to as the 
+
+prefill stage: the model consumes the prompt and computes activations for all prompt tokens in parallel, and this stage is typically compute-bound. After prefill, the model generates the next most likely token and feeds it back as input, pro-ducing an output sequence autoregressively; this process is the decode stage. During decoding, the model generates one token at a time and is often memory-bound due to repeated reads and writes to cached attention states, as well as low arithmetic intensity per step. During inference, LLMs materialize key–value (KV) caches to accelerate subsequent token generation [ 29 ]. As context lengths and request concurrency increase, KV cache memory often becomes the dominant memory footprint [ 19 ]. Page-dAttention [12 ] improves KV cache utilization by managing the cache in fixed-size blocks (pages) and allocating these blocks to requests on demand, thus reducing memory frag-mentation. LLM serving performance is typically characterized by three metrics. Throughput measures steady-state generation capacity (e.g., output tokens or requests per second) and is central for batch-style workloads. Time-to-first-token (TTFT) 
+
+captures the latency from request arrival to the first gen-erated token. Time-per-output-token (TPOT) measures the average latency per generated token after the first token. Different workload patterns emphasize different metrics, cre-ating inherent trade-offs in the design of serving systems. 
+
+> 2Conference’17, July 2017, Washington, DC, USA
+
+2.2 Deployment of LLM Models 
+
+Pipeline parallelism is a widely adopted approach in which model layers are partitioned across GPUs [ 20 ]; during in-ference, input activations flow sequentially through the pipeline, with each GPU computing its assigned layers before forwarding intermediate results to the next stage. Most existing LLM serving systems [ 9, 12 , 29 , 32 ] adopt a static PP configuration, in which a fixed PP configura-tion is determined via offline profiling before system launch and remains unchanged throughout the serving lifecycle. Although simple, this approach creates a fundamental mis-match between allocated GPU resources and evolving LLM workloads. 
+
+2.3 Motivation 
+
+Using pipeline-parallel LLM serving across heterogeneous GPUs is increasingly common in practice to efficiently utilize diverse GPU resources [ 15 ]. In heterogeneous GPU environ-ments, differences in GPU bandwidth, compute capability, and memory lead to workload-dependent optimal PP config-urations. In particular, the optimal PP configuration shifts significantly with the relative proportion of prefill and de-code tokens in the workloads. Figure 1 illustrates this effect in a two-GPU setup (NVIDIA A100 + L40S). Each subplot reports total token throughput (including both input and output tokens) under prefill-heavy (input=512, output=16) and decode-heavy (input=128, out-put=512) workloads, while the x-axis enumerates different PP configurations for a 64-layer Qwen3-30B model (e.g., 28/36 assigns 28 layers to the A100 and 36 to the L40S). The results reveal a clear workload-dependent trade-off. For decode-heavy workloads, configurations that allocate more layers to the A100 (e.g., 52/12) achieve higher through-put, reflecting the benefit of its higher memory bandwidth during token generation. In contrast, for prefill-heavy work-loads, assigning more layers to the L40S (e.g., 16/48) yields better performance, as its stronger compute capability is more effective for processing long input sequences. Impor-tantly, using a configuration optimized for one workload on another leads to substantial performance degradation, with throughput drops of up to 20–30%. These results show that the optimal PP configuration shifts with workload charac-teristics. Enabling live, in-place PP reconfiguration allows the system to adapt to such shifts by switching between con-figurations and achieve significant performance gains over static deployment. 
+
+3 Overview of PipeLive 
+
+PipeLive adopts a top-down design to enable efficient in-place PP reconfiguration. Figure 2 illustrates the overall ar-chitecture. At the model level , alongside the request scheduler that handles incoming requests and dispatches them to GPUs, -23.9% 
+
+> -29.5%
+
+Figure 1. Total token throughput under different PP configu-rations on a two-GPU setup (A100 + L40S) with two different workloads, optimal PP configuration shift as workload char-acteristics change. Reconfiguration Coordinator(§4) 
+
+> Orchestrating
+> KV Cache
+> Monitor (§6.1.2)
+> Monitoring
+> Model Level
+> PP Reconfiguration
+> Protocol(§4.1)
+> Model
+> Scheduler
+> Text
+> Stacked Layer
+> KV Cache Layout
+> (§5.2)
+> Layer 1 - 4
+> Layer 5 - 8
+> Layer 9 - 12
+> KV
+> Migrator(§6.1)
+> KV
+> Resizer(§5.1)
+> Worker
+> 2
+> Worker 1
+> KV
+> Resizing KV Cache
+> Migration
+> GPU
+> KV Cache Migration with KV Patch
+> Worker Level
+> Other
+> Workers
+> Weight
+> Loader(§6.3)
+
+Figure 2. Architecture of PipeLive .
+
+PipeLive introduces a centralized Reconfiguration Coordina-tor . Given the current and target PP configurations, the coor-dinator executes a reconfiguration protocol that (1) evaluates feasibility under GPU memory constraints and KV cache state, and (2) synthesizes an explicit execution plan that de-composes the target configuration into coordinated actions, including KV cache resizing and migration , and asynchronous weight loading . During execution, the coordinator leverages a KV Cache Monitor to continuously track KV migration progress across GPUs and determine a safe switchover point for committing the new configuration, minimizing disrup-tion to ongoing inference. At the worker level , each device runs a local Reconfiguration Worker with three components: (1) A KV cache resizer that adjusts KV capacity to match layer placement, (2) A weight loader that keeps weights in CPU memory and stages newly needed layers to the target GPU on demand, and (3) A KV cache migrator that transfers KV states between the source and destination GPUs while preserving correctness under ongoing inference. To minimize disruption, the migrator continuously patches newly generated KV states, reducing migration overhead to a short final cutover. 
+
+> 3
+
+Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi 
+
+Furthermore, PipeLive extends PagedAttention with a block-level KV cache preallocation strategy. This design en-ables efficient KV cache resizing and compaction at block granularity while retaining performance comparable to the original PagedAttention kernel. To align the GPU’s mini-mum physical allocation granularity with logical KV cache blocks, we introduce a layer stacking technique that packs KV states from multiple layers into a single allocation unit. This co-design of memory layout and allocation granular-ity improves utilization and mitigates fragmentation during dynamic resizing. In the following sections, we first describe the reconfigu-ration worker in §4, then present the KV cache resizer and layer stacking in §5, and finally introduce the KV migrator, along with its KV patching mechanism and model weight loader, in §6. 
+
+4 Reconfiguration Coordinator 
+
+The Reconfiguration Coordinator is the central component that orchestrates PP reconfiguration in PipeLive . It imple-ments a PP reconfiguration protocol that defines how a target PP configuration is realized through a sequence of coordi-nated actions across GPUs. In this section, we first present an end-to-end overview of the PP reconfiguration workflow. We then describe the core reconfiguration primitives de-fined by the PP reconfiguration protocol and executed by the Reconfiguration Coordinator, along with their semantics. Finally, we introduce a reconfiguration algorithm that com-poses these primitives to safely and efficiently perform live in-place PP reconfiguration at runtime. 
+
+4.1 General Reconfiguration Procedure 
+
+Figure 3 illustrates a canonical PP reconfiguration workflow. We represent a PP configuration as an ordered tuple of layer ranges assigned to each GPU. For clarity, we consider a sim-plified setup with three GPUs (GPU 1, GPU 2, GPU 3) serving a six-layer model. 
+
+1. Initial PP Configuration. The system transitions from an initial configuration C𝐴 = ⟨[ 1, 2], [3, 4], [5, 6]⟩ to a tar-get configuration C𝐵 = ⟨[ 1], [2, 3], [4, 5, 6]⟩ , requiring layer migration across adjacent GPUs. 
+
+2. KV Cache Shrinking. At the outset, GPU memory is largely occupied by model weights and the KV cache. To admit incoming layers, all GPUs first compute the required space for both the weights and KV states of migrated layers according to the protocol in §4.2, and then shrink their KV cache accordingly. Notably, we apply KV cache shrinking to all GPUs, including those that neither load new weights nor receive KV states (e.g., GPU1), to maintain consistent KV cache capacity across all layers. 
+
+3. KV Cache Migration. Reconfiguration then proceeds by overlapping weight loading and KV migration. Destina-tion GPUs preload the incoming layer weights, while source GPUs concurrently stream KV states to their new locations. 1.  Initial PP configuration:             
+
+> 3 GPUs with 2 layers
+> per stage
+> 2. KV Cache Shrinking,
+> reallocating Memory to
+> migrating layers
+> 3. KV cache migration,
+> weight loading
+> 4. Switching to New PP Configuration,
+> Deleting old layers,
+> releasing memory
+> 5. PP reconfiguration completed:
+> GPUs host 1, 2, and 3 layers,
+> respectively
+> KV Cache
+> Migration
+> KV Cache
+> Migration
+> Weight
+> Loading
+> Weight
+> Loading
+> Freeing
+> Memory Freeing
+> Memory
+> KV Cache
+> Shrinking
+> KV Cache
+> Model
+> Weights
+> KV Cache
+> Shrinking
+> KV Cache
+> Shrinking
+> GPU 1 GPU 2 GPU 3
+> GPU 1 GPU 2 GPU 3
+> GPU 1 GPU 2 GPU 3
+> GPU 1 GPU 2 GPU 3 GPU 1 GPU 2 GPU 3
+> Unused memory due
+> to GPU 3 being fully
+> occupied by 3 layers.
+
+Figure 3. Live in-place PP reconfiguration workflow in 
+
+PipeLive .In this setting, GPU 2 simultaneously receives and forwards layers; PipeLive executes these transfers asynchronously, enabling concurrent send/receive to accelerate reconfigura-tion. Meanwhile, inference continues under C𝐴 during this phase. As execution progresses, newly generated KV entries are incrementally synchronized to destination GPUs via KV patching (§ 6.1), preventing large synchronization stalls. 
+
+4. Switching PP Configuration. The coordinator tracks migration progress using KV indices at sources and desti-nations. Once the lag falls below a threshold, it triggers a brief synchronization point, performs a final KV transfer, and atomically switches to C𝐵 . After the switch, source GPUs release migrated layers and reclaim memory. If, after PP re-configuration, there is reclaimable GPU memory available for the KV cache, the KV cache will resize to restore usable capacity. However, in this case, after migration, no more KV cache is reclaimable as the GPU 3 is full. During live in-place PP reconfiguration, each GPU per-forms a distinct sequence of actions determined by the source and target PP configurations. We design a PP reconfiguration protocol that formalizes the required primitives and a recon-figuration algorithm that composes these primitives. Note that this work focuses on efficiently executing a requested live in-place PP reconfiguration, with minimal overhead and disruption to LLM inference. We do not address when or why reconfiguration should be triggered, nor how to determine the optimal source and target PP configurations, and these aspects are therefore deferred to future work. 
+
+4.2 Pipeline Parallelism Reconfiguration Proto-col 
+
+The PP reconfiguration protocol exposes a set of primitives 
+
+that the Reconfiguration Coordinator invokes to orchestrate coordinated reconfiguration across GPUs. Based on their invocation semantics, these primitives are categorized into two types: Collective Primitives (CP) and Synchronization Primitives (SP) . CPs are issued by the Reconfiguration Coor-dinator via collective Remote Procedure calls (RPCs) and are asynchronously executed by all Reconfiguration Workers. In contrast, SPs are embedded within model scheduler requests 
+
+4Conference’17, July 2017, Washington, DC, USA 
+
+Table 1. Notations  
+
+> Symbol Description
+
+𝐶 cur , 𝐶 tgt , 𝐶 int 𝑖 ↦ → { ℓ1, . . . }: GPU → layer set (current / target / intermediate) 
+
+Madd , Mdel 𝑖 ↦ → { ℓ1, . . . }: GPU → layers to add / delete 
+
+Mmig 𝑖 𝑠𝑟𝑐 ↦ → ( 𝑖 𝑑𝑠𝑡 ↦ → { ℓ1, . . . } ) : layers to migrate 
+
+𝐵 max (𝑖 ) Max KV blocks GPU 𝑖 can hold 
+
+𝐵 cur , 𝐵 new Current / post-reconfiguration KV block budget 
+
+G Set of all GPUs, G = {0, 1, . . . , 𝑁 −1}
+
+𝑖 GPU index, 𝑖 ∈ G 
+
+𝑁 Total number of GPUs, 𝑁 = | G | 
+
+𝑀 𝑖 Total GPU memory on GPU 𝑖 𝑢 KV cache utilization ratio, 𝑢 ∈ ( 0, 1]
+
+𝑊 Weight memory per layer 
+
+𝑃 KV page (block) size 
+
+𝜏 Convergence threshold (tokens) 
+
+Δ𝑡 Polling interval 
+
+and are sequentially executed by GPUs in pipeline order, thereby introducing explicit synchronization points into the inference process. To uniformly represent per-GPU actions in collective prim-itives, we use a layer assignment map M. M maps a GPU index to a set of layers, i.e., M : 𝑖 ↦ → { ℓ (𝑖 )
+
+1 , ℓ (𝑖 )
+
+2 , . . . }, where 
+
+M ( 𝑖 ) specifies the layer set on which GPU 𝑖 should operate for a given primitive. For primitives involving data transfer across GPUs, we use a directional assignment map Mmig ,where Mmig (𝑖 𝑠 , 𝑖 𝑑 ) specifies the set of layers to be transferred from source GPU 𝑖 𝑠 to destination GPU 𝑖 𝑑 . The primitives are defined as follows: 
+
+• Collective::ResizeKV (𝐵 ): Resizes the KV cache capacity on each GPU to 𝐵 blocks. If 𝐵 exceeds the current number of blocks, the cache is expanded; oth-erwise, it is shrunk. 
+
+• Collective::AddLayerWeights (M add ): In-structs each GPU 𝑖 to asynchronously load the weights for the layers specified in Madd (𝑖 ).
+
+• Collective::StartKVMigration (M mig ): Initi-ates asynchronous KV cache migration according to 
+
+Mmig , where Mmig (𝑖 𝑠 , 𝑖 𝑑 ) specifies the layers whose KV states should be streamed from source GPU 𝑖 𝑠 to destination GPU 𝑖 𝑑 .
+
+• Sync::SyncAndCommit (M del , 𝐵 new ): Performs a synchronized state transition that atomically commits the new PP configuration. After the commit, each Reconfiguration Worker on GPU 𝑖 deletes the layer weights and KV cache entries specified in Mdel (𝑖 ), and resizes the KV cache to 𝐵 new blocks to reclaim freed memory. With these primitives, we present our reconfiguration algorithm. Table 1 summarizes the notation used in Algo-rithm 1. Algorithm 1 transitions from 𝐶 cur to 𝐶 tgt through an 
+
+intermediate configuration Ctmp in which each GPU holds the union of its current and target layer sets, allowing inference to continue uninterrupted throughout the migration. The algorithm proceeds in five phases. 
+
+Phase 1: Feasibility assessment. For each GPU 𝑖 , the algorithm constructs an intermediate layer set Ctmp [𝑖 ] =
+
+Algorithm 1: Async PP Reconfiguration  
+
+> 1
+
+Function MaxBlocks( 𝑖, 𝐿 ): 
+
+> 2
+
+return ⌊ ( 𝑀 𝑖 · 𝑢 − 𝐿 · 𝑊 )/( 𝐿 · 𝑃 ) ⌋ 
+
+Input: 𝐶 cur = { ( 𝑠 𝑖 , 𝑒 𝑖 ) } 𝑁 −1 
+
+> 𝑖 =0
+
+: current PP config, GPU 𝑖 owns layers 
+
+[𝑠 𝑖 , 𝑒 𝑖 ]; 𝐶 tgt = { ( 𝑠 ′ 
+
+> 𝑖
+
+, 𝑒 ′ 
+
+> 𝑖
+
+) } 𝑁 −1 
+
+> 𝑖 =0
+
+: target PP config; 𝜏 :convergence threshold (tokens) 
+
+Output: true if reconfiguration succeeds; false if infeasible 
+
+⊲ Phase 1: Feasibility assessment & intermediate configuration  
+
+> 3
+
+𝐶 int ← 𝐶 cur ; Madd ← ∅  
+
+> 4
+
+foreach GPU 𝑖 ∈ G do ⊲ build intermediate config 𝐶 int  
+
+> 5
+
+𝐶 int [𝑖 ] ← 𝐶 cur [𝑖 ] ∪ 𝐶 tgt [𝑖 ] ⊲ new layers GPU 𝑖 must add  
+
+> 6
+
+𝐵 max (𝑖 ) ← MaxBlocks( 𝑖, |𝐶 int [𝑖 ] | ) 
+
+> 7
+
+end  
+
+> 8
+
+𝐵 shrink ← min 𝑖 ∈G 𝐵 max (𝑖 ) 
+
+> 9
+
+𝐵 used ← current number of KV blocks in use  
+
+> 10
+
+if 𝐵 used > 𝐵 shrink then  
+
+> 11
+
+return false ⊲ insufficient memory for reconfiguration, abort  
+
+> 12
+
+end 
+
+⊲ Phase 2: KV Resizing  
+
+> 13
+
+; if 𝐵 shrink < 𝐵 cur then  
+
+> 14
+
+Collective::ResizeKV( 𝐵 shrink ) 
+
+> 15
+
+end 
+
+⊲ Phase 3: Asynchronous weight loading and KV Cache Migration (non-blocking, concurrent with inference)  
+
+> 16
+
+Collective::AddLayerWeights( Madd ) 
+
+> 17
+
+Mmig ← ∅  
+
+> 18
+
+foreach (𝑖 𝑑𝑠𝑡 , 𝐴 𝑖 𝑑𝑠𝑡 ) ∈ M add do  
+
+> 19
+
+foreach layer ℓ ∈ 𝐴 𝑖 𝑑𝑠𝑡 do  
+
+> 20
+
+𝑖 𝑠𝑟𝑐 ← GPU owning layer ℓ in 𝐶 cur  
+
+> 21
+
+Mmig [𝑖 𝑠𝑟𝑐 ] [ 𝑖 𝑑𝑠𝑡 ] ← M mig [𝑖 𝑠𝑟𝑐 ] [ 𝑖 𝑑𝑠𝑡 ] ∪ { ℓ } 
+
+> 22
+
+end  
+
+> 23
+
+end  
+
+> 24
+
+Collective::StartKVMigration( Mmig )
+
+⊲ Phase 4: Convergence monitoring  
+
+> 25
+
+; repeat  
+
+> 26
+
+𝑇 sched ← getLastScheduledTokenIndex()  
+
+> 27
+
+𝑇 applied [ ] ← Collective::GetLastSyncedTokenIndex()  
+
+> 28
+
+allDone ← true  
+
+> 29
+
+foreach GPU 𝑖 ∈ dom ( M add ) do  
+
+> 30
+
+if 𝑇 sched − 𝑇 applied [𝑖 ] ≥ 𝜏 then  
+
+> 31
+
+allDone ← false  
+
+> 32
+
+break  
+
+> 33
+
+end  
+
+> 34
+
+end  
+
+> 35
+
+if allDone then break  
+
+> 36
+
+sleep (Δ𝑡 ) 
+
+> 37
+
+until 
+
+⊲ Phase 5: Commit PP Configuration Change  
+
+> 38 39
+
+foreach GPU 𝑖 ∈ G do ⊲ compute layers to delete from 𝐶 int  
+
+> 40
+
+Mdel (𝑖 ) ← 𝐶 int [𝑖 ] \ 𝐶 tgt [𝑖 ] 
+
+> 41
+
+𝐵 new (𝑖 ) ← MaxBlocks( 𝑖, |𝐶 tgt [𝑖 ] | ) 
+
+> 42
+
+end  
+
+> 43
+
+𝐵 new ← min 𝑖 ∈G 𝐵 new (𝑖 ) 
+
+> 44
+
+Sync::SyncAndCommit( Mdel , 𝐵 new ) ⊲ commit new config, then delete old layers & resize KV  
+
+> 45
+
+return true 
+
+Ccur [𝑖 ] ∪ C tgt [𝑖 ] and computes the maximum feasible KV-block capacity 𝐵 max (𝑖 ) under Ctmp . The global KV budget is then conservatively set to the minimum across GPUs, 
+
+𝐵 shrink := min 𝑖 ∈ G 𝐵 max (𝑖 ). If the number of KV blocks cur-rently in use exceeds 𝐵 shrink , the system cannot accommo-date the intermediate PP configuration even after shrinking 
+
+5Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi 
+
+the KV cache; in this case, the reconfiguration is deemed infeasible and the algorithm aborts. 
+
+Phase 2: KV resizing. If 𝐵 shrink < 𝐵 cur , the intermediate configuration requires reducing KV cache capacity to free memory. The coordinator, therefore, invokes CompactKV 
+
+to defragment and consolidate live KV blocks, followed by 
+
+ResizeKV to shrink the KV cache to 𝐵 shrink blocks on ev-ery GPU, thereby freeing sufficient memory for loading the additional layers in the next phase. 
+
+Phase 3: Asynchronous weight loading and KV mi-gration. The coordinator issues AddLayerWeights to be-gin loading new layer weights on the destination GPUs. Con-currently, it constructs the migration map Mmig , mapping each source GPU to its destination GPUs and associated lay-ers, and invokes StartKVMigration to begin streaming KV states. Both operations proceed asynchronously alongside ongoing inference. 
+
+Phase 4: Convergence monitoring. The coordinator polls the gap between the last scheduled token index, 𝑇 sched ,and the last synchronized token index, 𝑇 applied [𝑖 ], on each destination GPU. Once this gap falls below the convergence threshold 𝜏 for all GPUs in Madd , the KV state is consid-ered sufficiently up-to-date, and the algorithm proceeds to commit. 
+
+Phase 5: Commit. The coordinator computes the dele-tion map Mdel (layers in Ctmp that are no longer needed under 𝐶 tgt ) and the post-reconfiguration KV budget 𝐵 new . It then issues SyncAndCommit , which atomically switches the pipeline to 𝐶 tgt and keeps inference running. It subsequently deletes obsolete layer weights and KV cache asynchronously, and resizes the KV cache to 𝐵 new to reclaim freed memory. Figure 4 illustrates the timeline of the live in-place PP re-configuration protocol across the five phases and highlights the dependency relationships among the primitives. Weight loading and KV cache migration have no direct dependency and can therefore execute in parallel. All other primitives are issued sequentially to ensure correctness and a well-defined transition order. 
+
+5 Worker-Level Dynamic KV Cache Man-agement 
+
+Pipeline reconfiguration requires dynamically adjusting KV cache capacity as layers are reassigned across GPUs. To this end, PipeLive introduces a unified KV cache management design enabling lightweight resizing and leveraging layer stacking to balance PageAttention’s internal fragmentation with layer migration granularity. 
+
+5.1 KV Cache Resizing 
+
+Pipeline reconfiguration changes the number of layers as-signed to each GPU, requiring the KV cache to be resized accordingly. In existing systems such as PagedAttention [ 12 ], each layer’s KV cache is stored in a preallocated contiguous GPU buffer and accessed at block granularity via a block table. KV   
+
+> Resize
+> Weight Loading
+> KV Cache
+> Synchronization
+> Weight
+> Deletion
+> KV
+> Resize
+> Model
+> Inference
+> Inference
+> Thread
+> PP Reconfig
+> Thread
+> Weight Loading
+> Thread
+> : Optional Operation
+> : Necessary Operation
+> PP Reconfiguration
+> Process
+> Model Inference Model Inference
+> Atomic KV Cache
+> Shrinking
+> 1. Atomic KV Cache
+> Expanding
+> 2. Atomic pp config switching Time
+
+Figure 4. Timeline of asynchronous PP reconfiguration pro-tocol. Resize    
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Index Block
+> Address
+> Continous GPU
+> Memory Space
+> Resizable KV Cache via
+> Block-Level Allocation
+> Continous GPU
+> Memory Space
+> Non-Resizable KV Cache with
+> Contiguous Preallocation
+> X
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Index Block
+> Index
+> Not resizable
+> Preallocated
+> KV Cache
+> Block Table Block Table
+
+Figure 5. PipeLive extends PagedAttention to access non-contiguous GPU memory, enabling dynamic KV cache resiz-ing during live migration. Because GPU memory cannot be resized in place, shrinking or expanding the KV cache requires allocating a new buffer and copying all live KV blocks, making dynamic resizing costly and impractical during reconfiguration. 
+
+PipeLive addresses this by adopting a block-level KV cache allocation that decouples logical KV organization from physical memory layout. As shown in Figure 5, instead of per-layer contiguous buffers, the KV cache is maintained as a list of independently allocated GPU blocks that can be al-located and freed on demand. For KV cache shrinking, since KV blocks are sparsely allocated, PipeLive performs a com-paction process that moves unallocated blocks to the end of the block list and releases them in batches. This process involves only pointer updates and incurs negligible overhead (less than 1ms). For KV cache expansion, PipeLive appends newly allocated KV blocks to the block list. To support non-contiguous KV access, similar to PageAt-tention, which uses a block table to map requests to KV block indices, PipeLive stores resolved block addresses di-rectly in the block table. This design enables efficient KV cache resizing during live migration while preserving the access efficiency of PageAttention, with no measurable per-formance degradation in practice. 
+
+5.2 Layer Stacking 
+
+PipeLive enables KV resizing by allowing PageAttention to index non-contiguous GPU blocks, as discussed in the pre-vious subsection. However, this introduces a key challenge: 
+
+6Conference’17, July 2017, Washington, DC, USA Layer 1  Layer 2  Layer 1  Layer 2  
+
+> KV Block
+> Size: 2MB
+> Layer Stacking Disabled Layer Stacking With Two Layers
+> KV block from 2 layers
+> sharing 1 GPU memory Block,
+> logical KV block size is halved
+> KV Block
+> Size: 1MB
+> Minimal GPU Memory
+> Allocation Size: 2MB
+
+Figure 6. Layer stacking KV cache layout in PipeLive . Stack-ing two layers into one GPU memory block halved the logical KV block size. GPU memory allocation must respect the CUDA virtual-memory allocation granularity [ 18 ], which is commonly 2 MiB on current NVIDIA GPUs 1, whereas PageAttention typically uses much smaller KV block sizes (32KB–128KB) to control internal fragmentation. Directly matching KV blocks to the physical allocation unit would therefore lead to severe memory waste due to fragmentation. To address this, we introduce a layer stacking method. Instead of mapping each KV block to a full 2 MiB physical allocation unit, KV blocks from 𝑘 layers with the same block index are packed into a single physical block (Figure 6). Let 
+
+𝐶 denote the token capacity of a 2 MiB block under the given model and precision. With stacking factor 𝑘 , each layer effectively occupies 𝐶 /𝑘 tokens within the shared block. This sharing reduces unused space within each allocation unit, improving memory utilization and mitigating internal fragmentation without changing the total KV capacity. This design introduces a trade-off: increasing 𝑘 improves memory efficiency but reduces the granularity of PP recon-figuration, as layers must be reconfigured in larger groups. Specifically, layer migration operates at granularity 𝑘 , requir-ing each partition to be a multiple of 𝑘 . PipeLive selects 𝑘 
+
+to strike a balance between reconfiguration granularity and memory efficiency, as evaluated later in §7.5. 
+
+6 Worker-Level State Synchronization 
+
+A Reconfiguration Worker runs on every GPU that performs reconfiguration in model serving. Functionally, each Recon-figuration Worker comprises two components: (1) a KV Mi-grator , which synchronizes KV cache between source and destination GPUs, and (2) a Weight Loader , which asyn-chronously loads the weights of newly assigned layers onto the local GPU. We describe each component in turn. 
+
+6.1 KV Migrator 
+
+During PP reconfiguration, the KV Migrator runs on every GPU and is responsible for receiving KV cache segments migrated to the local device and sending segments to be migrated to other GPUs, while ensuring that migration does 
+
+> 1NVIDIA CUDA Driver API, “Virtual Memory Management”.
+
+not introduce noticeable interference to ongoing inference. To achieve this, we implement concurrent KV transmission and streamed KV synchronization, enabling KV migration to overlap with model inference and proceed in bounded, incremental transfers. 
+
+Concurrent KV transmission. We use NVIDIA Col-lective Communications Library (NCCL) [ 10 ], a high-performance communication library for GPU-to-GPU data transfer, to migrate KV cache. To avoid interrupting ongo-ing inference during KV migration, we perform KV cache transfers on a dedicated NCCL communicator group that is independent of the communicator group used for pipeline-parallel intermediate-state forwarding. The migration group is further assigned a lower CUDA stream priority so that its GPU work yields to inference kernels. While this design isolates KV transfers from the inference data path, operating two NCCL groups concurrently on overlapping sets of GPUs introduces the risk of deadlock . Under NCCL’s semantics, where issuing an NCCL operation on one communicator group stalls all other NCCL operations on the same GPU until completion, concurrent operations on separate groups can lead to circular wait if not carefully coordinated. Figure 7 shows the NCCL communication patterns of PP reconfiguration where there are intermediate states trans-ferred between pipeline stages, and GPU 2 migrates the KV cache to GPU 1. This creates a circular wait: for example, GPU 1 blocks on an ncclRecv from the inference group, while GPU 2 blocks on an ncclSend from the migration group targeting GPU 1; neither can make progress. To eliminate this deadlock, we introduce a two-phase handshake protocol with asymmetric entry semantics. All NCCL operations on a GPU are serialized via a per-GPU mu-tex. For intermediate-state transfers between PP stages, oper-ations can proceed immediately after the mutex is acquired, ensuring inference remains prioritized and unblocked. In contrast, KV cache migration follows a two-phase entry pro-tocol. The sender first acquires the mutex and sends an ACK to the receiver via TCP. Upon receiving the ACK, the receiver attempts to acquire its local mutex. If the attempt fails, it responds with REJECT; the sender then releases the mutex and retries after a timeout 𝜏 . If successful, the receiver re-sponds with ACCEPT, at which point both parties hold their respective mutexes and can safely initiate the transfer. This protocol serializes all NCCL operations across both the main inference and KV-migration communicator groups, preventing deadlocks. Since the two-phase handshake is applied only to KV migration, the main inference path incurs negligible overhead. 
+
+KV Migration with KV Patch For each GPU pair (𝑟 𝑠 , 𝑟 𝑑 )
+
+involved in migration, the KV migrator on each GPU spawns a dedicated sender thread on 𝑟 𝑠 and a receiver thread on 𝑟 𝑑 .The sender extracts and transmits KV entries for the mi-grating layers, while the receiver applies incoming entries      
+
+> 7Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi GPU 1 GPU 2 GPU 3 Batch
+> Requests Results
+> Pipeline Parallelism Reconfiguration NCCL Communication
+> KV Cache
+> Synchronization NCCL Circular
+> Dependency
+
+Figure 7. NCCL Communications in PP Reconfiguration. A circular dependency exists between GPU 1 and GPU 2, causing a deadlock. to the corresponding local layer caches. Multiple sender– receiver pairs may coexist within a single migrator to handle concurrent migrations across different GPU pairs. Each sender thread maintains a dirty bitmap B (𝑖 𝑠 ,𝑖 𝑑 ) ∈
+
+0, 1𝑁 , where 𝑁 is the total number of physical KV cache slots for the migrating layers, with each slot storing one token. The bitmap is initialized to all zeros. Let 𝑆 (𝑡 ) denote the set of physical slot indices written by the inference worker at step 𝑡 ,with 𝑛 (𝑡 ) = |𝑆 (𝑡 ) |. After each inference step, the inference worker marks the newly written slots as dirty: B [ 𝑠 ] ← 1 for all 𝑠 ∈ 𝑆 (𝑡 ) . The sender thread periodically drains the bitmap by atomically extracting the dirty set D = {𝑠 : B [ 𝑠 ] = 1},resetting B to zero, gathering the KV data at the slots in D
+
+from GPU memory, and transmitting the resulting KV patch 
+
+to 𝑖 𝑑 . This drain-and-transmit cycle repeats on a best-effort basis until migration completes. On the receiver side, each receiver thread continuously receives incoming patches and writes them into the local layer KV cache. Concurrently with KV streaming, the Reconfiguration Coordinator performs convergence tracking (Phase 4 of Al-gorithm 1) to determine when the destination KV cache is sufficiently up-to-date to commit the new PP configuration. The scheduler maintains a cumulative token counter 𝑇 sched ,incremented by 𝑛 (𝑡 ) after each inference step. On the receiver side, each thread maintains a counter 𝑇 applied , incremented upon applying each incoming KV patch. The coordinator periodically queries 𝑇 applied for each destination GPU and commits once 𝑇 sched − 𝑇 applied < 𝜏 holds for all destinations. In practice, 𝜏 controls the trade-off between service inter-ruption and synchronization overhead. Higher inter-GPU bandwidth enables faster KV synchronization, allowing a smaller 𝜏 to minimize service disruption, while lower band-width may require a larger 𝜏 . On our testbed, GPUs are connected via InfiniBand with approximately 100 Gbps of bandwidth, and we set 𝜏 to 50 tokens. 
+
+6.2 Weight Loader 
+
+The Weight Loader asynchronously materializes the weights of newly assigned layers during PP reconfiguration. To mini-mize latency, model weights are preloaded into CPU memory at initialization. Upon migration, the Weight Loader directly transfers weights from CPU to GPU memory, avoiding disk I/O on the critical path, with a fallback to disk-based loading when CPU memory is insufficient. To prevent interference with ongoing inference, weight loading is executed on a dedicated CUDA stream with lower priority than the inference stream. During PP reconfigura-tion, the Weight Loader incrementally stages only the param-eters needed by the target mapping on each GPU, ensuring timely availability while minimizing contention for GPU resources. 
+
+7 Performance Evaluation 
+
+In this Section, we evaluate PipeLive to quantify the over-heads of dynamic pipeline reconfiguration and to isolate the impact of its key design components. 
+
+7.1 Implementation 
+
+We implement PipeLive on top of VLLM and FlashAtten-tion [ 4, 5 ], with approximately 5,000 lines of Python and CUDA/C++ code. 
+
+Reconfiguration control. We implemented Reconfigu-ration Coordinator , which runs outside the vLLM inference loop to orchestrate migration and synchronize GPUs without interfering with the serving path. 
+
+Migration workers. We extend vLLM’s per-GPU worker with a Reconfiguration Worker that executes layer migra-tion and KV cache operations. To safely overlap migration with inference, we implement a KV cache migrator with a two-phase handshake that enforces ordering between NCCL groups and avoids deadlocks as discussed in Section 6.1. 
+
+Kernel support. We extend FlashAttention’s PageAtten-tion to support resolving in-continuous kv block addresses on-the-fly. 
+
+KV cache layout. We replace the default contiguous KV preallocation with block-level allocation to enable KV cache resizing. Furthermore, we introduce a layer-stacked block layout to reduce kv block’s internal fragmentation. 
+
+7.2 Experimental Setup 
+
+To illustrate the efficiency gains enabled by live, in-place PP reconfiguration, we evaluate our approach on a heteroge-neous GPU testbed. As discussed in Section 2.3, hardware heterogeneity induces workload-dependent optimal PP con-figurations (e.g., prefill-heavy vs. decode-heavy). This creates natural performance asymmetry across configurations, ex-posing the benefits of dynamically switching to the workload-aware optimal PP layout. 
+
+Testbed. We construct a heterogeneous GPU testbed con-sisting of one NVIDIA A100 (80GB) and one NVIDIA L40S (48GB). The specifications of these GPUs are summarized in Table 2. We deploy the model using a two-stage PP con-figuration, with the first stage on the A100 and the second on the L40S. The two GPUs are located on separate nodes and communicate over InfiniBand via NCCL, enabling direct GPU-to-GPU communication across nodes. This setup reflects a common heterogeneous deployment scenario in which GPUs with distinct performance profiles are used jointly for LLM serving. In particular, the A100 provides higher memory bandwidth, while the L40S offer 
+
+> 8
+
+Conference’17, July 2017, Washington, DC, USA 36-44                                                                         
+
+> 44-36
+> 52-28
+> 60-20
+> 3.0
+> 2.5
+> 2.0
+> 1.5
+> 1.0
+> 0.5
+> Request Rate (RPS)
+> 16730.8 248.9 275.9
+> 15094.7 253.6 263.6
+> 14102.5 263.4 270.6
+> 9746.2 250.5 260.9
+> 2736.7 239.3 252.5
+> 226.0 226.6 234.6
+> TTFT (ms)
+> 36-44
+> 44-36
+> 52-28
+> 60-20
+> PP Config
+> 3.0
+> 2.5
+> 2.0
+> 1.5
+> 1.0
+> 0.5
+> 134.6 137.1 139.4
+> 134.6 132.1 127.8
+> 134.9 128.3 123.0
+> 139.5 121.5 113.3
+> 142.7 114.8 102.3
+> 109.8 105.0 94.9
+> TPOT (ms)
+> 36-44
+> 44-36
+> 52-28
+> 60-20
+> 3.0
+> 2.5
+> 2.0
+> 1.5
+> 1.0
+> 0.5
+> 309 463 470
+> 306 424 448
+> 293 380 414
+> 274 343 356
+> 239 273 283
+> 168 171 175
+> Throughput (tok/s)
+> 36-44
+> 44-36
+> 52-28
+> 60-20
+> 3.0
+> 2.5
+> 2.0
+> 1.5
+> 1.0
+> 0.5
+> Request Rate (RPS)
+> 5738.8 7119.3 8104.9
+> 1971.0 3252.7 4226.7
+> 478.2 495.0 542.8
+> 475.2 493.5 513.4
+> 474.3 490.8 518.2
+> 430.0 450.8 469.0
+> TTFT (ms)
+> 36-44
+> 44-36
+> 52-28
+> 60-20
+> PP Config
+> 3.0
+> 2.5
+> 2.0
+> 1.5
+> 1.0
+> 0.5
+> 1319.8 1274.9 1369.4
+> 1024.1 1284.8 1421.3
+> 261.6 283.5 337.3
+> 172.0 175.3 180.1
+> 132.4 129.0 126.7
+> 100.3 93.3 87.8
+> TPOT (ms)
+> 36-44
+> 44-36
+> 52-28
+> 60-20
+> 3.0
+> 2.5
+> 2.0
+> 1.5
+> 1.0
+> 0.5
+> 1229 1218 1156
+> 1198 1141 1106
+> 1007 1007 1010
+> 763 764 765
+> 514 514 515
+> 260 260 260
+> Throughput (tok/s)
+> 250
+> 300
+> 100
+> 120
+> 140
+> 200
+> 400
+> 450
+> 500
+> 550
+> 500
+> 1000
+> 500
+> 1000
+> Decode-Heavy Workload (input=128, output=512)
+> Prefill-Heavy Workload (input=512, output=16)
+> : Optimal PP config per Request Rate
+
+Figure 8. Performance of different PP configurations for heterogeneous GPUs under varying workloads. 
+
+Table 2. Comparison of the two GPUs used in the testbed. 
+
+Metric A100 80GB L40S 
+
+Memory bandwidth 2039 GB/s 864 GB/s FP16/BF16 Tensor Core 624 TFLOPS 733 TFLOPS FP8 Tensor Core N/A 1466 TFLOPS GPU memory 80 GB HBM2e 48 GB GDDR6 
+
+stronger compute capability. Such heterogeneity naturally leads to workload-dependent optimal PP configurations. For instance, prefill-heavy or high-throughput workloads tend to benefit from assigning more layers to the compute-efficient GPU, whereas decode-heavy workloads may favor configu-rations that better utilize memory bandwidth. 
+
+Metrics and Model. We evaluate performance using (1) 
+
+time-to-first-token (TTFT) , which captures request latency for initial response generation; (2) time-per-output-token (TPOT) ,which measures per-token decoding latency; and (3) total token throughput , which reflects overall system throughput. TTFT and TPOT characterize per-request quality of service (QoS), while throughput captures system-level inference per-formance. To enable holistic comparison across configurations, we further introduce a composite performance score that aggre-gates TTFT, TPOT, and throughput. For each metric 𝑥 , we apply min–max normalization across all PP configurations; latency metrics (TTFT, TPOT) are inverted so that higher values indicate better performance. The final score is com-puted as score = (𝑠 TTFT + 𝑠 TPOT + 𝑠 TP )/ 3, assigning equal weight to each metric. This score provides a unified measure for comparing different PP configurations under varying workloads and request rates. End-to-end performance is evaluated on two representa-tive LLMs with different parameter sizes: Llama 3-70B [ 7]and Qwen3-30B [ 28 ]. We further analyze the performance contributions of PipeLive ’s design on LLaMA-70B, as its larger model size imposes stricter memory constraints and higher performance pressure in our testbed. 
+
+Baselines. While prior work has explored limited forms of PP reconfiguration, there is currently no open-source LLM inference system that supports in-place, fine-grained PP re-configuration. We therefore construct strong static baselines by selecting representative fixed PP configurations that are optimal under different workload regimes. Specifically, we consider three static configurations: (1) 
+
+Prefill-Optimal : the optimal configuration under prefill-heavy workloads, (2) Decode-Optimal : the optimal configu-ration under decode-heavy workloads, and (3) Balanced : a globally optimal configuration that balances performance across workloads. In addition, we compare against multiple variants of 
+
+PipeLive with selectively enabled components to isolate the contribution of each design feature. 
+
+Workload. To evaluate the feasibility and efficiency of live in-place PP reconfiguration in vLLM, we construct a pattern-shifting benchmark workload that exposes shifts in opti-mal PP configurations across two representative workload patterns: a prefill-heavy workload (average input length of 512 tokens and output length of 16 tokens) and a decode-heavy workload (average input length of 128 tokens and output length of 512 tokens). We profile all feasible PP config-urations on our heterogeneous testbed (A100 + L40S) at two-layer granularity under both workload types across varying request rates for LLaMA-70B and Qwen3-30B. For clarity, Figure 8 presents results at a coarser four-layer granular-ity for LLaMA-70B. Each subfigure reports TTFT, TPOT, or throughput across different request rates (y-axis) and PP con-figurations (x-axis), with hatched cells indicating the optimal configuration. Darker green denotes better performance. From the figure, we observe that changes in workload pat-terns lead to different optimal configurations. For example, at 
+
+9Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi Prefill   
+
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0.0
+> 0.5
+> 1.0
+> 0.33
+> 0.62 0.60
+> 0.98
+
+Performance Score  
+
+> 10000
+> 15000 12623
+
+TTFT (ms)     
+
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0
+> 2000
+> 4000
+> 3922 4361
+> 2390
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 349
+> 891 916
+> 346
+
+TPOT (ms)    
+
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 559
+> 800 809 795
+
+Throughput (tokens/s)   
+
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 0.64 0.64
+> 0.33
+> 0.96
+
+Performance Score   
+
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0
+> 500
+> 1000
+> 1500
+> 201 201
+> 1115
+> 214
+
+TTFT (ms)   
+
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0
+> 200
+> 400
+> 144 144
+> 406
+> 124
+
+TPOT (ms)    
+
+> Prefill
+> Optimal
+> Balanced Decode
+> Optimal
+> Pipe-
+> Live
+> 0
+> 500
+> 1000
+> 1500
+> 1147 1147
+> 1479 1442
+
+Throughput (tokens/s)  
+
+> LLaMA - 70B Qwen - 30B
+> Static PipeLive
+
+Figure 9. Performance of different PP configurations for heterogeneous GPUs under the mixed decode-heavy and prefill-heavy workloads. a request rate of 3, switching from a prefill-heavy to a decode-heavy workload results in different optimal configurations across all three metrics, with decode-heavy workloads fa-voring configurations that assign more layers to L40S (e.g., from 36/44 to 52/28 for TTFT). Motivated by this observa-tion, we adopt a pattern-shifting benchmark workload in all subsequent experiments. Specifically, we fix the request rate and alternate between the two workload patterns; for each pattern, we use the corresponding optimal PP configu-ration identified through profiling. To ensure reproducibility, we set the total number of requests to 200. This benchmark provides a principled basis for comparing reconfiguration strategies, allowing us to quantify both performance gains and reconfiguration overhead while isolating the contribu-tion of individual PipeLive components. 
+
+7.3 Evaluation of End-to-end Performance 
+
+Figure 9 presents the end-to-end performance of PipeLive ’s PP reconfiguration on LLaMA-70B and Qwen3-30B under the pattern-shifting benchmark workload with 200 requests. We compare PipeLive against three static configurations discussed in § 7.2 under high load (request rates 3 for LLaMA-70B and 5 for Qwen3-30B) to stress the system. For Qwen3-30B, the configuration that is optimal for prefill-heavy workloads is also optimal for the pattern-shifting benchmark workload; consequently, the prefill-optimal and balanced configurations coincide and appear identical in the figure. Results show that PipeLive achieves substantial improve-ments in overall performance score, with gains of 36% on LLaMA-70B and 33% on Qwen3-30B. For LLaMA-70B, the large model size leads to tight KV cache capacity. The prefill-optimal configuration assigns most layers to the L40S, caus-ing memory pressure under decode-heavy workloads and resulting in KV cache overload, which in turn leads to ex-tremely high TTFT. PipeLive mitigates this by using the prefill-optimal configuration during prefill-heavy phases and switching to the decode-optimal configuration when work-loads become decode-heavy. The decode-optimal configu-ration offers more available GPU memory, which, together with dynamic KV resizing, allows PipeLive to adapt KV cache allocation to the increased memory capacity, alleviating KV pressure while maximizing decoding efficiency. As a result, 
+
+PipeLive achieves up to 45% improvement in TTFT and 61% improvement in TPOT over the balanced configuration. For Qwen3-30B, the smaller model avoids KV cache over-flow but accentuates differences between workload-specific optimal configurations by allowing more uneven layer place-ments. The prefill-optimal configuration delivers the best TTFT and a strong TPOT, partly because TPOT is averaged per request and thus benefits from faster prefills, whereas the decode-optimal configuration achieves higher through-put via more efficient decoding. PipeLive combines these strengths: although its TTFT is 7% worse than the balanced configuration because it switches to decode-optimal during decode-heavy phases, it improves TPOT and throughput by 13% and 25.7%, respectively. Overall, live in-place PP reconfiguration enables the system to adapt to workload dynamics, combining the strengths of prefill-optimal and decode-optimal configurations, and consistently outperform-ing any static configuration. 
+
+7.4 Effects of KV Resizing 
+
+Different PP configurations induce substantially different KV capacity on each GPU due to changes in layer placement. As a result, a configuration that is feasible under one workload phase may exceed KV capacity after reconfiguration under another phase. Without resizing, this mismatch leads to KV overloading and severe performance degradation. Figure 10 compares PP reconfiguration with and without KV resizing under the pattern-shifting benchmark workload across varying request rates. Without resizing, the KV allo-cation fixed to the source configuration becomes insufficient after the workload shifts, causing KV overloading even at 
+
+10 Conference’17, July 2017, Washington, DC, USA 1 2 3     
+
+> Request Rate (req/s)
+> 0
+> 1000
+> 2000
+> TTFT (ms)
+> 123
+> Request Rate (req/s)
+> 100
+> 200
+> 300
+> 400
+> TPOT (ms)
+> 123
+> Request Rate (req/s)
+> 200
+> 400
+> 600
+> 800
+> Throughput (tok/s)
+> PipeLive PipeLive With KV Resize Disabled
+
+Figure 10. End-to-end performance of PP reconfiguration with kv resizing disabled and enabled under mixed workload. 16 8 4 2 1  
+
+> Number of Stacked Layer
+> 0
+> 25
+> 50
+> 75
+> 100
+> KV Memory
+> Utilization (%)  95.6% 93.5% 84.9%
+> 74.1%
+> 56.4%
+
+Figure 11. Effective KV utilization with different numbers of stacked layers. modest load (request rate > 1) and resulting in sharp TTFT degradation. With KV resizing enabled, the system dynamically adjusts KV capacity during migration to match the target configu-ration. This eliminates overloading, stabilizes TTFT up to a request rate of 2.5, and significantly improves throughput over 45% under high load. These results indicate that KV resizing enables reconfiguration to remain both feasible and effective under dynamic workloads by aligning KV capacity with each configuration’s requirements. 
+
+7.5 Effects of Layer Stacking to Reduce GPU Memory Fragmentation 
+
+To support KV cache resizing, we allocate KV memory at block granularity per layer rather than as a single contigu-ous GPU buffer. Because GPU allocation has a minimum granularity (e.g., 2MB) while each layer’s KV cache is much smaller, this leads to substantial internal fragmentation. We address this with layer stacking , which packs the KV caches from multiple layers into a single physical GPU block, thereby reducing fragmentation. Figure 11 reports Effective KV Utilization , defined as the fraction of request-allocated KV cache that is actually consumed by tokens. This met-ric captures the impact of internal fragmentation. Without stacking, KV utilization reaches only 56%, indicating that nearly half of the KV memory is lost to fragmentation. In-creasing the stacking factor reduces the effective KV block size and correspondingly lowers fragmentation. This improvement, however, comes at a cost. Figure 12 quantifies this trade-off on LLaMA-70B under the same pattern-shifting benchmark workload at request rates 1.5 and 3.0. When stacking is disabled, high KV cache wastage di-rectly translates into performance degradation under heavy load; for example, TTFT increases by 51% compared to a 16 8 4 2 1                  
+
+> Number of Stacked Layer
+> 0
+> 5000
+> 10000
+> TTFT (ms)
+> 434 466 444 464 477
+> 4799 4680 4012 4626
+> 8264
+> 16 8421
+> Number of Stacked Layer
+> 0
+> 500
+> 1000
+> 1500
+> TPOT (ms/tok)
+> 209.0 201.8 191.9 190.5 190.2
+> 1152.3
+> 963.5
+> 535.7 513.7 579.5
+> rr=1.5 rr=3.0
+
+Figure 12. End-to-end performance of PP reconfiguration with different numbers of stacked layers. When it equals 1, layer stacking is disabled. stacking factor of 4. In contrast, overly large stacking factors limit reconfiguration flexibility, preventing the system from adapting to the optimal configuration and increasing both TTFT and TPOT. These results reveal a clear trade-off: insufficient stacking wastes memory, while excessive stacking reduces adaptabil-ity. A moderate stacking factor achieves both low fragmen-tation and sufficient reconfiguration flexibility. In practice, we select a stacking factor of 4 as the default in PipeLive .
+
+7.6 Effects of Asynchronous Weight Loading and KV Patch Mechanism 
+
+PipeLive employs asynchronous weight loading with a KV patch mechanism to enable non-blocking migration. During reconfiguration, weights are loaded in the background while KV states are continuously synchronized, minimizing service interruption and maintaining inference progress. We evaluate three settings under the pattern-shifting benchmark workload: full PipeLive , KV patch disabled, and both asynchronous loading and KV patch disabled. Figure 13 shows how stop time and total migration time vary with the number of migrated layers under mixed workload. Across all migration sizes, PipeLive keeps stop time around 10ms, whereas both baselines incur substantially longer stalls that increase with the number of migrated layers. This reduction in service interruption is accompanied by a modest increase           
+
+> 11 Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi 4812 16
+> Migrated Layers
+> 0
+> 5000 Stop Time (ms)
+> 4812 16
+> Migrated Layers
+> 5
+> 10
+> Migration Time(s)
+> Flexiserve KV Patch Disabled KV Patch/
+> Async WL Disabled
+
+Figure 13. Comparison of stop time and migration time un-der different migrated layers with different migration modes. 0.5 1.0 1.5 2.0 2.5 3.0        
+
+> Request Rate (req/s)
+> 0
+> 1000
+> 2000
+> TTFT (ms)
+> 0.5 1.0 1.5 2.0 2.5 3.0
+> Request Rate (req/s)
+> 200
+> 400
+> 600
+> TPOT (ms)
+> PipeLive KV Patch Disabled (Async) Sync
+
+Figure 14. End-to-end tests of performance of PP reconfigu-ration with different migration modes. in total migration time, as the KV patch continuously syn-chronizes newly generated and migrated KV states. Figure 14 further evaluates performance within a ±15s window around migration, which covers PipeLive ’s migra-tion process. Enabling KV patch alone improves TTFT by up to 49.7% and TPOT by up to 29.5%. Enabling both asynchro-nous loading and KV patch further improves TTFT by up to 72.4%, while achieving up to 26.7% improvement in TPOT. Overall, PipeLive converts migration from a blocking op-eration into a largely background activity, reducing service interruption from seconds to around 10ms while preserving end-to-end performance even when the system is handling substantial request load. 
+
+8 Related Work 
+
+General LLM serving systems. Early systems such as Orca established iteration-level scheduling and continuous batching for transformer serving [ 24 , 29 ]. Subsequent sys-tems each targeted a key serving bottleneck: Sarathi-Serve co-schedules prefills and decodes via chunked prefills [ 1]; vLLM improves memory efficiency with PagedAttention and fine-grained KV-cache management [ 12 ]; SGLang reuses KV states through prefix caching with RadixAttention [ 32 ]; Dist-Serve separates prefill and decode paths to improve good-put [ 33 ]; and Llumnix focuses on elastic scheduling and instance management [ 22 ]. Other work studies hardware-aware and heterogeneous serving optimization [ 8 , 9, 15 , 25 ]. Collectively, these systems improve scheduling, memory ef-ficiency, and deployment awareness within fixed execution layouts. PipeLive is complementary: it enables changing the pipeline-parallel layout live and in place while requests remain in flight. 
+
+Pipeline parallelism. Pipeline parallelism is a standard mechanism for executing models that exceed a single de-vice’s memory capacity by partitioning layers across GPUs and forwarding activations stage-by-stage. Foundational sys-tems such as GPipe, Megatron-LM, PipeDream, and Alpa have explored how to partition models, schedule execution across stages, and combine PP with other forms of paral-lelism [ 11 , 16 , 20 , 31 ]. This line of work established the sys-tems substrate for large-model distributed execution, but it mostly treats the PP partition as an offline choice made before execution begins. This assumption is increasingly limiting for LLM serving. In practice, the best PP layout depends on the workload mix, latency objectives, request rate, hardware heterogeneity, and KV-cache pressure, all of which may vary over time. PipeLive builds directly on the PP abstraction, but departs from prior work by treating the partition as a dynamic runtime object rather than a static deployment-time decision. 
+
+Pipeline-parallel reconfiguration. The closest prior ef-forts that attempt to adapt PP configurations at runtime are HydraServe, FlexPipe, and DynaPipe [ 13 , 14 , 27 ]. DynaPipe only supports small-scale redistribution of model layers in the tail pipeline stages, without accounting for the substan-tial overhead of KV migration or GPU memory constraints during layer redistribution, and therefore cannot support in-place switching between PP configurations with large differences. HydraServe and FlexPipe adjust the set of GPUs participating in pipeline parallelism, but also do not consider GPU memory constraints and do not support in-place PP reconfiguration that redistributes model layers across an existing set of GPUs. In contrast, PipeLive enables general, live, in-place PP reconfiguration by redistributing model layers and KV cache across existing GPUs via a reconfiguration protocol with dy-namic KV resizing, without interrupting ongoing inference. In heterogeneous GPU environments, this capability enables switching between workload-optimal PP configurations that exhibit significant differences in layer distribution. Prior approaches assume static per-layer KV cache alloca-tion, leading to underutilized memory and limited scalability. Systems such as KVcached [ 26 ] enable dynamic KV cache al-location via NVIDIA’s virtual memory management (VMM), but require remapping virtual to physical addresses at each inference step, incurring runtime overhead. Moreover, they do not align KV block sizes with the GPU allocation unit, making them unsuitable for efficient KV cache reclamation during in-place PP reconfiguration. In contrast, PipeLive enables PageAttention to directly ac-cess non-contiguous memory without remapping, and lever-ages layer stacking to align KV block sizes with GPU allo-cation unit, reducing internal fragmentation and enabling instantaneous KV block reclamation during resizing. More-over, it employs KV patching to continuously synchronize KV states, minimizing divergence during migration. 
+
+> 12
+
+Conference’17, July 2017, Washington, DC, USA 
+
+9 Conclusions and Future Directions 
+
+In this paper, we presented PipeLive , a system that enables efficient live, in-place PP reconfiguration for LLM serving. By supporting dynamic switching between optimal PP con-figurations, PipeLive improves end-to-end performance by 33%–36% in heterogeneous GPU deployments. Through dy-namic KV resizing and layer stacking, PipeLive sustains up to 2.5 × higher request rates without KV overloading. In ad-dition, inspired by live VM migration, we introduce a KV patching mechanism that reduces TTFT by up to 49.7% and TPOT by up to 29.5% during reconfiguration, while keeping service interruption to around 10,ms. Together, these tech-niques make live, in-place PP reconfiguration practical for dynamically adapting to optimal configurations under chang-ing workloads in heterogeneous GPU environments, and lay the foundation for broader scenarios such as multi-tenant LLM serving under dynamic workloads. While this work focuses on the efficient execution of live, in-place PP reconfiguration, exploring higher-level decisions, such as selecting optimal PP configurations, remains an important direction for future work. We plan to develop reconfiguration algorithms that PipeLive to dynamically optimize PP configurations based on workload dynamics, request rates, available computational resources, and evolv-ing user QoS requirements. Future work could also explore jointly optimizing PP configurations with other forms of parallelism, such as tensor and data parallelism, to further improve resource utilization and performance across diverse deployment settings. 
+
+References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, Ramachandran Ramjee, and Alexey Tu-manov. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .[2] Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al . 2020. Language Models are Few-Shot Learners. (2020). [3] Christopher Clark, Keir Fraser, Steven Hand, Jacob Gorm Hansen, Eric Jul, Christian Limpach, Ian Pratt, and Andrew Warfield. 2005. Live Migration of Virtual Machines. In Proceedings of the 2nd Conference on Symposium on Networked Systems Design & Implementation (NSDI) .[4] Tri Dao. 2024. FlashAttention-2: Faster Attention with Better Paral-lelism and Work Partitioning. In International Conference on Learning Representations (ICLR) .[5] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems (NeurIPS) .[6] Yao Fu, Leyang Xue, Yeqi Huang, Andrei-Octavian Brabete, Dmitrii Ustiugov, Yuvraj Patel, and Luo Mai. 2024. ServerlessLLM: Low-Latency Serverless Inference for Large Language Models. In Proceed-ings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’24) .[7] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Vaughan, et al . 2024. The Llama 3 Herd of Models. arXiv preprint arXiv:2407.21783 (2024). [8] Tyler Griggs, Xiaoxuan Liu, Jiaxiang Yu, Doyoung Kim, Wei-Lin Chi-ang, Alvin Cheung, and Ion Stoica. 2024. Mélange: Cost Efficient Large Language Model Serving by Exploiting GPU Heterogeneity. arXiv preprint arXiv:2404.14527 (2024). [9] Yiyuan He, Minxian Xu, Jingfeng Wu, Wanyi Zheng, Kejiang Ye, Chengzhong Xu, Walid Gaaloul, Michael Sheng, Qi Yu, and Sami Yangui. 2025. UELLM: A Unified and Efficient Approach for Large Language Model Inference Serving. In International Conference on Service-Oriented Computing (ICSOC) .[10] Zixuan Hu, Siyuan Shen, Tommaso Bonato, Sylvain Jeaugey, and Torsten Hoefler. 2025. Demystifying NCCL: An In-Depth Analysis of GPU Communication Protocols and Algorithms. In Proceedings of the 39th IEEE International Parallel and Distributed Processing Symposium (IPDPS) .[11] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Mia Xu Chen, Dehao Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V. Le, Yonghui Wu, and Zhifeng Chen. 2019. GPipe: Efficient Training of Giant Neural Networks Using Pipeline Parallelism. In Advances in Neural Information Processing Systems (NeurIPS) .[12] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serv-ing with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP ’23) .[13] Yanying Lin, Shijie Peng, Chengzhi Lu, Chengzhong Xu, and Kejiang Ye. 2025. FlexPipe: Adapting Dynamic LLM Serving Through Inflight Pipeline Refactoring in Fragmented Serverless Clusters. arXiv preprint arXiv:2510.11938 (2025). [14] Chiheng Lou, Sheng Qi, Chao Jin, Dapeng Nie, Haoran Yang, Yu Ding, Xuanzhe Liu, and Xin Jin. 2025. HydraServe: Minimizing Cold Start Latency for Serverless LLM Serving in Public Clouds. arXiv preprint arXiv:2502.15524 (2025). [15] Zizhao Mo, Jianxiong Liao, Huanle Xu, Zhi Zhou, and Chengzhong Xu. 2025. Hetis: Serving LLMs in Heterogeneous GPU Clusters with Fine-grained and Dynamic Parallelism. In Proceedings of the International Conference for High Performance Computing, Networking, Storage, and Analysis (SC) .[16] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R. Devanur, Gregory R. Ganger, Phillip B. Gibbons, and Matei Zaharia. 2019. PipeDream: Generalized Pipeline Parallelism for DNN Training. In Proceedings of the 27th ACM Symposium on Operating Systems Principles (SOSP ’19) .[17] OpenAI. 2023. GPT-4 Technical Report. arXiv preprint arXiv:2303.08774 
+
+(2023). [18] Ramya Prabhu, Ajay Nayak, Jayashree Mohan, Ramachandran Ramjee, and Ashish Panwar. 2024. vAttention: Dynamic Memory Management for Serving LLMs without PagedAttention. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles (SOSP) .[19] Ruoyu Qin, Zheming Li, Weiran He, Junda Cui, Fangcheng Ren, Mingx-ing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Moon-cake: Trading More Storage for Less Computation — A KVCache-Centric Architecture for Serving LLM Chatbot. In 23rd USENIX Con-ference on File and Storage Technologies (FAST 25) .[20] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2020. Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism. 
+
+arXiv preprint arXiv:1909.08053 (2020). [21] Qidong Su, Wei Zhao, Xin Li, Muralidhar Andoorveedu, Chenhao Jiang, Zhanda Zhu, Kevin Song, Christina Giannoula, and Gennady Pekhimenko. 2025. Seesaw: High-throughput LLM Inference via Model Re-sharding. In Proceedings of Machine Learning and Systems (MLSys) .13 Conference’17, July 2017, Washington, DC, USA Xu BAI, Muhammed Tawfiqul Islam, Chen Wang, and Adel N. Toosi 
+
+[22] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang, Yong Li, and Wei Lin. 2024. Llumnix: Dynamic Scheduling for Large Language Model Serving. In Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’24) .[23] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al . 2023. LLaMA: Open and Efficient Foundation Language Models. arXiv preprint arXiv:2302.13971 (2023). [24] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is All You Need. (2017). [25] Marcel Wagenländer, Guo Li, Bo Zhao, Luo Mai, and Peter Pietzuch. 2024. Tenplex: Dynamic Parallelism for Deep Learning Using Paral-lelizable Tensor Collections. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles (SOSP) .[26] Jiarong Xing, Yifan Qiao, Simon Mo, Xingqi Cui, Gur-Eyal Sela, Yang Zhou, Joseph Gonzalez, and Ion Stoica. 2025. Towards Efficient and Practical GPU Multitasking in the Era of LLM. arXiv preprint arXiv:2508.08448 (2025). [27] Hongxin Xu, Tianyu Guo, and Xianwei Zhang. [n. d.]. DynaPipe: Dynamic Layer Redistribution for Efficient Serving of LLMs with Pipeline Parallelism. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .[28] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, et al . 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 (2025). [29] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’22) .[30] Zhihang Yuan, Yuzhang Shang, Yang Zhou, Zhen Dong, Zhe Zhou, Chenhao Xue, Bingzhe Wu, Zhikai Li, Qingyi Gu, Yong Jae Lee, Yan Yan, Beidi Chen, Guangyu Sun, and Kurt Keutzer. 2024. LLM Inference Unveiled: Survey and Roofline Model Insights. [31] Lianmin Zheng, Zhuohan Li, Hao Zhang, Yonghao Zhuang, Zhifeng Chen, Yanping Huang, Yida Wang, Yuanzhong Xu, Danyang Zhuo, Eric P. Xing, Joseph E. Gonzalez, and Ion Stoica. 2022. Alpa: Au-tomating Inter- and Intra-Operator Parallelism for Distributed Deep Learning. (2022). [32] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Ad-vances in Neural Information Processing Systems (NeurIPS) .[33] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’24) .14
