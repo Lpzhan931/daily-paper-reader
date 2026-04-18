@@ -6,73 +6,50 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-17
-- 运行时间：2026-04-17 19:51:33 UTC
+- 最新运行日期：2026-04-18
+- 运行时间：2026-04-18 20:16:48 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：10
-- 速读区：7
+- 本次总论文数：10
+- 精读区：5
+- 速读区：5
 
 ### 今日简报（AI）
-今日聚焦大模型推理加速与压缩，深度解析 KV Cache 结构化压缩与自适应跳层解码等前沿技术。
-重点推荐 CodeComp 对编程智能体的 KV 缓存优化，以及 ConfLayers 通过置信度实现的高效自投机采样。
-建议关注长文本处理与低比特量化的结合，以在有限算力下实现更快的代码生成与逻辑推理。
-- 详情：[/202604/17/README](/202604/17/README)
+今日聚焦 10 篇前沿成果，深度探讨了多智能体协作中的潜空间压缩与多模态模型视觉剪枝的
+- 详情：[/202604/18/README](/202604/18/README)
 
 ### 精读区论文标签
-1. [CodeComp: Structural KV Cache Compression for Agentic Coding](/202604/17/2604.10235v1-codecomp-structural-kv-cache-compression-for-agentic-coding)  
-   标签：评分：10.0/10、query:llm
-   evidence：针对代码任务的结构化KV缓存压缩
-2. [ConfLayers: Adaptive Confidence-based Layer Skipping for Self-Speculative Decoding](/202604/17/2604.14612v1-conflayers-adaptive-confidence-based-layer-skipping-for-self-speculative-decoding)  
-   标签：评分：10.0/10、query:llm
-   evidence：自投机解码中的自适应层跳过
-3. [RACER: Retrieval-Augmented Contextual Rapid Speculative Decoding](/202604/17/2604.14885v1-racer-retrieval-augmented-contextual-rapid-speculative-decoding)  
-   标签：评分：10.0/10、query:llm
-   evidence：检索增强的投机解码以实现更快推理
-4. [Latent-Condensed Transformer for Efficient Long Context Modeling](/202604/17/2604.12452v2-latent-condensed-transformer-for-efficient-long-context-modeling)  
+1. [When Less Latent Leads to Better Relay: Information-Preserving Compression for Latent Multi-Agent LLM Collaboration](/202604/18/2604.13349v1-when-less-latent-leads-to-better-relay-information-preserving-compression-for-latent-multi-agent-llm-collaboration)  
    标签：评分：9.0/10、query:llm
-   evidence：通过潜空间压缩注意力减少KV缓存
-5. [ELMoE-3D: Leveraging Intrinsic Elasticity of MoE for Hybrid-Bonding-Enabled Self-Speculative Decoding in On-Premises Serving](/202604/17/2604.14626v1-elmoe-3d-leveraging-intrinsic-elasticity-of-moe-for-hybrid-bonding-enabled-self-speculative-decoding-in-on-premises-serving)  
-   标签：评分：9.0/10、query:llm
-   evidence：MoE模型的自投机解码
-6. [Acceptance Dynamics Across Cognitive Domains in Speculative Decoding](/202604/17/2604.14682v1-acceptance-dynamics-across-cognitive-domains-in-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：跨认知领域的树状投机解码接受动态实证研究
-7. [MemoSight: Unifying Context Compression and Multi Token Prediction for Reasoning Acceleration](/202604/17/2604.14889v1-memosight-unifying-context-compression-and-multi-token-prediction-for-reasoning-acceleration)  
-   标签：评分：9.0/10、query:llm
-   evidence：统一上下文压缩和多标记预测以加速推理
-8. [Prefill-as-a-Service: KVCache of Next-Generation Models Could Go Cross-Datacenter](/202604/17/2604.15039v1-prefill-as-a-service-kvcache-of-next-generation-models-could-go-cross-datacenter)  
-   标签：评分：9.0/10、query:llm
-   evidence：优化跨数据中心LLM推理服务的吞吐量与延迟
-9. [Scepsy: Serving Agentic Workflows Using Aggregate LLM Pipelines](/202604/17/2604.15186v1-scepsy-serving-agentic-workflows-using-aggregate-llm-pipelines)  
-   标签：评分：9.0/10、query:llm
-   evidence：将多LLM智能体工作流高效调度到GPU集群的服务系统
-10. [From Tokens to Steps: Verification-Aware Speculative Decoding for Efficient Multi-Step Reasoning](/202604/17/2604.15244v1-from-tokens-to-steps-verification-aware-speculative-decoding-for-efficient-multi-step-reasoning)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：基于模型内部信号的验证感知投机解码
+   evidence：多智能体协作中的剔除式KV压缩
+2. [Why and When Visual Token Pruning Fails? A Study on Relevant Visual Information Shift in MLLMs Decoding](/202604/18/2604.12358v1-why-and-when-visual-token-pruning-fails-a-study-on-relevant-visual-information-shift-in-mllms-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：多模态大语言模型解码中的视觉标记剪枝
+3. [Why and When Visual Token Pruning Fails? A Study on Relevant Visual Information Shift in MLLMs Decoding](/202604/18/2604.12358v2-why-and-when-visual-token-pruning-fails-a-study-on-relevant-visual-information-shift-in-mllms-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：多模态大模型解码阶段的偏移感知令牌剪枝
+4. [OSC: Hardware Efficient W4A4 Quantization via Outlier Separation in Channel Dimension](/202604/18/2604.12782v1-osc-hardware-efficient-w4a4-quantization-via-outlier-separation-in-channel-dimension)  
+   标签：评分：8.0/10、query:llm
+   evidence：用于高吞吐部署的硬件高效W4A4量化
+5. [VisPCO: Visual Token Pruning Configuration Optimization via Budget-Aware Pareto-Frontier Learning for Vision-Language Models](/202604/18/2604.15188v1-vispco-visual-token-pruning-configuration-optimization-via-budget-aware-pareto-frontier-learning-for-vision-language-models)  
+   标签：评分：8.0/10、query:llm
+   evidence：视觉语言模型的视觉标记剪枝
 
 ### 速读区论文标签
-1. [Robust Ultra Low-Bit Post-Training Quantization via Stable Diagonal Curvature Estimate](/202604/17/2604.13806v1-robust-ultra-low-bit-post-training-quantization-via-stable-diagonal-curvature-estimate)  
-   标签：评分：8.0/10、query:llm
-   evidence：大语言模型部署的训练后量化
-2. [Towards Faster Language Model Inference Using Mixture-of-Experts Flow Matching](/202604/17/2604.15009v1-towards-faster-language-model-inference-using-mixture-of-experts-flow-matching)  
-   标签：评分：8.0/10、query:llm
-   evidence：通过非自回归方法实现更快的语言模型推理
-3. [Compressing Sequences in the Latent Embedding Space: $K$-Token Merging for Large Language Models](/202604/17/2604.15153v1-compressing-sequences-in-the-latent-embedding-space-k-token-merging-for-large-language-models)  
-   标签：评分：8.0/10、query:llm
-   evidence：潜空间Token合并以实现高效推理
-4. [Technology solutions targeting the performance of gen-AI inference in resource constrained platforms](/202604/17/2604.11128v1-technology-solutions-targeting-the-performance-of-gen-ai-inference-in-resource-constrained-platforms)  
+1. [WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning](/202604/18/2604.10187v1-wavetune-wave-aware-bilinear-modeling-for-efficient-gpu-kernel-auto-tuning)  
    标签：评分：7.0/10、query:llm
-   evidence：资源受限平台上的生成式AI推理性能
-5. [Adaptive Test-Time Compute Allocation for Reasoning LLMs via Constrained Policy Optimization](/202604/17/2604.14853v1-adaptive-test-time-compute-allocation-for-reasoning-llms-via-constrained-policy-optimization)  
+   evidence：针对大模型推理效率的GPU算子自动调优
+2. [TRACER: Trace-Based Adaptive Cost-Efficient Routing for LLM Classification](/202604/18/2604.14531v1-tracer-trace-based-adaptive-cost-efficient-routing-for-llm-classification)  
    标签：评分：7.0/10、query:llm
-   evidence：推理效率的自适应计算分配
-6. [Atropos: Improving Cost-Benefit Trade-off of LLM-based Agents under Self-Consistency with Early Termination and Model Hotswap](/202604/17/2604.15075v1-atropos-improving-cost-benefit-trade-off-of-llm-based-agents-under-self-consistency-with-early-termination-and-model-hotswap)  
-   标签：评分：7.0/10、query:llm
-   evidence：通过提前终止和模型热切换优化大模型智能体的成本效益
-7. [Pushing the Limits of On-Device Streaming ASR: A Compact, High-Accuracy English Model for Low-Latency Inference](/202604/17/2604.14493v1-pushing-the-limits-of-on-device-streaming-asr-a-compact-high-accuracy-english-model-for-low-latency-inference)  
+   evidence：自适应路由至代理模型以实现高性价比的LLM服务
+3. [Long-Horizon Streaming Video Generation via Hybrid Attention with Decoupled Distillation](/202604/18/2604.10103v1-long-horizon-streaming-video-generation-via-hybrid-attention-with-decoupled-distillation)  
    标签：评分：6.0/10、query:llm
-   evidence：端侧大模型语音识别的低延迟推理
+   evidence：混合注意力机制与紧凑KV状态提升效率
+4. [Three Roles, One Model: Role Orchestration at Inference Time to Close the Performance Gap Between Small and Large Agents](/202604/18/2604.11465v1-three-roles-one-model-role-orchestration-at-inference-time-to-close-the-performance-gap-between-small-and-large-agents)  
+   标签：评分：6.0/10、query:llm
+   evidence：针对有限硬件上小模型的推理时脚手架技术
+5. [LLM-Driven Large-Scale Spectrum Access](/202604/18/2604.13132v1-llm-driven-large-scale-spectrum-access)  
+   标签：评分：6.0/10、query:llm
+   evidence：大语言模型的时间受限推理协议
 
 
 <div class="dpr-home-promo-card">

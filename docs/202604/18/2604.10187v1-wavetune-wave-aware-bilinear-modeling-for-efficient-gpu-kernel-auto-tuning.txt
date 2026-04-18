@@ -1,0 +1,792 @@
+Title: WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning
+
+URL Source: https://arxiv.org/pdf/2604.10187v1
+
+Published Time: Tue, 14 Apr 2026 00:40:03 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning 
+
+# Kaixuan Zhang 
+
+zks1anx@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China 
+
+# Chutong Ding 
+
+dingchutong2004@163.com Shanghai Jiao Tong University Shanghai, China 
+
+# Shiyou Qian ∗
+
+qshiyou@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China 
+
+# Luping Wang ∗
+
+chamu.wlp@alibaba-inc.com Alibaba Group Hangzhou, China 
+
+# Jian Cao 
+
+cao-jian@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China 
+
+# Guangtao Xue 
+
+gt_xue@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China 
+
+# Cheng Huang 
+
+xiaoluo.hc@alibaba-inc.com Alibaba Group Hangzhou, China 
+
+# Guodong Yang 
+
+luren.ygd@taobao.com Alibaba Group Hangzhou, China 
+
+# Liping Zhang 
+
+liping.z@alibaba-inc.com Alibaba Group Hangzhou, China 
+
+## Abstract 
+
+The rapid adoption of Large Language Models (LLMs) has made GPU inference efficiency an increasingly critical system concern. The runtime of LLM workloads is largely dominated by tile-based kernels, particularly General Matrix Multiplications (GEMMs). Al-though these kernels are highly optimized, their performance re-mains sensitive to a large space of runtime parameters, such as tile sizes and pipeline stages. The interaction between these parameters and hardware resources leads to a non-convex optimization land-scape. Existing approaches to parameter configuration—including search-based auto-tuning, heuristic rules, and learned cost mod-els—face a fundamental trade-off between performance optimality and runtime efficiency. In this paper, we present WaveTune , a wave-aware framework for runtime kernel auto-tuning. First, we introduce a unified mapping method to handle input diversity and decompose the configura-tion space to manage high dimensionality. Second, we develop an analytical wave-aware bilinear model that accurately predicts ker-nel latency. Third, we design a sparse sampling scheme based on wave structures and a lightweight dual-table retrieval mechanism to minimize runtime overhead. As a result, WaveTune enables pre-cise and efficient runtime configuration for GPU kernels. Across three representative kernels and five GPU architectures, WaveTune 
+
+consistently achieves near-optimal kernel performance, delivering up to 1.83 × kernel-level speedup and up to 1.33 × end-to-end TTFT reduction, while reducing runtime decision overhead by five or-ders of magnitude compared to exhaustive search. These results demonstrate that WaveTune effectively eliminates the traditional trade-off between configuration latency and execution optimality, providing a practical and robust solution for high-performance LLM inference. 
+
+## Keywords 
+
+GPU Performance Model, Runtime Kernel Auto-tuning 
+
+## 1 Introduction 
+
+The rapid scaling and deployment of LLMs has made GPU inference efficiency a critical bottleneck. In practice, GPU compute cost is dominated by a small set of kernels, notably matrix multiplications and attention [ 1, 40 , 48 ]. Although the underlying algorithms of these kernels are well established and widely implemented in mod-ern GPU libraries and frameworks [ 8, 12 , 13 ], their performance remains highly sensitive to a large number of runtime configura-tion parameters, including tile sizes, the number of warps, pipeline stages, and swizzling strategies. Selecting an optimal config for kernels is fundamentally challeng-ing due to the high-dimensional and hardware-dependent nature of the search space. The interaction between configuration parameters and GPU resources (e.g., registers, shared memory, and SM occu-pancy) leads to complex and non-linear performance behavior. As a result, suboptimal configs can significantly degrade performance, especially under dynamic input shapes in real-world LLM serving workloads [27, 28]. Existing approaches to kernel configuration have been exten-sively studied in both industry and academia, which can be broadly categorized into three classes: search-based auto-tuning, rule-based heuristics, and data-driven cost models. Search-based methods ex-plore large configuration spaces to identify near-optimal configura-tions, but suffer from exponential complexity that prevents com-prehensive offline coverage and incurs prohibitive latency when applied online [27]. Rule-based heuristics enable efficient runtime decisions with negligible overhead, yet often lack robustness across diverse workloads and hardware architectures, leading to sub-optimal performance [ 28 , 31 , 39 ]. Data-driven cost models (e.g., gradient-boosted trees [ 5, 6 , 49 ]) predict kernel performance to guide search, but are primarily designed for offline tuning and intro-duce non-negligible configuration overhead, making them ill-suited for latency-sensitive serving scenarios. Overall, these approaches remain constrained by an inherent tension between achieving high performance and maintaining low runtime overhead. 
+
+> ∗Corresponding authors 1
+> arXiv:2604.10187v1 [cs.PF] 11 Apr 2026 Zhang et al.
+
+In this work, we argue that GPU kernel performance is not an un-structured black-box function, but instead exhibits a strong physical structure governed by hardware execution dynamics. Specifically, we observe that kernel latency follows a wave-conditioned piece-wise bilinear pattern , where discrete execution waves introduce structured discontinuities, while intra-wave behavior remains ap-proximately linear. Based on this insight, we propose WaveTune , a lightweight frame-work for runtime kernel auto-tuning. WaveTune introduces a uni-fied mapping of diverse kernel inputs and a decomposition of the configuration space to manage input heterogeneity and high dimen-sionality. It constructs an accurate wave-aware piecewise bilinear model for kernel latency prediction, capturing the interplay be-tween workload structure and hardware execution dynamics. At runtime, the system predicts latency using precomputed model co-efficients and selects the optimal config via lightweight table-based retrieval, incurring only microsecond-level overhead. We comprehensively evaluated WaveTune on three representa-tive kernels under diverse input workloads, spanning five modern GPU architectures from two major vendors. At the kernel level, it achieves up to 1.83 × speedup over default heuristics, consis-tently approaching the performance of exhaustive search. When integrated into an LLM serving system, it delivers up to 1.33 × end-to-end Time-To-First-Token (TTFT) reduction, while maintaining negligible runtime overhead. In summary, this paper makes the following contributions: 
+
+• We identify a wave-conditioned piecewise bilinear structure in GPU kernel latency, revealing a strong physical prior that unifies discrete wave effects and continuous intra-wave scaling. 
+
+• We propose WaveTune , a runtime kernel auto-tuning frame-work that integrates sparse profiling and wave-aware bilin-ear modeling, enabling efficient and deterministic selection via lightweight model-based evaluation. 
+
+• We demonstrate that WaveTune generalizes across diverse kernels, input workloads, and GPU architectures, consis-tently achieving near-optimal performance with microsec-ond level overhead and delivering significant end-to-end latency reductions when integrated into LLM inference systems. 
+
+## 2 Background: Tile-based Kernel Execution 
+
+Modern LLM inference workloads are dominated by compute-intensive kernels such as GEMM and FlashAttention [ 11 ]. To achieve high throughput, these kernels adopt tile-based execution, decom-posing computation into thread-block-level work units to maximize data locality and parallelism. These thread blocks are then sched-uled and executed following the GPU execution model. Modern GPUs execute a kernel by launching a grid of thread blocks, where each block is independently scheduled onto a Stream-ing Multiprocessor (SM). An SM can host only a limited number of concurrent blocks, strictly bounded by hardware resource lim-its such as registers and shared memory [ 24 , 25 ]. When the total number of thread blocks exceeds the total concurrent capacity of the GPU’s, the execution is divided into multiple rounds, called 
+
+waves (Figure 2). Since new blocks can only be scheduled after 
+
+Table 1: Comparison of kernel configuration strategies.                
+
+> Method Accuracy Generalization Runtime Efficiency
+> Offline Search High Low Low Expert Heuristics Low Low High ML Cost Model Medium Medium Low
+> WaveTune(ours) High High High
+
+resources are released by completed ones, the total execution time becomes sensitive to the number of waves. As the grid size crosses the hardware capacity boundary, additional waves may be required, introducing discontinuities in execution behavior [9]. Optimizing these tile-based kernels exposes a massive, high-dimensional configuration space. Beyond basic tile sizes, perfor-mance is governed by tightly coupled execution parameters such as warp-level parallelism, software pipeline stages, and memory access patterns, which jointly determine workload decomposition and hardware resource utilization [27, 28]. Crucially, selecting an optimal kernel config involves a complex physical trade-off. Increasing tile sizes or intra-block parallelism (e.g., number of warps or pipeline stages) may improve compu-tational efficiency, but it simultaneously increases per-block re-source consumption (e.g., registers and shared memory), which can reduce the number of concurrently resident blocks per SM due to hardware resource constraints. This interplay induces highly input- and hardware-dependent execution dynamics, making ef-ficient runtime kernel configuration a central challenge in LLM inference [24, 25, 35]. 
+
+## 3 Key Observations and Motivation 3.1 Runtime Kernel Configuration Challenges 
+
+The selection of optimal GPU kernel configs in LLM inference work-loads requires navigating a massive combinatorial design space shaped by the interaction of three primary factors: input workload characteristics (e.g., dynamic variations in batch size and sequence length), kernel implementation diversity (ranging from distinct oper-ators to alternative implementation variants), and the target hard-ware architecture (e.g., NVIDIA B200 or AMD MI355X). Different configuration strategies impose varying trade-offs among resource occupancy, instruction throughput, and latency hiding capability. Consequently, configs that perform well under one spe-cific setting often become suboptimal when workloads or hardware change, motivating the need for adaptive runtime selection strate-gies [ 21 , 27 , 28 , 30 ]. However, as summarized in Table 1, conven-tional configuration methodologies—including offline search [ 6, 21 ,30 ], expert heuristics [ 13 , 31 , 39 , 42 ], and machine learning (ML) cost models [ 5 , 6 , 45 , 49 ]—struggle to address this dynamism ef-fectively, with each approach exhibiting distinct limitations across accuracy, generalization, and runtime efficiency. 
+
+Infeasibility of Offline Search. Pre-computing optimal configs for the entire input space is intractable: while exhaustive config-uration search can achieve high accuracy for a fixed input on a given hardware [ 27 , 28 ], it suffers from poor generalization beyond pre-tuned settings. Consequently, when confronted with dynamic, unseen shapes at deployment, it either necessitates prohibitive on-line tuning or falls back to suboptimal defaults, resulting in low runtime efficiency or degraded performance. The combinatorial 
+
+> 2WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning
+
+explosion of kernel input dimensions renders exhaustive precompu-tation impractical, and scaling this approach across diverse kernels and evolving hardware further amplifies its inefficiency. 
+
+Rigidity of Expert Heuristics. Hand-tuned heuristics used in high-performance libraries offer high runtime efficiency due to their lightweight nature [ 12 , 13 , 42 ], but suffer from low accuracy and poor generalization. They rely on simplified assumptions and manual calibration that fail to capture complex, non-linear execu-tion dynamics across inputs, kernels, and hardware. These rules require significant engineering effort and often produce suboptimal throughput when deployed beyond their intended regimes, reflect-ing their limited ability to generalize across diverse workloads and hardware. 
+
+High Runtime Overhead of ML Cost Models. Data-driven ML cost models can achieve moderate accuracy and some degree of generalization across configs [ 45 ], but incur low runtime efficiency when deployed for online selection due to non-negligible inference overhead on the critical path (Section 5.3 and 5.4). Their reliance on online feature extraction and iterative evaluation often leads to sub-millisecond to millisecond latency on the critical path, which can rival or even exceed kernel execution time in LLM serving work-loads [ 1, 11 , 16 , 43 ], making them unsuitable for latency-sensitive production systems where configuration decisions must incur near-zero overhead. 
+
+These limitations highlight a fundamental gap in the design space: ex-isting approaches fail to simultaneously achieve high accuracy, strong generalization, and near-zero runtime overhead (Table 1). Resolving this tension requires a fundamentally new paradigm—a lightweight analytical model that approaches the accuracy of exhaustive search while offering the microsecond speed of basic heuristics, as realized by WaveTune .
+
+## 3.2 Empirical Analysis of Real-World Wave Dynamics 
+
+To understand the fundamental performance characteristics of mod-ern GPU kernels and expose the limitations of existing perfor-mance modeling methodologies, we conducted a large-scale auto-tuning campaign across several representative tile-based kernels, including Dense GEMM, Grouped GEMM (MoE), and FlashAtten-tion [ 13 , 28 , 31 ]. Without loss of generality, we focus on the standard BF16 GEMM kernel from the DeepGEMM library [ 13 ] running on an NVIDIA H100 GPU, with performance data collected using the PyTorch Profiler [ 26 ]. We adopt DeepGEMM as our primary testbed because tile-based GEMM constitutes the computational backbone of modern deep learning workloads [ 7], the library achieves state-of-the-art performance competitive with proprietary vendor im-plementations [ 13 ], and its open-source design exposes a rich con-figuration space of approximately 3,000 candidates spanning more than a dozen tunable parameters—such as tile sizes, pipeline stages, and warp configurations—that remain inaccessible in black-box libraries like cuBLAS [8]. As illustrated in Figure 1, a standard GEMM kernel computes a matrix multiplication problem of size (𝑀, 𝑁 , 𝐾 ), i.e., multiplying 
+
+𝐴 ∈ R𝑀 ×𝐾 and 𝐵 ∈ R𝐾 ×𝑁 , by spatially partitioning the result ma-trix 𝐶 ∈ R𝑀 ×𝑁 into a logical grid of thread blocks. Under a tile config (𝑇 𝑀 ,𝑇 𝑁 ,𝑇 𝐾 ), the total number of launched thread blocks is K      
+
+> N
+> A matrix
+> M
+> TM
+> TK
+> Loop
+> B matrix
+> Loop TK
+> TN
+> C matrix
+> Block i
+> TN
+> TM
+> GPU
+> SM SM SM
+> SM SM SM
+> L2 Cache
+> Global Memory
+> K
+> Block i
+
+Figure 1: Illustration of the Tiled GEMM execution model. wave0 wave1 wave 2
+
+SM0 
+
+SM1 
+
+SM2 
+
+SM3 
+
+time 
+
+> block
+> 0
+> block
+> 1
+> block
+> 2
+> block
+> 3
+> block
+> 4
+> block
+> 5
+> block
+> 6
+> block
+> 7
+> block
+> 8
+> block
+> 9
+
+Figure 2: Illustration of the wave quantization effect. A total of 10 thread blocks are scheduled across 4 SMs. The execution spans 3 waves: the first 2 waves are fully occupied, while the final quantized wave only partially utilizes the GPU, leaving two SMs idle. 
+
+𝐺 = ⌈𝑀 /𝑇 𝑀 ⌉ × ⌈ 𝑁 /𝑇 𝑁 ⌉, where each thread block is scheduled onto one of the available SMs and computes a tile of size 𝑇 𝑀 × 𝑇 𝑁 of 
+
+𝐶 . Within each thread block, the kernel iteratively processes the reduction dimension 𝐾 using a tiled loop. Specifically, the computa-tion proceeds in 𝐿 = ⌈𝐾 /𝑇 𝐾 ⌉ iterations, where each iteration loads a pair of tiles of size 𝑇 𝑀 × 𝑇 𝐾 and 𝑇 𝐾 × 𝑇 𝑁 from the input matrices and accumulates their partial products into the corresponding tile of 𝐶 .It is important to note that for persistent kernels —a prevalent de-sign pattern on modern architectures like NVIDIA Hopper [ 23 ]—the physically launched grid size is often clamped to the number of available SMs to maximize residency. In such designs, 𝐺 represents the total set of logical tasks organized as a global work queue, from which resident worker blocks dynamically fetch and process tasks. Existing performance models can be broadly categorized into two paradigms. The first adopts a step function approximation of latency [ 18 , 35 ]: 𝑇 total ≈ 𝑇 wave · ⌈ 𝐺 /𝑁 𝑆𝑀 ⌉. Here, 𝐺 denotes the total number of thread blocks in the grid, and 𝑁 𝑆𝑀 represents the number of SMs available on the GPU. The term ⌈𝐺 /𝑁 𝑆𝑀 ⌉ therefore corresponds to the number of waves required to execute all blocks. 
+
+𝑇 wave denotes the latency of one wave, i.e., the time required for 
+
+> 3Zhang et al.
+
+a batch of thread blocks that can simultaneously occupy all SMs to complete execution. This formulation is rooted in wave quanti-zation [ 9, 25 ]: because the number of SMs is finite, thread blocks are issued in groups whose size is bounded by available resources. When the total number of blocks is not an exact multiple of the maximum number of concurrently resident blocks, the final wave exhibits reduced occupancy, leading to hardware underutilization. As a result, kernel execution is abstracted as a sequence of discrete waves with an approximately constant per-wave cost (Figure 2). In contrast, the second paradigm adopts a purely linear perspec-tive [ 20 , 41 ], modeling latency as a direct function of the aggregate workload volume—measured in total FLOPs or memory bytes, treat-ing the GPU as a continuous throughput device and thus obscuring the discrete impact of wave quantization. However, our systematic profiling shows that neither the rigid step function nor the simplified linear view adequately captures the complex execution dynamics of modern GPU kernels. As shown in Figure 3, real-world performance transcends these simplified views, exhibiting complex dynamics that evolve from step-like to linear as the workload scales. In the initial phase (Waves 1– 3), the latency profile aligns relatively well with the rigid step model, exhibiting distinct quantization boundaries. However, as the number of waves increases, a linear growth trend emerges within each wave, gradually smoothing the step-like structure until the overall profile converges to a linear trajectory. This evolution is quantitatively reflected in the model accuracy (Figure 3c). The linear model, while failing catastrophically in the small-wave regime with errors exceeding 40%, rapidly improves as the workload scales, eventually achieving high fidelity ( < 2% 
+
+error). Conversely, the step model exhibits the opposite behavior: it maintains low error at small grid sizes but gradually accumulates deviation as the workload increases. To understand the root causes of the observed transition from a step-function to a linear regime, we analyze the interplay between workload scale and execution non-determinism. We identify two primary mechanisms that drive this convergence: 
+
+Asymptotic Amortization of Quantization Overhead. The “step” effect in the performance profile arises from the tail wave—the final batch of blocks that may not fully occupy the GPU. However, the magnitude of this quantization penalty is bounded by the dura-tion of a single wave ( 𝑇 𝑤𝑎𝑣𝑒 ). As the problem size increases, the total execution time ( 𝑇 𝑡𝑜𝑡𝑎𝑙 ) grows linearly. Consequently, the relative impact of the fixed quantization penalty ( 𝑇 𝑤𝑎𝑣𝑒 /𝑇 𝑡𝑜𝑡𝑎𝑙 ) diminishes asymptotically. For large-scale workloads, the performance curve naturally aligns with the linear throughput baseline, rendering the discrete steps negligible. 
+
+Desynchronization via Execution Variance and Greedy Sched-uling. The idealized step model premises that all thread blocks within a wave exhibit identical latency, implying that waves com-plete atomically. In practice, block execution latencies are stochastic and arise from multiple sources. These include variability induced by the memory hierarchy—such as cache hit/miss effects, bank con-flicts, memory access coalescing inefficiencies, and contention in shared cache and DRAM resources [ 20 , 22 ]—as well as instruction-and execution-level effects, including warp scheduling decisions, pipeline stalls due to data dependencies or control divergence, and interference among concurrently resident blocks or kernels com-peting for shared on-chip and off-chip resources [ 10 , 14 , 29 ]. At the same time, modern dispatch mechanisms—whether the hardware-managed GigaThread Engine [ 19 , 24 , 33 , 47 ] or a software-managed persistent work queue [ 25 , 38 ]—operate greedily : as soon as an SM completes a task, it immediately fetches the next available task, independent of its peers. This combination of latency variance and greedy scheduling erodes the rigid execution-time boundaries implied by the wave abstraction. As a proof-of-concept, we performed a discrete-event simulation of a parallel dispatched workload where task durations follow a Gaussian distribution, systematically sweeping the stan-dard deviation ( 𝜎 ) around a fixed mean ( 𝜇 ). As visualized in Fig-ure 4, the results capture the progressive breakdown of the wave boundaries: while the zero-variance baseline exhibits perfect steps, increasing variance causes the execution timelines of parallel SMs to desynchronize . This effect smooths out the discrete steps, repro-ducing the asymptotic linearity observed in Figure 3. 
+
+These observations expose a fundamental limitation of the classical wave abstraction: GPU kernel latency is neither purely discrete nor purely continuous, but a hybrid effect shaped by quantization and variance. This motivates the need for a unified formulation that cap-tures both step-like behavior in the small-wave regime and linear scaling in the large-wave limit. 
+
+## 3.3 Piecewise Bilinear Execution Behavior 
+
+To bridge the gap between irregular wave dynamics and analytical tractability, we analyze the latency of the GEMM kernel under con-trolled variables. Despite the microarchitectural variance identified in the previous subsection, we observe a robust structural invariant: the performance profile follows a piecewise bilinear behavior. For executions that yield the same wave count 𝑤 (i.e., 𝑤 =
+
+⌈𝐺 /𝑁 𝑆𝑀 ⌉), the execution duration exhibits dual linearity under a fixed tile configuration, as illustrated in Figure 5. Specifically, Figure 5(a) shows that with a fixed loop count ( 𝐿 ), latency increases linearly with the grid size ( 𝐺 ). This strict linearity ( 𝑅 2 ≈ 0.9999 )indicates that execution duration grows proportionally with the aggregate number of thread blocks. Complementarily, Figure 5(b) reveals that when 𝐺 is held constant, latency scales linearly with 𝐿 
+
+(𝑅 2 ≈ 0.9988 ). Crucially, the regression lines in Figure 5(b) are not parallel ;rather, their slopes increase proportionally with the magnitude of 
+
+𝐺 . This “fanning out” effect reveals a fundamental multiplicative interaction between the grid and loop dimensions. Physically, this interaction is intrinsic to the kernel’s workload structure: the aggre-gate workload volume is proportional to the product of the number of thread blocks and their loop iterations ( 𝐺𝐿 ). Therefore, the total execution time is dominated by this aggregate term—whether man-ifesting as total FLOPs for compute-bound kernels or total memory traffic for memory-bound operations—while secondary overheads manifest as independent marginal costs. 
+
+Consequently, we formalize the kernel execution behavior using a bilinear model: 
+
+𝑇 (𝐺, 𝐿 ) ≈ 𝛼𝐺𝐿 + 𝛽𝐺 + 𝛾𝐿 + 𝛿 (1)           
+
+> 4WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning 12345
+> Wave Count
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Latency (  s)
+> (a) Zoomed
+> Profiling
+> Step
+> Linear
+> 0510 15
+> Wave Count
+> 0
+> 100
+> 200
+> 300
+> Latency (  s)
+> (b) Full Range
+> Profiling
+> Step
+> Linear
+> 0510 15
+> Wave Count
+> 0
+> 10
+> 20
+> 30
+> 40
+> MAPE (%)
+> (c) Relative Error
+> Step
+> Linear
+
+Figure 3: Profiling results on an H100 (132 SMs) for a GEMM kernel with fixed 𝐾 = 4096 and tile configuration (𝑇 𝑀 ,𝑇 𝑁 ,𝑇 𝐾 ) =
+
+(128 , 64 , 64 ). Varying 𝑀 and 𝑁 changes the number of thread blocks 𝐺 while keeping per-block computation constant; the x-axis denotes the wave count 𝑤 . (a) Zoom-in comparing measured latency (blue) with Step (grey) and Linear (red) models at small grids. (b) Full-range view showing asymptotic linearity. (c) Relative error (MAPE), highlighting the crossover in model fidelity. 0 1 2 3 4 5 6 7 8 9 10                                   
+
+> Wave Count
+> 100
+> 200
+> 300
+> 400
+> 500
+> Latency
+> (a) 2=0
+> 012345678910
+> Wave Count
+> (b) 2=10
+> 012345678910
+> Wave Count
+> (c) 2=20
+> 012345678910
+> Wave Count
+> (d) 2=50
+
+Figure 4: Discrete-event simulations of 132 SMs with a fixed mean block latency 𝜇 = 50 (arbitrary time units) and varying variance 𝜎 2. As variance increases from 0 to 50, the accumulated desynchronization among SMs progressively erodes the rigid wave boundaries, transforming the step-like profile into a continuous linear trend. 
+
+Here, 𝑇 (𝐺, 𝐿 ) denotes the execution latency, and the coefficients 𝛼 , 𝛽 ,
+
+𝛾 , and 𝛿 are learned from profiling data. The dominant term 𝛼𝐺𝐿 
+
+represents the core execution time driven by the aggregate workload volume, while 𝛽𝐺 and 𝛾𝐿 model the marginal overheads associated with block scheduling and per-iteration latency. By incorporating the 
+
+𝐺𝐿 interaction, this formulation naturally captures the slope diver-gence observed in profiling and provides a physically grounded basis for kernel performance prediction. 
+
+## 4 Methodology 
+
+To navigate the prohibitively large configuration space of kernel auto-tuning, our methodology is built upon a key observation from Section 3: GPU kernel latency exhibits a wave-conditioned piecewise bilinear structure, indicating that the latency surface is not an un-structured black box, but a structured space segmented by wave dynamics. Consequently, exhaustive profiling is unnecessary. In-stead, the latency landscape can be effectively approximated by sparsely sampling anchor points within each wave segment and fitting localized linear models. As illustrated in Figure 6, the overall workflow of WaveTune 
+
+follows a systematic offline-to-online framework. First, to address kernel input diversity and configuration complexity, we project complex logical inputs onto a unified 2D physical coordinate sys-tem and decouple the configuration space into macro and micro 
+
+parameters (Section 4.1). Next, we perform wave-aware sparse structural profiling to reduce offline data collection overhead (Sec-tion 4.2). Using collected samples, we construct a dual-table offline artifact: a structural coefficient table parameterizing wave-aware piecewise bilinear models with built-in extrapolation for out-of-range waves, and an anchor-based micro-configuration table for local execution tuning (Section 4.3 and 4.5). Finally, at runtime, we apply a two-stage selection process that analytically identi-fies the optimal macro-config via kernel latency prediction and retrieves micro-config via proximal anchors, enabling deterministic, microsecond-level tuning without expensive hardware evaluations (Section 4.4). 
+
+## 4.1 Problem Formulation and Parameter Decoupling 
+
+We formulate the kernel auto-tuning problem as finding the optimal configuration c∗ that minimizes the execution latency 𝑇 for a given kernel K and input shape x:
+
+c∗ (x) = argmin 
+
+> c∈ C
+
+𝑇 (K , x, c) (2) Directly solving this optimization is challenging due to the combina-torial explosion of both the logical input space X and the configura-tion space C. For example, in DeepGEMM , even under commonly used input shapes, the joint space of input dimensions and configuration choices can reach a scale on the order of 10 15 possible combinations.                  
+
+> 5Zhang et al. 132 264 396 528 660 792 924 1056 1188 1320
+> G (Grid Size)
+> 0
+> 50
+> 100
+> 150
+> 200
+> 250
+> Latency (  s)
+> (a) G vs Latency (Grouped by L)
+> L=16
+> L=32
+> L=48
+> L=64
+> L=80
+> MAPE = 0.62%
+> R2= 0.9999
+> 20 30 40 50 60 70 80
+> L (Loop Count)
+> 0
+> 50
+> 100
+> 150
+> 200
+> 250
+> Latency (  s)
+> (b) L vs Latency (Grouped by G)
+> G=25
+> G=156
+> G=289
+> G=420
+> G=552
+> G=676
+> G=812
+> G=930
+> G=1089
+> G=1190
+> MAPE = 2.63%
+> R2= 0.9988
+
+Figure 5: Profiling results on an H100 (132 SMs) for a GEMM kernel with 𝐾 = 1024 –5120 and tile configuration 
+
+(𝑇 𝑀 ,𝑇 𝑁 ,𝑇 𝐾 ) = (128 , 64 , 64 ). (a) Latency exhibits strong linear scaling with grid size 𝐺 (𝑅 2 ≈ 0.9999 ). (b) Latency scales lin-early with loop iterations 𝐿 (𝑅 2 ≈ 0.9988 ). 
+
+To make this tractable, we employ two complementary abstraction strategies. 
+
+Input Mapping: From Logical Inputs to Physical Coordinates. 
+
+Directly modeling kernel latency over original input dimensions is challenging, as these dimensions are kernel-specific and do not directly correspond to hardware execution behavior. We project the various and variable logical input x onto a unified 2D physical coordinate system: Grid Size ( 𝐺 ) and Loop Count ( 𝐿 ). Physically, 
+
+𝐺 represents the spatial partitioning of the workload, determin-ing the total number of logical tasks and thereby governing the wave dynamics. In contrast, 𝐿 captures the temporal workload per task, defined by the iteration count along the reduction axis. As de-tailed in Table 2, this mapping Φ : X → ( 𝐺, 𝐿 ) transforms various kernel-specific input shapes (e.g., MoE token counts, Attention se-quence lengths) into a hardware-oriented canonical representation, reducing the complex logic space to purely physical dimensions. 
+
+Configuration Decomposition: Macro and Micro. Simultane-ously, we decompose the vast configuration space C into two func-tional subspaces: C = Cmacro × C micro . A specific config is therefore expressed as c = (cmacro , cmicro ). Macro-configs ( cmacro ) define the 
+
+workload granularity through geometric partitioning, and are in-trinsic to the workload geometry, typically following a common partitioning logic across implementations of the same kernel (e.g., tiling M/N/K for GEMM or tiling Q/KV for Attention). This directly s                                                         
+
+> Offline Phase
+> Online Phase
+> Kernel
+> Sparse Structural Profiling
+> Piecewise Bilinear Modeling
+> Macro Config Selection via Table A
+> Micro Config Retrieval via Table B
+> Kernel & Input
+> 𝐜 ∗=(𝐜 𝐦𝐚𝐜𝐫𝐨
+> ∗,𝐜 𝐦𝐢𝐜𝐫𝐨
+> ∗)
+> Table B: Micro -Config Table
+> Table A: Coefficient Table
+> w12…𝑊 W+1
+> 𝜽 𝜃 (𝜃 )…𝜃 *𝜃 +,-
+> 𝐿 (𝐿 )𝐿 .…
+> 1𝑐 (,(
+> ∗𝑐 (,)
+> ∗𝑐 (,.
+> ∗…
+> 2𝑐 ),(
+> ∗𝑐 ),)
+> ∗𝑐 ),.
+> ∗…
+> ……………
+> 𝑊 𝑐 *,(
+> ∗𝑐 *,)
+> ∗𝑐 *,.
+> ∗…
+> W+1 𝑐 +,-,(
+> ∗𝑐 +,-,)
+> ∗𝑐 +,-,.
+> ∗…
+> 𝐂 𝐦𝐚𝐜𝐫𝐨 c(c)c.𝑐 0…
+> 𝐓𝐚𝐛𝐥𝐞𝐬 DT(DT)DT.DT0…wL
+> DT i
+
+Figure 6: Overview of the WaveTune framework. For each macro config 𝑐 𝑖 , a corresponding dual-table DT (𝑐 𝑖 ) is con-structed, consisting of a coefficient table indexed by wave count 𝑤 with parameters 𝜽 = ⟨𝛼, 𝛽, 𝛾, 𝛿 ⟩, and a micro-config table indexed by (𝑤, 𝐿 ) storing optimal micro configs c∗ 
+
+> 𝑤,𝐿
+
+. At runtime, Stage I selects 𝑐 ∗ 
+
+> macro
+
+via model-based kernel latency prediction, and Stage II retrieves c∗ 
+
+> micro
+
+from the micro-config table. 
+
+determines the physical coordinates 𝐺 and 𝐿 , thereby governing the global wave dynamics and the dominant resource occupancy charac-teristics on the GPU. In contrast, micro-configs ( cmicro ) optimize the 
+
+execution efficiency of each partition and are often implementation-and hardware-specific. This category encompasses parameters for maximizing instruction-level and thread-level parallelism, such as tuning software pipeline depth for latency hiding, adjusting warp allocation, and shaping thread block rasterization patterns to en-hance L2 cache locality. Although these two subspaces are coupled via hardware resource constraints—where large macro-tiles may re-strict the feasible region of micro-parameters (e.g., shared memory limits)—this decomposition enables structured reasoning. Table 2 summarizes representative parameters in each category. 
+
+## 4.2 Sparse Structural Profiling 
+
+Building on the projection Φ : X → ( 𝐺, 𝐿 ) and the decoupled con-figuration space C = Cmacro × C micro , we next construct a profiling dataset that is both structurally representative and computationally efficient . A dense sweep over all feasible tuples ⟨𝐺, 𝐿, cmacro , cmicro ⟩
+
+is prohibitive; instead, we perform sparse sampling on the ⟨𝐺, 𝐿 ⟩
+
+plane while preserving distinct wave-count execution regimes. 
+
+Wave-aware sampling of grid size with loop anchors. Let 𝑁 𝑆𝑀 
+
+denote the number of SMs, 𝑊 the maximum profiled wave count, and 𝐼 the number of sub-intervals per wave. We partition the grid-size axis into wave-aligned regions: 
+
+R𝑤 = [( 𝑤 − 1)𝑁 𝑆𝑀 + 1, 𝑤𝑁 𝑆𝑀 ], 𝑤 = 1, . . . ,𝑊 , (3) and further split each R𝑤 into 𝐼 sub-intervals R𝑤,𝑖 = [𝑎 𝑤,𝑖 , 𝑏 𝑤,𝑖 ].From each R𝑤,𝑖 , we select a representative grid size 𝑔 𝑤,𝑖 for profiling, forming the sampling set G:
+
+G = {𝑔 𝑤,𝑖 | 𝑤 = 1, . . . ,𝑊 , 𝑖 = 1, . . . , 𝐼 }. (4) The representative grid size 𝑔 𝑤,𝑖 is selected according to the kernel structure. For GEMM-like kernels (e.g., Dense GEMM and 
+
+> 6WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning
+
+Table 2: Unified Mapping of Representative Kernels to Physical Dimensions ( 𝐺, 𝐿 ) and Configuration Categories. Kernel Type Logical Inputs ( X) Macro Configs ( cmacro ) Micro Configs ( cmicro ) Grid Size ( 𝐺 ) Loop Count ( 𝐿 )Dense GEMM 𝑀, 𝑁 , 𝐾 𝑇 𝑀 ,𝑇 𝑁 ,𝑇 𝐾 𝑁 𝑠𝑡𝑔 , 𝑁 𝑤𝑟𝑝 , . . . ⌈ 𝑀 𝑇 𝑀 ⌉ × ⌈ 𝑁 𝑇 𝑁 ⌉ ⌈ 𝐾 𝑇 𝐾 ⌉
+
+Grouped GEMM (MoE) 𝑀 𝑖 , 𝑁 , 𝐾, 𝐸 𝑇 𝑀 ,𝑇 𝑁 ,𝑇 𝐾 𝑁 𝑠𝑡𝑔 , 𝑁 𝑤𝑟𝑝 , . . . Í𝐸 𝑖 =1
+
+
+
+⌈ 𝑀 𝑖  
+
+> 𝑇 𝑀
+
+⌉ × ⌈ 𝑁 𝑇 𝑁 ⌉
+
+
+
+⌈ 𝐾 𝑇 𝐾 ⌉
+
+FlashAttention 𝑁 ℎ, 𝑆 𝑞 , 𝑆 𝑘𝑣 𝑇 𝑄 ,𝑇 𝐾𝑉 𝑁 𝑠𝑡𝑔 , 𝑁 𝑤𝑟𝑝 , . . . 𝑁 ℎ × ⌈ 𝑆 𝑞  
+
+> 𝑇 𝑄
+
+⌉ ⌈ 𝑆 𝑘𝑣  
+
+> 𝑇 𝐾𝑉
+
+⌉            
+
+> Note: 𝑀 𝑖 : Number of tokens routed to the 𝑖 -th expert; 𝐸 : Number of experts; 𝑁 ℎ: Number of heads; 𝑆 𝑞 , 𝑆 𝑘𝑣 : Sequence lengths; 𝑁 𝑠𝑡𝑔 : Pipeline stages; 𝑁 𝑤𝑟 𝑝 : Number of warps.
+
+Grouped GEMM), we choose the largest value in R𝑤,𝑖 that can be factored into a valid 2D block grid ⟨𝑚 𝐺 , 𝑛 𝐺 ⟩. Specifically, we require 𝑔 𝑤,𝑖 = 𝑚 𝐺 𝑛 𝐺 (𝑚 𝐺 ≤ 𝑛 𝐺 ) while satisfying the aspect-ratio constraint 𝜌 (𝑔 𝑤,𝑖 ) = 𝑛 𝐺 /𝑚 𝐺 ≤ 𝜏 (a predefined upper bound limiting grid elongation, e.g., 𝜏 = 1.1). This strictly avoids pathological skinny matrices that may introduce atypical memory behaviors. For attention kernels, the grid dimension must align with the head-parallel launch structure. Thus, we project the interval to the nearest head-aligned value 𝑔 𝑤,𝑖 = 𝑏 𝑤,𝑖 /𝑁 ℎ
+
+ · 𝑁 ℎ with 𝑔 𝑤,𝑖 ≥ 𝑎 𝑤,𝑖 , where 
+
+𝑁 ℎ denotes the number of attention heads. To unify the sampling rules across different kernels, we adopt simplified kernel abstractions. Attention kernels are treated as stan-dard multi-head attention (MHA) [ 37 ], since grouped-query atten-tion (GQA) [ 2 ] mainly reduces KV-cache storage without chang-ing the dominant compute and memory-access patterns. Similarly, grouped GEMM is reduced to the single-group case (i.e., dense GEMM), as grouping alters batching structure but not the funda-mental behavior. We further introduce a set of loop anchors to capture different loop behaviors. Let L denote the set of sampled loop counts. The resulting profiling points are the pairs ⟨𝐺, 𝐿 ⟩ with 𝐺 ∈ G and 𝐿 ∈ L .This design covers a wide range of grid sizes and loop counts while keeping the profiling budget explicitly controlled by the parameters 
+
+(𝑊 , 𝐼 ) and the number of loop anchors. 
+
+From sampled ⟨𝐺, 𝐿 ⟩ pairs to executable workloads. We gen-erate concrete kernel workloads from the sampled ⟨𝐺, 𝐿 ⟩ pairs. For GEMM-like kernels, the sampled 𝐺 corresponds to the total number of thread blocks, which has already been factored into the 2D grid dimensions ⟨𝑚 𝐺 , 𝑛 𝐺 ⟩ during the sampling phase. Given a macro config cmacro = ⟨𝑇 𝑀 ,𝑇 𝑁 ,𝑇 𝐾 ⟩, the concrete workload dimensions are directly instantiated as: 
+
+𝑀 = 𝑚 𝐺 𝑇 𝑀 , 𝑁 = 𝑛 𝐺 𝑇 𝑁 , 𝐾 = 𝐿 𝑇 𝐾 . (5) For attention kernels, the grid size 𝐺 corresponds to the number of thread blocks distributed across attention heads and query tiles. Under the head-parallel launch structure, each head processes 𝐺 /𝑁 ℎ
+
+query tiles. Given a macro config cmacro = ⟨𝑇 𝑄 ,𝑇 𝐾𝑉 ⟩, the workload dimensions become 
+
+𝑆 𝑞 = 𝐺 𝑁 ℎ
+
+𝑇 𝑄 , 𝑆 𝑘𝑣 = 𝐿 𝑇 𝐾𝑉 . (6) Despite different kernel semantics, both cases follow the same 
+
+⟨𝐺, 𝐿 ⟩ abstraction, enabling a unified profiling framework across heterogeneous kernels. 
+
+Micro-config evaluation under the fixed structure. For each structural anchor ⟨𝐺, 𝐿, cmacro ⟩, we evaluate all feasible cmicro ∈Cmicro using PyTorch Profiler [ 26 ] as the unified data collection tool. For each candidate config, we run 3 warm-up iterations followed by 5 measured iterations. 
+
+Profiling complexity and output. The total number of profiling samples 𝑁 profile is 
+
+𝑁 profile = |G| · |L| · |C macro | · |C micro |. (7) The resulting dataset records ⟨𝐺, 𝐿, 𝑤, cmacro , cmicro , ¯𝑇 ⟩, where ¯𝑇 de-notes the average measured kernel latency. 
+
+## 4.3 Wave-aware Piecewise Bilinear Modeling 
+
+After sparse structural profiling, each sample is represented in the physical space by ⟨𝐺, 𝐿 ⟩, together with its measured latency under a feasible macro–micro config pair. A key observation in Section 3 is that latency is not globally smooth along the 𝐺 -axis: when 𝐺 
+
+crosses wave boundaries, the effective occupancy regime changes, leading to clear phase shifts in the latency surface. To preserve this pattern, we partition the profiling data by macro config cmacro and wave count 𝑤 , yielding disjoint buckets ⟨cmacro , 𝑤 ⟩,each corresponding to a relatively stable execution regime. This partitioning reduces cross-regime interference and simplifies lo-cal modeling. Within each ⟨cmacro , 𝑤 ⟩ bucket, we further organize data by loop count 𝐿 . For each fixed 𝐿 , the bucket contains 𝐼 sam-pled grid sizes (one from each sub-interval), each associated with potentially different optimal micro configurations. Instead of select-ing per-point optimal micro configs, we choose a shared c∗ 
+
+> micro
+
+(𝐿 )
+
+that minimizes the average latency across all sampled grid sizes in this ⟨cmacro , 𝑤, 𝐿 ⟩ group, and consistently use its measured latency values. Crucially, these selected c∗ 
+
+> micro
+
+(𝐿 ) are persistently cached as sparse anchor points in a lookup table to serve the runtime micro-retrieval phase (Section 4.4). This design enforces coherent micro behavior across 𝐺 , allowing the bilinear model to capture pure structural trends over ⟨𝐺, 𝐿 ⟩ while avoiding overfitting to pointwise micro-level variations under sparse sampling. For each ⟨cmacro , 𝑤 ⟩ bucket, we fit a compact bilinear latency model: 
+
+ˆ𝑇 (𝐺, 𝐿 | 𝜽 cmacro ,𝑤 ) = 𝛼 𝐺𝐿 + 𝛽 𝐺 + 𝛾 𝐿 + 𝛿, (8) where 𝜽 cmacro ,𝑤 = ⟨𝛼, 𝛽, 𝛾, 𝛿 ⟩ denotes the parameter tuple strictly tied to the given macro-config and wave count. This formulation provides a highly effective physical abstraction: the cross term 𝐺𝐿 
+
+captures the spatial-temporal coupling between the workload scale and loop iterations, while the linear terms 𝐺 and 𝐿 model the fun-damental wave scaling and loop execution baselines. Compared to higher-capacity data-driven regressors (e.g., decision trees and gradient-boosted trees such as XGBoost), this model remains math-ematically lightweight, incurs negligible inference overhead, and is highly stable under sparse profiling samples, making it particularly suitable for online kernel selection. 
+
+> 7Zhang et al.
+
+Ultimately, the output of this modeling stage is two lightweight, decoupled lookup tables: (1) Coefficient Table : Indexed by ⟨cmacro , 𝑤 ⟩,this table stores the bilinear parameter tuples 𝜽 cmacro ,𝑤 used for structural latency prediction. (2) Anchor-based Micro-config Ta-ble : Indexed by ⟨cmacro , 𝑤, 𝐿 ⟩, this table caches the shared optimal micro-configs c∗ 
+
+> micro
+
+(𝐿 ) identified during the profiling phase. As shown in Figure 6, these tables form the backbone for runtime kernel configuration. 
+
+## 4.4 Two-Stage Runtime Kernel Configuration 
+
+With these two decoupled lookup tables in place, we perform run-time kernel configuration in a two-stage process that directly mir-rors the macro/micro decomposition introduced in Section 4.1. The core design principle is to separate global structural optimization 
+
+(macro) from local execution tuning (micro), thereby avoiding a prohibitively expensive combinatorial search over the vast space 
+
+C.
+
+Stage I: Macro selection via table-driven latency prediction. 
+
+Given a runtime input x, we evaluate kernel latency for each can-didate macro-config cmacro ∈ C macro . First, we map the input to its physical coordinates ⟨𝐺, 𝐿 ⟩ under each candidate macro-config 
+
+cmacro , and determine the resulting wave count 𝑤 induced by the 
+
+cmacro . We then retrieve the corresponding parameter tuple 𝜽 cmacro ,𝑤 
+
+from the table and select the macro-config that minimizes the pre-dicted latency: 
+
+c∗ 
+
+> macro
+
+= arg min  
+
+> cmacro ∈ C macro
+
+ˆ𝑇 (𝐺, 𝐿 | 𝜽 cmacro ,𝑤 ). (9) This stage rapidly identifies the optimal workload structure by evaluating the lightweight analytical model, effectively capturing the dominant wave dynamics. 
+
+Stage II: Micro retrieval via proximal loop anchors. Once the optimal structure c∗ 
+
+> macro
+
+is fixed, its corresponding physical dimen-sions 𝐺 ∗ and 𝐿 ∗, as well as its wave count 𝑤 ∗, are firmly established. We then determine the optimal execution parameters c∗ 
+
+> micro
+
+∈ C micro 
+
+through a fast lookup to form the final config c∗ = ⟨c∗
+
+> macro
+
+, c∗
+
+> micro
+
+⟩.As established during the profiling phase, the selected bucket main-tains a lookup table of the shared optimal micro-configs c∗ 
+
+> micro
+
+(𝐿 ),pre-computed at sparse loop anchors 𝐿 𝑖 . For the runtime loop count 
+
+𝐿 ∗, we perform a nearest-neighbor retrieval on the stored anchor set Lc∗ 
+
+> macro ,𝑤 ∗
+
+:
+
+˜𝐿 = arg min  
+
+> 𝐿 𝑖 ∈ L c∗
+> macro ,𝑤 ∗
+
+|𝐿 ∗ − 𝐿 |. (10) The system then directly assigns the cached optimal micro config as-sociated with this proximal anchor, yielding c∗ 
+
+> micro
+
+from the anchor indexed by ˜𝐿 . This proximal retrieval strategy exploits the locality of optimization—where optimal pipeline depths and warp alloca-tions tend to be stable across neighboring loop counts—providing a robust mechanism to handle unseen loop values at negligible overhead. 
+
+Why two-stage works. This hierarchical approach reduces the runtime parameter configuration complexity from multiplicative (𝑂 (|C macro | · |C micro |) ) to additive ( 𝑂 (|C macro | + log |L|) ). Physically, it aligns with the hardware hierarchy: macro parameters primarily determine workload partitioning and wave structure, while micro parameters mainly refine intra-tile execution efficiency. By combin-ing analytical latency prediction using table-stored coefficients for macro-level selection with proximal anchor retrieval for micro-level tuning, our approach balances modeling fidelity with low runtime overhead. 
+
+## 4.5 Extrapolation for Robustness 
+
+Although sparse structural profiling covers the dominant operating regions, runtime workloads may still fall outside the profiled wave range. To handle this case, we augment each macro-config with an 
+
+extrapolation model . Specifically, besides the per-wave coefficient tuples, we merge samples from the last 𝑝 (e.g., 𝑝 = 10 ) observed waves and extract an additional set of extrapolation coefficients 
+
+𝜽 ext  
+
+> cmacro
+
+in the same ⟨𝐺, 𝐿 ⟩ space, along with a corresponding anchor-based micro-config table constructed from these waves. This design leverages the asymptotic linearity identified in Section 3.2, where latency was observed to scale linearly with 𝐺 in the saturation regime. This provides a stable continuation of the latency trend when the runtime wave index exceeds the profiled horizon. At inference time, the predictor follows a simple rule: it uses the wave-local coefficient tuple when the queried wave 𝑤 is inside the profiled range, and switches to the extrapolation coefficients otherwise. Formally: 
+
+ˆ𝑇 cmacro (𝐺, 𝐿, 𝑤 ) =
+
+
+
+ˆ𝑇 (𝐺, 𝐿 | 𝜽 cmacro ,𝑤 ), 𝑤 ≤ 𝑊 , 
+
+ˆ𝑇 (𝐺, 𝐿 | 𝜽 ext  
+
+> cmacro
+
+), 𝑤 > 𝑊 . (11) Correspondingly, the micro-config is retrieved from the micro-config table associated with the selected regime (profiled or extrap-olated), preserving the same low-overhead proximal retrieval path detailed in Section 4.4. Our robustness strategy is therefore twofold: (1) structural robust-ness , achieved by wave-indexed analytical modeling and asymptotic extrapolation to handle unseen wave regimes; and (2) local robust-ness , achieved by anchor-based micro retrieval, making the system resilient to moderate loop-depth shifts and profiling sparsity. To-gether, these dual mechanisms guarantee prediction continuity and configuration stability without introducing expensive online search. 
+
+## 5 Evaluation 5.1 Experiment Setup 
+
+Kernel Benchmarks. We evaluate three representative GPU ker-nels critical to LLM inference workloads: (1) Dense GEMM : BF16 kernels from DeepGEMM [ 13 ], featuring two variants tailored for NVIDIA Hopper and Blackwell architectures. (2) Grouped GEMM :The Triton-based Mixture-of-Experts (MoE) backend from SGLang [ 31 ]. (3) FlashAttention : The Triton attention backend from vLLM [ 28 , 39 ], serving as the default implementation for AMD GPUs. These ker-nels are selected because they dominate the computational cost of LLM inference, accounting for the majority (often over 80%) of end-to-end execution time [ 31 , 39 , 48 ]. In contrast to lightweight operators (e.g., RMSNorm or element-wise activations) that have trivial configuration spaces and negligible tuning gains, GEMM and Attention expose massive configuration spaces spanning both 
+
+> 8WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning
+
+macro- and micro-parameters. With the number of valid combina-tions typically ranging from 200 to over 3,000 per kernel, this combi-natorial complexity makes these kernels the primary performance bottlenecks and the most challenging targets for auto-tuning. 
+
+Hardware Platforms. We evaluate on five modern data-center GPUs from both NVIDIA and AMD: A100, H20, B200, MI308X, and MI355X. This setup enables intra- and cross-vendor comparisons, assessing the robustness of runtime kernel parameter configuration across architectures. 
+
+Software Environment. NVIDIA experiments utilize CUDA 12.8 on A100 and H20, and CUDA 13.0 on B200, while AMD experiments employ ROCm 6.4.3 on MI308X and ROCm 7.1.1 on MI355X. A100, H20, and B200 use PyTorch 2.9.1 with Triton 3.5.1; MI308X runs PyTorch 2.8.0 with Triton 3.4.0; and MI355X uses PyTorch 2.9.0 with Triton 3.4.0. 
+
+Baselines. We compare WaveTune against four representative runtime configuration baselines. (1) Default Heuristics : The static, human-designed configuration rules hardcoded in the original ker-nel implementations or framework source code [ 13 , 31 , 39 ]. (2) 
+
+Learned Cost Model (GBDT-based) : A gradient-boosted decision tree model (XGBoost [ 5 ]) trained as a surrogate cost model to predict kernel latency, representing a widely used paradigm for acceler-ating auto-tuning [ 6, 49 ]. (3) Learned Dispatch Policy (Tree-based) :A lightweight regression tree (Decision Tree) trained to directly map input shapes to configs, approximating data-driven dispatch logic commonly used in practice [ 28 ]. (4) Brute-Force Oracle : An exhaustive offline auto-tuning search that evaluates the entire con-figuration space for each input shape, serving as an empirical oracle for the best achievable kernel performance. To ensure a fair compar-ison, all learning-based baselines are trained on the same dataset used for training our model. 
+
+Dataset Construction. We construct comprehensive training and testing datasets to systematically evaluate both modeling accuracy and generalization across diverse workloads. All kernel execution measurements are collected using the PyTorch Profiler [26]. 
+
+Training Dataset. For Dense GEMM and Grouped GEMM, we config-ure 𝑊 = 40 , 𝐼 = 4, and the aspect-ratio upper bound 𝜏 = 1.1, gener-ating 160 grid points for each of five 𝐾 -dimension anchors spanning 
+
+[1024 , 5120 ]. For FlashAttention, we adapt the evaluated wave range 
+
+𝑊 ∈ [ 20 , 35 ] according to the query head count 𝑞ℎ𝑒𝑎𝑑 ∈ [ 16 , 128 ],where larger head counts correspond to larger wave ranges. With 
+
+𝐼 = 3 sub-intervals per wave, this yields 60–105 grid points per KV-length anchor, where KV sequence lengths are scaled by mul-tipliers in the range [1.0, 3.0] to induce varying intra-block loop counts 𝐿 . Profiling is performed independently on each hardware platform, where we collect approximately 74K configurations for Dense GEMM, 73K for Grouped GEMM, and 6.6K for FlashAtten-tion. The data collection process takes approximately 0.5 to 2 GPU hours per ⟨hardware, kernel ⟩ pair, depending on the workload scale and configuration space size. 
+
+Testing Dataset. To evaluate generalizability, our testing datasets cover extensive input regimes distinct from the training dataset. 
+
+• Dense GEMM: 26K samples. 𝑀 ∈ [ 64 , 16384 ], 𝑁 ∈ [ 384 , 8192 ],
+
+𝐾 ∈ [ 2048 , 8192 ].
+
+• FlashAttention: 2.8K samples. 𝑠𝑒𝑞𝑙𝑒𝑛 ∈ [ 64 , 16384 ], 𝑞ℎ𝑒𝑎𝑑 ∈[16 , 128 ], 𝑘𝑣ℎ𝑒𝑎𝑑 ∈ [ 2, 16 ], with a fixed head dimension of 128. 
+
+• Grouped GEMM: 7.1K samples. 𝑠𝑒𝑞𝑙𝑒𝑛 ∈ [64 , 16384 ], 𝐸 ∈[8, 32 ], 𝑡𝑜𝑝𝑘 ∈ [ 6, 10 ], 𝐻 ∈ [ 1280 , 7168 ], and 𝑁 ∈ [ 768 , 2560 ].To obtain the brute-force oracle, we perform exhaustive auto-tuning over the testing dataset for each ⟨hardware, kernel ⟩ pair. This pro-cess is prohibitively expensive and impractical for online deploy-ment, requiring approximately 10 to 600 GPU hours depending on workload scale, kernel complexity, and hardware characteristics. 
+
+Model Training. We configure both the learning-based baselines and our proposed analytical model using the collected profiling datasets. The Decision Tree is trained to directly predict the optimal config index from workload features. We use a maximum depth of 15, minimum samples per split of 30, and minimum samples per leaf of 15. XGBoost is trained as a regression-based cost model to predict kernel latency given both workload and configuration features, us-ing 600 estimators with maximum depth 10, learning rate 0.05, and subsample ratio 0.8; at inference, it evaluates all candidate configs and selects the one with minimum predicted latency. WaveTune fits a wave-conditioned analytical latency model using least-squares regression. Separate models are trained per macro-config and wave interval, and inference is performed via constant-time coefficient lookup. All models are trained independently per device to capture hardware-specific performance characteristics. Averaged over each 
+
+⟨hardware, kernel ⟩ pair, WaveTune requires only 0.09 MB, com-pared to 15.25 MB for the Decision Tree and 38.78 MB for XGBoost, indicating its efficiency for deployment. 
+
+## 5.2 Kernel-Level Performance 
+
+Figure 7 shows the geometric mean speedup of WaveTune and baselines, normalized to the default heuristic, across three repre-sentative kernels and five GPU architectures. Overall, WaveTune 
+
+consistently delivers the strongest performance among all methods, achieving 1.83 × speedup on FlashAttention, 1.27 × on Grouped GEMM and 1.04 × on Dense GEMM in terms of geometric mean across all hardware platforms, while remaining close to the Oracle upper bounds (2.00 ×, 1.46 ×, and 1.07 ×, respectively). Learning-based baselines exhibit pronounced cross-kernel in-stability. The Cost Model shows inconsistent behavior: 1.02 × on FlashAttention, 1.11 × on Grouped GEMM, but dropping to 0.86 × on Dense GEMM. Dispatch degrades even more dramatically, falling from 1.37 × on FlashAttention to 0.87 × on Grouped GEMM and further to 0.62 × on Dense GEMM. In contrast, WaveTune maintains consistent performance across all kernels without any regression, even in optimization-constrained regimes (e.g., Dense GEMM with only 1.07 × Oracle headroom). On Grouped GEMM, WaveTune achieves a 1.27 × speedup, with a larger gap to the Oracle (1.46 ×) than in other kernels. This gap arises from the inherent uncertainty in MoE token routing: tokens are dynamically assigned to experts at runtime, making per-expert token counts unpredictable. Accurately querying these distributions would require synchronization that breaks CPU–GPU asynchrony and incurs prohibitive overhead. As a result, WaveTune adopts a uniform approximation across experts, trading peak optimality for practical deployability. Despite this approximation, it still outper-forms all baselines and maintains stable gains across hardware, demonstrating robustness under real-world serving constraints.              
+
+> 9Zhang et al. H20 B200
+> (a) Dense GEMM
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Geometric Mean Speedup
+> A100 H20 B200 MI308X MI355X
+> (b) Grouped GEMM
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> A100 H20 B200 MI308X MI355X
+> (c) FlashAttention
+> 0
+> 1
+> 2
+> 3
+> Heuristic Cost Model (GBDT) Dispatch (Tree) Brute-Force WaveWeaver
+
+Figure 7: Kernel-level geometric mean speedup over the default heuristic across five GPU architectures. WaveTune consistently captures near-optimal performance while avoiding the performance degradations observed in learning-based baselines. 512 1024 2048 4096 8192 16384          
+
+> (a) Qwen3-30B-A3B B200
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> Speedup
+> 512 1024 2048 4096 8192 16384
+> (b) Qwen3-30B-A3B MI355X
+> Heuristic Cost Model (GBDT) Dispatch (Tree) Brute-Force WaveWeaver
+
+Figure 8: End-to-end TTFT speedup over the default heuristic during the prefill phase across varying input sequence lengths. Batch size is fixed at 4. 
+
+## 5.3 End-to-End Inference Performance 
+
+To evaluate the system-level impact of WaveTune , we integrate it into the Triton-based Grouped GEMM kernel for MoE workloads within the SGLang 0.5.8 inference engine. We do not modify the kernel implementation, but only replace the runtime configuration policy in the SGLang framework. Figure 8 reports the TTFT speedup of each method, normalized to the default heuristic, on NVIDIA B200 and AMD MI355X. Exper-iments are conducted for single-GPU inference using the Qwen3-30B-A3B [ 36 ] model with a fixed batch size of 4, while varying the input sequence length from 512 to 16,384 tokens to stress the prefill phase. We focus on TTFT as it is dominated by the prefill stage, where long input sequences induce large computational workloads and expose substantial configuration tuning opportunities. In con-trast, the decode stage operates on very small token counts per step, offering limited parallelism and leaving little room for config-uration optimization; in this regime, simple or fixed heuristics are typically sufficient to achieve near-optimal performance. Across both GPU architectures, WaveTune consistently delivers significant TTFT reductions, achieving up to 1.33 × speedup on MI355X and a peak 1.28 × speedup on B200. These end-to-end re-sults highlight a fundamental trade-off between configuration over-head and execution quality. Exhaustive online search (Brute-Force) incurs prohibitive runtime overhead. Triggering auto-tuning—even when combined with caching of the best configuration—can in-troduce second-level latency due to the need to evaluate a large configuration space. This overhead dominates TTFT at small se-quence lengths and makes it fundamentally impractical for latency-sensitive serving. As the sequence length increases, the search cost can be partially amortized over longer execution, but the overall performance remains worse than the default heuristic in end-to-end scenarios. Similarly, the GBDT-based Cost Model suffers from sub-stantial runtime overhead due to CPU-side inference. This overhead dominates in the low-latency regime, leading to severe slowdowns at small sequence lengths. As workload scales and GPU execution becomes the primary bottleneck, the CPU-side inference cost can be partially masked by asynchronous CPU–GPU execution. As a result, the Cost Model begins to recover on B200 and approaches the performance of WaveTune at 16,384 tokens. However, this be-havior does not generalize across architectures: on MI355X, even at the largest sequence length, it remains inferior to the default heuristic. In contrast, the Dispatch baseline introduces relatively low runtime overhead but exhibits consistently suboptimal con-fig choices across different input lengths, resulting in degraded or unstable performance. 
+
+WaveTune eliminates this trade-off by replacing expensive run-time search with an efficient model-based prediction mechanism. With lightweight table lookups and bilinear evaluation, it achieves near-zero overhead while retaining near-optimal performance. This enables WaveTune to consistently achieve the lowest TTFT across all sequence lengths, delivering robust gains in real-world LLM serving systems. 
+
+## 5.4 Runtime Overhead 
+
+To be viable for production serving, a configuration policy must make deterministic decisions within microseconds to avoid stalling the asynchronous GPU execution pipeline. Figure 9 quantifies the        
+
+> 10 WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning 10 010 110 210 310 410 510 6
+> Overhead ( s)
+> 0.75
+> 1.00
+> 1.25
+> 1.50
+> 1.75
+> 2.00
+> Geometric Mean Speedup  Kernel Type
+> Dense GEMM
+> Grouped GEMM
+> FlashAttention
+> Method
+> Heuristic
+> Cost Model (GBDT)
+> Dispatch (Tree)
+> Brute-Force
+> WaveWeaver
+
+Figure 9: Trade-off between runtime decision overhead (log scale) and overall geometric mean speedup. WaveTune lies in the favorable upper-left region. A100 H20 B200 MI308X MI355X 
+
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> Geometric Mean Speedup  Heuristic
+> Step
+> Linear
+> WaveWeaver
+
+Figure 10: Ablation study on FlashAttention, comparing the full WaveTune model against its Linear and Step variants. 
+
+trade-off between execution speedup and runtime decision over-head, providing a concrete breakdown of the system-level behav-ior observed in Section 5.3. The GBDT-based Cost Model incurs substantial CPU-side inference overhead due to sequential tree tra-versal across multiple candidates, resulting in decision latencies ranging from 1,822 𝜇 s to 2,965 𝜇 s , which already exceeds the exe-cution time of most kernels. The Dispatch baseline (Decision Tree) reduces this overhead but still introduces around 60 𝜇 s of branching cost, while failing to consistently select high-quality configs. In contrast, WaveTune achieves near-oracle execution perfor-mance with a tightly bounded runtime overhead of 5–6 𝜇 s across all workloads, enabled by its 𝑂 (1) dual-table lookup and lightweight bi-linear evaluation. For heavily optimized kernels such as DeepGEMM ,the default heuristic itself incurs a 76 𝜇 s overhead due to on-the-fly hardware constraint evaluation, whereas WaveTune reduces this cost to 6 𝜇 s (a 12 × reduction) while also improving execution latency. Overall, WaveTune effectively eliminates the practical trade-off between configuration quality and decision latency, delivering both low overhead and strong performance consistently. 
+
+## 5.5 Ablation Study 
+
+5.5.1 Effect of Modeling Components. To validate the core design of 
+
+WaveTune ’s latency modeling, we conduct an ablation study on the FlashAttention kernel across five GPU architectures, using the same training data and evaluation setup as in the main experiments. We compare the full model against two degraded variants: (i) Linear ,which removes wave-aware partitioning and fits a single bilinear model over the entire space, and (ii) Step , which removes intra-wave linear structure and models latency solely as a function of wave count. Figure 10 reports geometric mean speedups normalized to the default heuristic. The full WaveTune model achieves the highest overall speedup of 1.83 ×, while the Linear and Step variants drop to 1.60 × and 1.39 ×,respectively. The degradation of the Linear variant indicates that a global bilinear model fails to capture the latency discontinuities at wave boundaries. This limitation is particularly severe in the small-wave regime, where discrete wave effects dominate and the model incurs large errors, leading to poor configuration selection. In contrast, its performance improves at larger wave counts, where the latency surface becomes increasingly smooth and closer to linear, consistent with the asymptotic behavior observed in Section 3.2. As a result, the Linear model exhibits unstable performance across regimes and remains suboptimal overall (e.g., 1.91 × → 1.58 × on B200 and 1.72 × → 1.48 × on H20). The Step variant performs worse, as it ignores intra-wave scaling and treats all configurations within a wave as equivalent, reducing its ability to differentiate execution efficiency; this even results in a regression on MI355X (0.98 ×). These results show that neither global continuous modeling nor pure step modeling is sufficient in isolation. Accurate performance modeling requires jointly capturing inter-wave boundaries and intra-wave dynamics. 
+
+5.5.2 Effect of Profiling Range (𝑊 , 𝐼 ). We further study the impact of the profiling range by varying the maximum wave count 𝑊 and the number of intervals 𝐼 , as shown in Figure 11. The experiments are conducted on NVIDIA B200 with attention head count fixed to 16, while all other settings follow the main evaluation. For sequence lengths in the range [64 , 1023 ], where the corre-sponding wave counts 𝑤 in the test set fall within [1, 7], increasing 
+
+𝐼 consistently improves performance, while increasing 𝑊 from 5 to 10 also yields gains, but saturates beyond this point. This is because the maximum wave count in the test set is below 10, and thus fur-ther expanding the profiling range provides no additional coverage. In contrast, for sequence lengths in the range [1024 , 16384 ], where 
+
+𝑤 spans a much wider range [1, 108 ], performance quickly satu-rates once 𝑊 reaches 10, and varying 𝐼 has minimal impact. This is because execution becomes more stable and approaches linear scaling at larger sequence lengths, making small 𝑊 and coarse 𝐼 
+
+sufficient to capture the dominant performance characteristics. Im-portantly, despite the limited profiling range, the model maintains strong performance even when runtime wave counts exceed the profiled horizon, validating the effectiveness of our extrapolation mechanism. In general, these results show that WaveTune achieves high performance with sparse coverage of the (𝑊 , 𝐼 ) space. 
+
+## 6 Related Work 
+
+Auto-Tuning for GPU Kernels. Search-based auto-tuning has been widely adopted to optimize GPU kernel performance by explor-ing large configuration spaces. Early systems such as AutoTVM [ 6 ]and Ansor [ 49 ] employ learned cost models (e.g., gradient-boosted trees) to guide search and reduce tuning cost. Subsequent works further improve search efficiency through program sampling and transfer learning [ 32 ]. Analytical approaches such as Roller [ 50 ]attempt to model hardware behavior to prune the search space. 
+
+> 11
+
+Zhang et al. 5 10 20 30    
+
+> W (Maximum Profiled Wave Count)
+> 1.34
+> 1.36
+> 1.38
+> 1.40
+> Geometric Mean Speedup  Sequence Length 64 1023
+> I = 2
+> I = 3
+> I = 5
+> 510 20 30
+> 1.25
+> 1.50
+> 1.75
+> 2.00
+> 2.25
+> 2.50
+> Sequence Length 1024 16384
+> I = 2
+> I = 3
+> I = 5
+
+Figure 11: Impact of profiling range (𝑊 , 𝐼 ) on performance across different sequence length ranges. 
+
+However, these methods are primarily designed for offline opti-mization and still rely on search at deployment time, making them unsuitable for latency-critical online serving scenarios. 
+
+Heuristic-based Configuration. In production systems, runtime configuration is typically governed by manually designed heuris-tics embedded in kernel libraries and frameworks [ 8 , 25 , 28 , 31 ,39 ]. These heuristics provide low-latency decisions but are labor-intensive to develop and often fail to generalize across diverse workloads and hardware architectures. 
+
+GPU Performance Modeling. Prior work on GPU performance modeling includes cycle-accurate simulators [ 3, 15 , 34 ], analytical models [ 4 , 17 , 46 ], and data-driven approaches [ 18 , 44 , 48 ]. While these methods aim to predict kernel latency or throughput, they typically focus on performance estimation rather than direct config-uration. High-fidelity simulators incur prohibitive computational cost, while analytical and learned models often rely on simplified assumptions or introduce non-trivial inference overhead. As a re-sult, these approaches are not well suited for real-time, fine-grained kernel configuration in latency-critical serving scenarios. 
+
+## 7 Conclusion 
+
+We present WaveTune , a runtime kernel configuration framework that resolves the trade-off between execution optimality and deci-sion overhead in dynamic LLM serving, enabling accurate latency prediction with near-zero overhead. Across three kernels and five GPU architectures, it achieves up to 1.83 × kernel speedup and 
+
+1.33 × TTFT reduction, while reducing decision overhead by five orders of magnitude over exhaustive search, demonstrating that lightweight wave-aware modeling enables high performance with efficient runtime decision making. 
+
+## References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwa-tra, Bhargav S. Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput–Latency Tradeoff in LLM Inference with Sarathi-Serve. In 
+
+Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, Santa Clara, CA, 117–134. [2] Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebron, and Sumit Sanghai. 2023. GQA: Training Generalized Multi-Query Trans-former Models from Multi-Head Checkpoints. arXiv preprint arXiv:2305.13245 
+
+(2023). [3] Ali Bakhoda, George L. Yuan, Wilson W. L. Fung, Henry Wong, and Tor M. Aamodt. 2009. Analyzing CUDA workloads using a detailed GPU simulator. In 
+
+IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) . IEEE, 163–174. https://doi.org/10.1109/ISPASS.2009.4919648 [4] Shiheng Cao, Junmin Wu, Junshi Chen, Hong An, and Zhibin Yu. 2025. AMALI: An Analytical Model for Accurately Modeling LLM Inference on Modern GPUs. In 
+
+Proceedings of the 52nd Annual International Symposium on Computer Architecture (ISCA ’25) (Tokyo, Japan). ACM, 1495–1508. https://doi.org/10.1145/3695053. 3731064 [5] Tianqi Chen and Carlos Guestrin. 2016. XGBoost: A Scalable Tree Boosting System. In Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining . 785–794. [6] Tianqi Chen, Lianmin Zheng, Eddie Yan, Ziheng Jiang, Thierry Moreau, Luis Ceze, Carlos Guestrin, and Arvind Krishnamurthy. 2018. Learning to Optimize Tensor Programs. In Proceedings of the 32nd Conference on Neural Information Processing Systems (NeurIPS 2018) .[7] Benjamin Y. Cho, Jeageun Jung, and Mattan Erez. 2020. Accelerating Bandwidth-Bound Deep Learning Inference with Main-Memory Accelerators. arXiv:2012.00158 [cs.DC] [8] NVIDIA Corporation. 2025. cuBLAS. https://developer.nvidia.com/cublas. Ac-cessed: 2026-01-27. [9] NVIDIA Corporation. 2025. Matrix Multiplication Background User’s Guide. https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html. Section “Wave Quantization”. [10] Noïc Crouzet, Thomas Carle, and Christine Rochange. 2025. Time-predictable warp scheduling in a GPU. Microprocessors and Microsystems 118 (2025), 105203. https://doi.org/10.1016/j.micpro.2025.105203 [11] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems , Vol. 35. Curran Associates, Inc., 16344–16359. [12] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2023. FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning. In Proceedings of the 37th Conference on Neural Information Processing Systems (NeurIPS) .[13] DeepSeek-AI Contributors. 2024. DeepGEMM. https://github.com/deepseek-ai/DeepGEMM. Accessed: 2026-01-27. [14] Atiyeh Gheibi-Fetrat, Amirsaeed Ahmadi-Tonekaboni, Farzam Koohi-Ronaghi, Pariya Hajipour, Sana Babayan-Vanestan, Fatemeh Fotouhi, Elahe Mortazavian-Farsani, Pouria Khajehpour-Dezfouli, Sepideh Safari, Shaahin Hessabi, and Hamid Sarbazi-Azad. 2025. RTGPU: Real-Time Computing with Graphics Pro-cessing Units. arXiv preprint arXiv:2507.06069 (2025). https://arxiv.org/abs/2507. 06069 [15] Mahmoud Khairy, Zhesheng Shen, Tor M. Aamodt, and Timothy G. Rogers. 2020. Accel-Sim: An Extensible Simulation Framework for Validated GPU Mod-eling. In 47th Annual International Symposium on Computer Architecture (ISCA) .IEEE/ACM, 473–486. https://doi.org/10.1109/ISCA45697.2020.00047 [16] Woosuk Kwon, Zhuohan Li, Sheng Zhuang, Ying Sheng, Bowen Yu, Joseph E. Gonzalez, and Ion Stoica. 2024. vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention. In Proceedings of the 7th Conference on Machine Learning and Systems (MLSys) .[17] Jounghoo Lee, Yeonan Ha, Suhyun Lee, Jinyoung Woo, Jinho Lee, Hanhwi Jang, and Youngsok Kim. 2022. GCOM: a detailed GPU core model for accurate analyt-ical modeling of modern GPUs. In Proceedings of the 49th Annual International Symposium on Computer Architecture (ISCA ’22) (New York, New York). Asso-ciation for Computing Machinery, 424–436. https://doi.org/10.1145/3470496. 3527384 [18] Seonho Lee, Amar Phanishayee, and Divya Mahajan. 2025. Forecasting GPU Performance for Deep Learning Training and Inference. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS ’25) . Association for Computing Machinery, New York, NY, USA, 493–508. https://doi.org/10.1145/3669940. 3707265 [19] Ang Li, Shuaiwen Leon Song, Weifeng Liu, Xu Liu, Akash Kumar, and Henk Corporaal. 2017. Locality-Aware CTA Clustering for Modern GPUs. In Proceed-ings of the 22nd International Conference on Architectural Support for Program-ming Languages and Operating Systems (ASPLOS) . ACM, Xi’an, China, 297–311. https://doi.org/10.1145/3037697.3037709 [20] Ying Li, Yifan Sun, and Adwait Jog. 2023. Path Forward Beyond Simulators: Fast and Accurate GPU Execution Time Prediction for DNN Workloads. In Proceedings of the 56th IEEE/ACM International Symposium on Microarchitecture (MICRO) .380–394. [21] Milo Lurati, Stijn Heldens, Alessio Sclocco, and Ben van Werkhoven. 2024. Bring-ing Auto-tuning to HIP: Analysis of Tuning Impact and Difficulty on AMD and Nvidia GPUs. arXiv preprint. https://arxiv.org/abs/2407.11488 arXiv:2407.11488. [22] Xinxin Mei and Xiaowen Chu. 2015. Dissecting GPU Memory Hierarchy through Fine-Grained Microbenchmarking. arXiv preprint arXiv:1509.02308 (2015). [23] NVIDIA Corporation. 2022. NVIDIA H100 Tensor Core GPU Whitepaper. NVIDIA Hopper Architecture White Paper. https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-tensor-c. [24] NVIDIA Corporation. 2025. CUDA C Programming Guide . https://docs.nvidia. com/cuda/cuda-c-programming-guide/ Version 13.0. [25] NVIDIA Corporation. 2025. CUTLASS Documentation. https://docs.nvidia.com/ cutlass/index.html. Accessed: 2025-10-18. 12 WaveTune: Wave-aware Bilinear Modeling for Efficient GPU Kernel Auto-tuning 
+
+[26] PyTorch Contributors. [n. d.]. PyTorch Profiler. https://pytorch.org/docs/stable/ profiler.html. Accessed: 2026-02-12. [27] Burkhard Ringlein, Thomas Parnell, and Radu Stoica. 2025. GPU Performance Portability needs Autotuning. arXiv preprint. https://arxiv.org/abs/2505.03780 arXiv:2505.03780. [28] Burkhard Ringlein, Jan van Lunteren, Radu Stoica, and Thomas Parnell. 2025. The Anatomy of a Triton Attention Kernel. arXiv preprint. https://arxiv.org/ abs/2511.11581 arXiv:2511.11581. [29] Timothy G. Rogers, Mike O’Connor, and Tor M. Aamodt. 2013. Divergence-Aware Warp Scheduling. In Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) . IEEE, 99–110. [30] Richard Schoonhoven, Ben van Werkhoven, and Kees Joost Batenburg. 2023. Benchmarking Optimization Algorithms for Auto-Tuning GPU Kernels. IEEE Transactions on Evolutionary Computation 27, 2 (2023), 312–325. https://doi.org/ 10.1109/TEVC.2022.3210654 [31] SGLang Team. 2024. SGLang: Efficient Execution Framework for Large Language Models. https://github.com/sgl-project/sglang. [32] Junru Shao, Xiyou Zhou, Siyuan Feng, Bohan Hou, Ruihang Lai, Hongyi Jin, Wuwei Lin, Masahiro Masuda, Cody Hao Yu, and Tianqi Chen. 2022. Tensor program optimization with probabilistic programs. In Advances in Neural Infor-mation Processing Systems , Vol. 35. 35515–35528. [33] Shuaiwen Leon Song, Ang Li, Xu Liu, Akash Kumar, and Henk Corporaal. 2016. Understanding the Impact of CTA Scheduling on GPU Performance. 
+
+IEEE Transactions on Parallel and Distributed Systems 27, 6 (2016), 1738–1751. https://doi.org/10.1109/TPDS.2015.2475741 [34] Yifan Sun, Trinayan Baruah, Saiful A. Mojumder, Shi Dong, Xiang Gong, Shane Treadway, Yuhui Bao, Spencer Hance, Carter McCardwell, Vincent Zhao, and et al. 2019. MGPU-Sim: Enabling Multi-GPU Performance Modeling and Optimiza-tion. In Proceedings of the 46th Annual International Symposium on Computer Architecture (ISCA) . ACM, 197–209. https://doi.org/10.1145/3307650.3322230 [35] Ryan Swann, Muhammad Osama, Xiaohu Guo, Bryant Nelson, Lixun Zhang, Alex Brown, Yen Ong, Ali Yazdani, Sean Siddens, Ganesh Dasika, and Alex Underwood. 2025. tritonBLAS: Triton-based Analytical Approach for GEMM Kernel Parameter Selection. arXiv preprint arXiv:2512.04226 (2025). https: //arxiv.org/abs/2512.04226 [36] Qwen Team. 2025. Qwen3 Technical Report. arXiv:2505.09388 [cs.CL] https: //arxiv.org/abs/2505.09388 [37] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention Is All You Need. In Advances in Neural Information Processing Systems (NeurIPS) .[38] Andrey Vladimirov. 2024. CUTLASS Tutorial: Persistent Kernels and Stream-K. https://research.colfax-intl.com/cutlass-tutorial-persistent-kernels-and-stream-k/. Accessed: 2025-10-18. [39] vLLM Team. 2023. vLLM: Easy, Fast, and Cheap LLM Serving with Paged Atten-tion. https://github.com/vllm-project/vllm. [40] Xizheng Wang, Qingxu Li, Yichi Xu, Gang Lu, Dan Li, Li Chen, Heyang Zhou, Linkang Zheng, Sen Zhang, Yikai Zhu, Yang Liu, Pengcheng Zhang, Kun Qian, Kunling He, Jiaqi Gao, Ennan Zhai, Dennis Cai, and Binzhang Fu. 2025. SimAI: Unifying Architecture Design and Performance Tuning for Large-Scale Large Language Model Training with Scalability and Precision. In Proceedings of the 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI ’25) . USENIX Association, Philadelphia, PA, USA, 541–558. https://www.usenix. org/conference/nsdi25/presentation/wang-xizheng-simai [41] Samuel Williams, Andrew Waterman, and David Patterson. 2009. Roofline: An Insightful Visual Performance Model for Multicore Architectures. Commun. ACM 52, 4 (2009), 65–76. [42] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. 2025. FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving. In Proceedings of the 8th Conference on Machine Learning and Systems (MLSys 2025) . MLSys, Santa Clara, CA, USA. [43] Gyeong-In Yu, Juho Jeong, Geon-Woo Kim, Soojeong Lee, Minsik Jeon, Jaeho Shin, Sung-Eui Chung, and Byung-Gon Lee. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .[44] Geoffrey X. Yu, Yubo Gao, Pavel Golikov, and Gennady Pekhimenko. 2021. Habi-tat: A Runtime-Based Computational Performance Predictor for Deep Neural Network Training. In 2021 USENIX Annual Technical Conference (USENIX ATC 21) . USENIX Association, 503–521. https://www.usenix.org/conference/atc21/ presentation/yu [45] Yongseung Yu, Donghyun Son, Younghyun Lee, Sunghyun Park, Giha Ryu, Myeongjin Cho, Jiwon Seo, and Yongjun Park. 2023. Tailoring CUTLASS GEMM using Supervised Learning. In Proceedings of the 41st IEEE International Conference on Computer Design (ICCD) . IEEE, 465–474. https://doi.org/10.1109/ICCD58817. 2023.00077 [46] Hengrui Zhang, August Ning, Rohan Baskar Prabhakar, and David Wentzlaff. 2025. LLMCompass: Enabling Efficient Hardware Design for Large Language Model Inference. In Proceedings of the 51st Annual International Symposium on Computer Architecture (Buenos Aires, Argentina) (ISCA ’24) . IEEE Press, 1080–1096. https://doi.org/10.1109/ISCA59077.2024.00082 [47] Jie Zhang and Adwait Jog. 2017. TLP-aware Cooperative Scheduling for Efficient GPU Memory System Utilization. In Proceedings of the 44th Annual International Symposium on Computer Architecture (ISCA ’17) . ACM, 93–104. https://doi.org/ 10.1145/3079856.3080216 [48] Kaixuan Zhang, Yunfan Cui, Shuhao Zhang, Chutong Ding, Shiyou Qian, Lup-ing Wang, Jian Cao, Guangtao Xue, Cheng Huang, Guodong Yang, and Liping Zhang. 2026. SynPerf: A Hybrid Analytical-ML Framework for GPU Performance Prediction. arXiv:2601.14910 [cs.PF] https://arxiv.org/abs/2601.14910 [49] Lianmin Zheng, Chengfan Jia, Minmin Sun, Zhao Wu, Cody Hao Yu, Amr Haj-Ali, Yida Wang, Jun Yang, Danyang Zhuo, Koushik Sen, Joseph E. Gonzalez, and Ion Stoica. 2020. Ansor: Generating High-Performance Tensor Programs for Deep Learning. In Proceedings of the 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 2020) .[50] Hongyu Zhu, Ruofan Wu, Yijia Diao, Shanbin Ke, Haoyu Li, Chen Zhang, Jilong Xue, Lingxiao Ma, Yuqing Xia, Wei Cui, Fan Yang, Mao Yang, Lidong Zhou, Asaf Cidon, and Gennady Pekhimenko. 2022. ROLLER: Fast and Efficient Tensor Compilation for Deep Learning. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . USENIX Association, 233–248. 13
