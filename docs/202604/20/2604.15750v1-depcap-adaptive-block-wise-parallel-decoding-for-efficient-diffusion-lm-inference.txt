@@ -1,0 +1,623 @@
+Title: DepCap: Adaptive Block-Wise Parallel Decoding for Efficient Diffusion LM Inference
+
+URL Source: https://arxiv.org/pdf/2604.15750v1
+
+Published Time: Mon, 20 Apr 2026 00:32:02 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# DepCap: Adaptive Block-Wise Parallel Decoding for Efficient Diffusion LM Inference 
+
+Xiang Xia 1 Wuyang Zhang 1∗ Jiazheng Liu 1 Cheng Yan 1 Yanyong Zhang 1,21University of Science and Technology of China 
+
+> 2
+
+Institute of Artificial Intelligence, Hefei Comprehensive National Science Center 
+
+xxia@stu.ecnu.edu.cn, {liujiazheng25, yc_sa22218099}@mail.ustc.edu.cn, {wuyangz, yanyongz}@ustc.edu.cn 
+
+## Abstract 
+
+Diffusion language models (DLMs) have emerged as a promising alternative to autoregressive language generation due to their potential for parallel decoding and global refinement of the entire sequence. To unlock this potential, DLM inference must carefully balance generation quality and decoding speed. Recent block-wise DLM decoding methods improve this trade-off by performing diffusion-based decoding sequentially in blocks. However, existing methods typically rely on fixed block schedules or current-step local signals to determine block boundaries, and use conservative confidence-based parallel decoding to avoid conflicts, limiting the quality-speed trade-off. In this paper, we argue that block-wise DLM inference requires more suitable signals for its two core decisions: cross-step signals for determining block boundaries, and token-level conflict signals for parallel decoding. Based on this view, we propose DepCap, a training-free framework for efficient block-wise DLM inference. Specifically, DepCap instantiates the cross-step signal as the influence of the last decoded block and uses it to adaptively determine how far the next block should extend, while identifying a conflict-free subset of tokens for safe parallel decoding within each block, enabling substantial inference acceleration with negligible quality degradation. DepCap is a plug-and-play method applicable to various DLMs, and compatible with existing KV-cache strategies for block-wise DLM. An information-theoretic analysis further suggests that the cumulative last-block influence on a candidate block is approximately additive across tokens, supporting the proposed block-partitioning criterion. Experimental results show that DepCap achieves favorable speed-quality trade-offs across multiple DLM backbones and reasoning and coding benchmarks, with up to 5.63 × speedup without significant performance degradation. 
+
+## 1 Introduction 
+
+Diffusion language models (DLMs) [ 23 , 20 , 37 ] have emerged as a promising alternative to autore-gressive language generation because they can refine many token positions in parallel instead of decoding tokens strictly from left to right. Unlike autoregressive models, DLMs can use bidirectional attention during the generation process, allowing each position to be updated using both left and right context. This property makes DLMs appealing for flexible text generation, especially on tasks such as reasoning [ 39 , 15 ] and coding [ 12 ], where decoding efficiency and rich contextual modeling are both important. Recent open-source diffusion large language models (dLLMs), including the Mercury [ 18 ], Dream [ 36 ] and LLaDA [ 29 , 5] families, further show that this paradigm is increasingly practical and promising. However, due to the multi-step denoising process and the need for global refinement 
+
+> ∗Corresponding Author Preprint.
+> arXiv:2604.15750v1 [cs.LG] 17 Apr 2026
+
+during inference, DLMs inherently face a trade-off between generation quality and speed, making efficient inference a critical challenge [35, 27]. To fully unlock the parallel decoding potential of DLMs, recent work has increasingly adopted block-wise decoding strategies [29, 35, 1] for inference. Instead of refining the entire unfinished sequence at every step, block-wise DLMs decode the output sequentially in blocks, which requires two key inference-time decisions: how to determine the next block boundary and which tokens to decode in parallel within the current block . This strategy significantly reduces the refinement scope at each iteration while allowing each decoded block to serve as clean context for subsequent blocks, thereby improving the practicality of DLM inference. It also enables subsequent acceleration techniques, including KV-cache mechanisms [27, 35, 31] tailored to block-wise DLM inference. However, existing block-wise methods still leave a substantial quality-speed gap. The main limitation is that the two key inference decisions in block-wise DLM decoding are still made from suboptimal signals. First, at the block level, most methods either use a fixed block size or determine the next boundary from signals available only at the current decoding step, rather than from signals that reflect the evolving multi-step denoising process of DLM inference. Second, at the token level, many methods rely on conservative confidence-based parallel decoding strategies. Such strategies treat candidate positions largely independently and fail to account for token conflicts: lowering the confidence threshold may improve decoding speed, but it can also decode conflicting tokens simultaneously, leading to degraded quality [ 26 ]. As a result, current methods do not fully exploit the signals needed for either adaptive block partitioning or within-block parallel decoding, leading to a suboptimal trade-off between generation quality and decoding speed. 
+
+Problem. How can block-wise DLM inference use more suitable signals for its two core decisions of block partitioning and within-block parallel decoding, so as to improve decoding speed while preserving generation quality and avoiding retraining? 
+
+Contribution. To address these challenges, we propose DepCap , a training-free dependency-aware framework for block-wise DLM inference. The central idea is to make the two inference decisions in block-wise decoding depend on more suitable signals. At the block level, DepCap goes beyond fixed schedules and current-step local cues by introducing a cross-step signal derived from the last decoded block. Specifically, the proposed dependency-guided adaptive block partitioning strategy (DepGA-Block) measures how strongly the last decoded block influences future positions and combines this signal with predictive uncertainty through a dependency score to determine the next block boundary. Within each chosen block, a conflict-aware parallel decoding strategy (CAP-Decoding) explicitly detects token conflicts and decodes only a conflict-free subset in parallel, enabling more aggressive parallel decoding without sacrificing generation quality. DepCap is plug-and-play, compatible with existing block-wise cache strategies, and supported by an information-theoretic analysis showing that the cumulative influence of last decoded block is approximately additive across tokens, which helps explain the proposed block-partitioning criterion. Experimental results verify that DepCap achieves favorable speed-quality trade-offs across different DLM backbones, including the LLaDA [ 29 , 40 ] and the Dream [ 36 ] family, on reasoning and coding benchmarks. In LLADA family, DepCap attains an average 3.57 × speedup over vanilla decoding strategy without significant performance degradation and in some cases improves both throughput and accuracy. For example, on the MBPP benchmark with LLaDA-1.5, DepCap achieves a 5.63 ×
+
+speedup while improving accuracy by 7.4% relative. The subsequent sections present the related work and preliminaries, describe the proposed DepCap method, show the empirical results, and conclude the paper. 
+
+## 2 Related Work 
+
+Diffusion language models. Diffusion language models (DLMs) [ 20 , 37 ] formulate text generation as an iterative denoising process rather than a strictly left-to-right prediction process. This paradigm originates from diffusion modeling for continuous domains [ 13 ] and has been extended to discrete text generation [ 10 , 2]. A key advantage of DLMs is their ability to perform parallel token updates and leverage bidirectional context during inference, enabling non-sequential generation that differs fundamentally from autoregressive generation. Recent work [ 11 , 29 , 36 , 8] has further scaled DLMs to stronger language modeling settings, showing that diffusion-based generation is becoming 2increasingly practical, with models reaching 100B parameters (e.g., LLaDA 2.0 [ 5]). Compared to autoregressive language models, this non-sequential paradigm offers greater flexibility in generation but introduces the challenge of balancing generation quality and decoding speed. 
+
+Block-wise decoding in DLMs. To improve the generation speed-quality trade-off of DLM inference, recent work adopts a block-wise decoding strategy [ 1, 35 , 29 , 34 ], where the sequence is decoded sequentially in blocks rather than repeatedly refining unfinished positions at every step. Existing block-wise DLMs often rely on fixed block sizes, which ignores that the suitable block size can vary across inputs and even across different stages of the same generation process. Therefore, more recent approaches attempt to dynamically adjust block size. AdaBlock [ 24 ] determines block boundaries by examining semantic structure, such as special tokens (e.g., “\n”), while Swordsman [ 38 ] partitions blocks based on entropy changes across adjacent positions. A concurrent work, GeoBlock [ 32 ], infers block size from attention-derived dependency geometry. However, these methods primarily rely on signals available at the current decoding step, neglecting the temporal dynamics inherent in the multi-step denoising process. As a result, they fail to exploit cross-step information that could provide stronger guidance for adaptive block size selection. 
+
+Efficient inference for DLMs. To further unlock the parallel generation potential of DLMs, existing work mainly focuses on two directions: decoding strategies and cache techniques. For decoding strategies, recent methods accelerate inference via heuristic-based parallel decoding [ 35 , 26 ], learned parallel decoding [ 4, 7], denoising-process redesign [ 33 ], and speculative decoding [ 14 , 16 , 19 ]. Cache techniques [ 35 , 27 , 22 , 17 ] form the other direction, and their core idea is typically to refresh cached states at selected intervals based on the similarity of hidden states across adjacent decoding steps. While these approaches show that substantial DLM inference acceleration is possible, achieving an effective balance between generation quality and decoding speed remains a significant challenge. 
+
+## 3 Preliminaries 
+
+This section introduces diffusion language model inference and the block-wise decoding setting considered in this paper. 
+
+Diffusion language model inference. Diffusion language models (DLMs) considered here adopt a masked language modeling formulation. Let V denote the token vocabulary, including the special token [MASK] . Given a prompt x, let y = ( y1, . . . , y N ) ∈ V N denote the target sequence to be generated. In inference, the model takes as input the prompt x followed by the current target sequence 
+
+y. At the beginning of inference, this sequence is initialized as yT = ( [MASK] , . . . , [MASK] ). At denoising step t, the current state of the target sequence is yt = ( yt
+
+> 1
+
+, . . . , y tN ) ∈ V N . The masked positions at step t are M t = {i : yti = [MASK] }. At each step, the model first predicts token distributions for positions in M t, and then a decoding strategy chooses a subset St ⊆ M t to decode. The decoding process can be defined as 
+
+yt−1 
+
+> i
+
+=
+
+
+
+ˆyti , i ∈ St,
+
+[MASK] , i ∈ M t \ St,yti , i / ∈ M t,
+
+(1) where ˆyti is the predicted token at position i. Repeating this iterative decoding process gradually removes mask tokens from yt until all masked positions have been decoded, and the final sequence satisfies y0 ∈ (V \ { [MASK] })N . Unlike autoregressive decoding, each denoising step can update multiple positions in parallel while using bidirectional context. 
+
+Block-wise decoding. To better balance generation quality and speed, recent DLM inference methods often partition the target sequence into a sequence of non-overlapping blocks B = {B1, . . . , B K }.
+
+During inference, blocks are decoded sequentially: block Bk+1 starts only after block Bk has been decoded. For brevity, we define the current decoding block at step t as Bt ∈ B . Then block-wise decoding restricts the decoding subset to St ⊆ M t ∩ Bt. Equivalently, the sequence update becomes 
+
+yt−1 
+
+> i
+
+=
+
+
+
+ˆyti , i ∈ St,
+
+[MASK] , i ∈ (M t ∩ Bt) \ St,yti , i / ∈ M t ∩ Bt,
+
+(2) which means that only positions in the current block are allowed to decode at step t.3Block 0 Block 1 Block 2  
+
+> (a) Traditional block-wise DLMs with
+> confidence-based parallel decoding.
+> Low
+> confidence
+> High
+> confidence
+> Block 0
+> Block 1 Remaining
+> MASK
+> token
+> Remaining
+> Block 0
+> Decoded
+> token
+> step t
+> step t+1
+> step t+2
+> step t+3
+> Decode
+> token
+> step t
+> Uncertainty Last-block
+> influence
+> Block boundary
+> step t
+> Sufficiently confident
+> despite conflict
+> Conflict
+> tokens
+> step t+1
+> (b) Dependency-guided adaptive block partitioning
+> with conflict-aware parallel decoding.
+> Current frontier
+
+Figure 1: The framework of DepCap. (a) Traditional block-wise DLM inference uses a fixed block size and confidence-only parallel decoding. (b) DepCap adaptively chooses the next block boundary with DepGA-Block based on last-block influence and predictive uncertainty, and applies CAP-Decoding to safely decode a conflict-free subset of positions inside the current block. Darker color indicates higher confidence, and red bidirectional arrows denote token conflicts. In the DepGA-Block visualization, green and red indicate last-block influence and predictive uncertainty, respectively. A block boundary is chosen when predictive uncertainty becomes dominant over last-block influence. 
+
+Two decisions in block-wise inference. Block-wise decoding introduces two inference decisions. The first is the block-boundary decision : given the already decoded context, how large should the next block be? The second is the within-block decoding decision : within the chosen block, which positions should be decoded together at the current denoising step? Existing block-wise DLM inference methods mainly differ in how they make these two decisions. 
+
+## 4 The DepCap Method 
+
+This section presents DepCap, a training-free inference framework for block-wise diffusion language models (DLMs). We first overview DepCap, then describe the dependency-guided adaptive block par-titioning strategy (DepGA-Block) and the conflict-aware parallel decoding strategy (CAP-Decoding), and finally give a compact analysis of the dependency score used for block partitioning. 
+
+4.1 Overview 
+
+DepCap makes two inference-time decisions at each stage of block-wise DLM decoding: how far the next block should extend, and which positions inside that block can be parallel decoded safely. For the first decision, DepGA-Block goes beyond fixed schedules and current-step local cues by using a cross-step signal derived from the last decoded block to guide block expansion. For the second, explicitly filters token conflicts that confidence-only decoding strategies may miss. Because both modules operate only on inference-time predictive signals, DepCap can be added on top of existing block-wise DLM inference processes without retraining, and is compatible with existing block-wise cache techniques. Figure 1 illustrates the overall DepCap framework. The following describes DepGA-Block and CAP-Decoding modules in detail. 
+
+4.2 Dependency-Guided Adaptive Block Partitioning Strategy 
+
+In order to adapt block boundaries to the evolving DLM generation process, we propose the dependency-guided adaptive block partitioning strategy (DepGA-Block). Existing methods typ-ically determine block boundaries either with a fixed block size [ 35 ] or from signals available at the current decoding step, such as semantic structure [ 24 ], entropy [ 38 ], or attention [ 32 ]. In con-trast, DepGA-Block follows the multi-step denoising behavior of DLM inference and introduces a cross-step signal derived from the last decoded block to guide the next block boundary. Specifically, suppose the last decoded block B has just been added to the decoded context. For each candidate future position k, let pprev  
+
+> k
+
+denote the predictive distribution before decoding B, and let 4pcurr  
+
+> k
+
+denote the predictive distribution after decoding B. DepGA-Block measures the influence of the last decoded block by the KL divergence between these two predictive distributions: 
+
+Ik = KL  pcurr  
+
+> k
+
+pprev 
+
+> k
+
+ , (3) which we call last-block influence . Ik measures how much decoding the last block shifts the marginal predictive distribution at position k and a larger Ik means that the last decoded block provides strong cross-step information for deciding the next block boundary. To complement this influence signal, DepGA-Block measures predictive uncertainty by the Shannon entropy of the predictive distribution: 
+
+Hk = H( pcurr  
+
+> k
+
+) . Large entropy indicates that the position remains uncertain even after the last block has been decoded. Together, Ik and Hk capture whether future positions are still strongly supported by the latest decoded context or are already dominated by uncertainty. In practice, both signals are smoothed and normalized within a local candidate window of size 
+
+Lwindow = min( Lmax , L remain ), where Lremain denotes the number of remaining masked tokens after the current decoding frontier, This yields the normalized signals ˜Ik and ˜Hk. DepGA-Block then defines the dependency score to determine the block size: 
+
+Sk = ˜Ik − λ ˜Hk, (4) where λ > 0 controls the uncertainty penalty, so that the first position where Sk < 0 marks the point at which uncertainty outweighs the support provided by the last decoded block, with larger λ giving more conservative block expansion. Starting from the current frontier, DepCap scans forward and finds the first position where the score drops below zero. The next block ends immediately before that position, and the final block length L is clipped to the range [Lmin , L window ]. For the initial step, the first block uses L = Lmin as a conservative cold start. An information-theoretic interpretation of this dependency score is given in Section 4.4. DepGA-Block expands the next block when the last decoded block continues to provide strong support for nearby future positions, and contracts it when uncertainty begins to dominate. Importantly, all signals used here are available from the model’s predictive distributions during inference. 
+
+4.3 Conflict-Aware Parallel Decoding Strategy 
+
+Traditional confidence-based decoding strategies often employ conservative thresholds to preserve generation quality, but this inevitably limits the parallel generation capability of DLMs. To enhance within-block parallelism without noticeably hurting generation quality, we introduce the conflict-aware parallel decoding strategy (CAP-Decoding), which explicitly models token conflicts and constructs a safe token subset for parallel decoding, as summarized in Algorithm 1. Specifically, once the next block Bt has been chosen, CAP-Decoding decides which masked positions within that block can be decoded simultaneously. Given the token confidence ci = max v pi(v) at position i, we define the candidate pool in the current block as: 
+
+C = {i : i ∈ M t ∩ Bt, c i ≥ τlow } (5) where M t denotes the set of still masked tokens in the sequence. While confidence aids in filtering potential candidates, it does not solely guarantee that a set of positions can be safely parallel decoded. To further determine which candidates can be decoded together, CAP-Decoding employs a lightweight score to quantify token conflicts between candidate positions. For any pair of positions (i, j ) ∈ C × C ,the score is computed as: 
+
+Dij = log pi(ˆ yj ) + log pj (ˆ yi), (6) where ˆyi and ˆyj are the current token predictions at positions i and j, respectively. A high Dij score signifies a strong conflict, where the probability distributions of the two positions are heavily entangled under the current distributions. To avoid committing unsafe tokens simultaneously, positions are flagged as conflicting when Dij > γ and are thus excluded from being decoded in parallel. Then, CAP-Decoding selects the parallel subset in two phases. In the high-confidence priority phase, CAP-Decoding initializes the safe subset S with candidates satisfying ci ≥ τhigh , and removes from the pool C both these selected candidates and the remaining candidates that conflict with them. In the greedy completion phase, CAP-Decoding sorts the remaining candidates in C by descending confidence, iteratively adds the top candidate i to S, and removes from C both the candidate i and the 5Algorithm 1 Conflict-Aware Parallel Decoding Strategy (CAP-Decoding) 
+
+Input: Current block Bt, masked-position set M t, predictive distributions {pi}i∈Bt , confidence thresholds τlow , τ high , and conflict threshold γ
+
+Procedure:  
+
+> 1:
+
+Compute token confidence ci = max v pi(v) for each candidate i ∈ M t ∩ Bt 
+
+> 2:
+
+Build candidate pool C = {i : i ∈ M t ∩ Bt, c i ≥ τlow } 
+
+> 3:
+
+for each (i, j ) ∈ C × C with i̸ = j do  
+
+> 4:
+
+Let ˆyi = arg max v pi(v) and ˆyj = arg max v pj (v) 
+
+> 5:
+
+Compute conflict score Dij = log pi(ˆ yj ) + log pj (ˆ yi) 
+
+> 6:
+
+end for  
+
+> 7:
+
+Initialize S = {i ∈ C : ci ≥ τhigh } ▷ Phase 1: High-confidence priority  
+
+> 8:
+
+Remove S and all candidates that conflict with any candidate in S from C 
+
+> 9:
+
+Sort the remaining candidates C in descending order of ci ▷ Phase 2: Greedy completion  
+
+> 10:
+
+for each candidate i in sorted order do  
+
+> 11:
+
+Add candidate i to S 
+
+> 12:
+
+Remove candidate i and the candidates that conflict with i from C 
+
+> 13:
+
+end for  
+
+> 14:
+
+if S = ∅ then  
+
+> 15:
+
+Add the candidate i = arg max i∈M t∩Bt ci to S 
+
+> 16:
+
+end if  
+
+> 17:
+
+return Safe subset S ⊆ M t ∩ Bt for parallel decoding candidates that conflict with it. As a safeguard, CAP-Decoding always decodes the highest-confidence token in the current block. This procedure allows CAP-Decoding to decode more positions in parallel than a conservative confidence-only decoding strategy, thereby avoiding the significant quality degradation caused by simultaneously decoding conflicting tokens. 
+
+4.4 Analysis of the Dependency Score 
+
+This subsection gives a compact information-theoretic interpretation of the dependency score to explain the form of the block partitioning strategy in DepGA-Block. Let c denote the decoded context before the last decoded block, let B ∼ p(B | c) denote that block, and let Z1: L = ( Z1, . . . , Z L) denote a candidate next block. For a realized B = b, the online quantity used by DepCap is 
+
+Ik(b) = KL( p(Zk | c, b ) ∥ p(Zk | c)) . (7) Its expectation is 
+
+Iexp  
+
+> k
+
+= EB∼p(·| c)[Ik(B)] = I( Zk; B | c). (8) Thus the last-block influence used by DepCap is the realized counterpart of a conditional mutual-information term. 
+
+Assumption 1 (Local overlap) . For the short frontier-local candidate blocks considered by DepCap, the information that the last decoded block provides to different future positions has limited overlap. 
+
+Under the Assumption1, the cumulative influence of the last decoded block on a candidate block, 
+
+I(L) = I( Z1: L; B | c), is approximately additive across positions: 
+
+I(L) = 
+
+> L
+
+X
+
+> k=1
+
+Iexp  
+
+> k
+
+− ε(L) ≈
+
+> L
+
+X
+
+> k=1
+
+Iexp  
+
+> k
+
+, (9) where ε(L) is an overlap correction term. The Appendix A gives the detailed derivation. To account for predictive ambiguity, DepCap also considers Hk = H( Zk | c, B ). A natural design objective is that the cumulative support from the last decoded block should dominate the cumulative uncertainty of the candidate positions: 
+
+I(L) ≥ λ
+
+> L
+
+X
+
+> k=1
+
+E[Hk]. (10) 6Replacing I(L) by its additive approximation motivates a per-position criterion of the form Ik − λH k,which is exactly the structure of the dependency score in Equation (4) . In implementation, DepCap computes this score from the predictive distributions immediately before and after the last block is decoded, which provides a tractable approximation to the idealized quantities above. 
+
+## 5 Experiments 
+
+To evaluate whether the proposed DepCap improves the efficiency of block-wise DLM inference while preserving generation quality, we conduct extensive experiments on multiple representative DLM backbones and benchmarks. This section first introduces the experimental settings, and then presents the overall results, ablation study, and hyperparameter analysis. The experiments are structured to address the following key questions: 
+
+Q1: Does DepCap improve the overall speed-quality trade-off of block-wise DLM inference? 
+
+Q2: Does DepCap remain effective when combined with existing block-wise cache techniques? 
+
+Q3: How much do DepGA-Block and CAP-Decoding each contribute to the final gains? 
+
+Q4: How does DepCap behave under different hyperparameter choices? These questions are answered sequentially in the following subsections. Our code is available at 
+
+https://github.com/X-Xia0828/DepCap .
+
+5.1 Experimental Settings 
+
+We conduct comprehensive evaluations on three representative DLM backbones, specifically LLaDA-8B-Instruct [ 29 ], Dream-v0-base-7B [ 36 ], and LLaDA-1.5 [ 40 ], to validate the effectiveness of the proposed DepCap. Additionally, We compare DepCap against the established block-wise DLM framework, Fast-dLLM [35] and the adaptive block partition method AdaBlock [24]. 
+
+Hyperparameter settings. Unless otherwise specified, all methods use a generation length of 
+
+Lgen = 256 . In DepCap, DepGA-Block uses λ = 1 .2, Lmin = 8 , and Lmax = 128 , while CAP-Decoding uses τlow = 0 .8, τhigh = 0 .95 , and γ = −16 .0. For the confidence-based decoding strategy, we use a threshold of 0.9 with fixed block sizes |B0| ∈ { 16 , 32 , 64 }. For AdaBlock, we use its default hyperparameter setting, with “\n” as the detected token and default block size B0 = 32 .
+
+Benchmarks and metrics. We evaluate all methods on four benchmarks: GSM8K (5-shot) [ 9]and Math-500 (4-shot) [ 21 ] for mathematical and reasoning generation, and MBPP (3-shot) [ 3] and HumanEval (0-shot) [ 6 ] for code generation. We report task accuracy (Acc), tokens per second (TPS), and the number of function evaluations (NFE), where TPS measures throughput and NFE reflects computational cost during decoding. Among these metrics, TPS is computed over the full generated sequence until the end-of-sequence token is reached. Higher task accuracy and TPS indicate better generation quality and faster decoding, respectively, while lower NFE signifies fewer denoising steps. All experiments are conducted on a single NVIDIA A100 40GB GPU, and all benchmark evaluations are run with the lm-eval library to ensure a fair comparison. 
+
+5.2 Main Results To answer Q1. We evaluate DepCap on three DLM backbones, namely LLaDA-8B-Instruct, Dream-v0-base-7B, and LLaDA-1.5, across four benchmarks: GSM8K, Math-500, MBPP, and HumanEval. The main results are reported in Table 1. A first observation is that no single fixed block size dominates across models and tasks . Smaller blocks are often safer but leave substantial parallelism unused, whereas larger blocks can improve throughput at the cost of noticeable quality degradation. This directly motivates adaptive block partitioning and DepGA-Block indeed provides a more favorable speed-quality trade-off than rigid fixed schedules in most settings. Compared with AdaBlock, DepGA-Block is generally more stable on the LLaDA family. While AdaBlock can occasionally match the best accuracy, DepGA-Block more often achieves a better balance between accuracy, throughput, and NFE. This suggests that using the influence of the last decoded block provides a more reliable signal for block partitioning than heuristics based only on the information available at the current decoding step. 7Table 1: Main results on three DLM backbones and four benchmarks. We report task accuracy (Acc), throughput in tokens per second (TPS), and number of function evaluations (NFE) under different block partitioning strategy and decoding strategies. “Vanilla" denotes decoding only the highest confidence token within the current block at each step and “Confidence” denotes standard confidence-based parallel decoding. Best results are bolded , and second-best are underlined. 
+
+Parallel Decode Block GSM8K (5-shot) Math-500 (4-shot) MBPP (3-shot) HumanEval (0-shot) 
+
+TPS ⇑ NFE ⇓ Acc ⇑ TPS ⇑ NFE ⇓ Acc ⇑ TPS ⇑ NFE ⇓ Acc ⇑ TPS ⇑ NFE ⇓ Acc ⇑
+
+LLaDA-8B-Instruct 
+
+Vanilla |B0| = 32 6.0 ×1.00 256.0 77.6 7.9 ×1.00 256.0 39.2 5.4 ×1.00 256.0 40.8 16.7 ×1.00 256.0 42.7 Confidence 
+
+|B0| = 16 18.3 ×3.05 84.1 78.3 19.7 ×2.49 104.4 40.2 18.3 ×3.39 75.9 41.2 51.0 ×3.05 86.4 43.3 
+
+|B0| = 32 19.6 ×3.27 78.6 77.3 20.7 ×2.62 99.1 39.6 19.7 ×3.65 70.1 41.0 56.5 ×3.38 77.5 43.3 
+
+|B0| = 64 20.1 ×3.35 75.6 77.5 21.1 ×2.67 97.0 37.8 19.9 ×3.69 68.2 40.8 57.2 ×3.43 76.4 41.5 AdaBlock 18.4 ×3.07 83.9 77.9 19.8 ×2.51 103.5 40.0 19.4 ×3.59 76.2 40.4 50.4 ×3.02 86.2 40.9 DepGA-Block 18.7 ×3.12 81.4 79.2 19.9 ×2.52 101.8 40.4 18.8 ×3.48 73.6 41.0 53.4 ×3.20 80.6 42.7 CAP-Decoding |B0| = 32 21.6 ×3.60 71.5 77.3 22.8 ×2.89 90.9 39.2 21.2 ×3.93 65.7 40.6 60.4 ×3.62 72.0 43.3 
+
+DepGA-Block 21.4 ×3.57 74.8 78.8 22.2 ×2.81 94.8 39.8 20.8 ×3.85 68.6 40.8 59.8 ×3.58 74.8 42.7 
+
+Dream-v0-base-7B 
+
+Vanilla |B0| = 32 7.8 ×1.00 256.0 75.1 9.7 ×1.00 256.0 42.2 10.2 ×1.00 256.0 50.8 20.7 ×1.00 256.0 49.4 Confidence 
+
+|B0| = 16 13.7 ×1.76 148.1 74.7 23.7 ×2.44 105.5 40.8 27.7 ×2.72 94.1 53.2 38.8 ×1.87 137.0 55.5 
+
+|B0| = 32 13.2 ×1.69 152.4 74.5 24.4 ×2.52 102.3 40.4 28.6 ×2.80 90.8 51.8 39.0 ×1.88 135.3 53.0 
+
+|B0| = 64 12.8 ×1.64 157.9 74.6 24.9 ×2.57 99.5 41.0 28.9 ×2.83 89.1 52.2 39.4 ×1.90 131.8 53.7 AdaBlock 13.1 ×1.68 154.9 75.1 24.7 ×2.55 101.7 39.8 28.2 ×2.76 93.7 52.6 38.6 ×1.86 137.9 53.7 DepGA-Block 13.5 ×1.73 149.0 75.0 24.0 ×2.47 103.2 41.0 28.7 ×2.81 90.1 52.6 39.5 ×1.91 132.5 50.6 CAP-Decoding |B0| = 32 12.7 ×1.63 149.9 74.1 24.7 ×2.55 95.4 40.4 29.0 ×2.84 85.2 52.4 39.8 ×1.92 127.3 50.6 DepGA-Block 13.0 ×1.67 146.6 74.8 24.4 ×2.52 97.2 40.8 29.2 ×2.86 84.6 52.8 40.6 ×1.96 125.3 50.6 
+
+LLaDA-1.5 
+
+Vanilla |B0| = 32 5.6 ×1.00 256.0 81.1 7.1 ×1.00 256.0 39.8 1.9 ×1.00 256.0 37.8 5.9 ×1.00 256.0 41.5 Confidence 
+
+|B0| = 16 17.5 ×3.12 81.9 81.4 17.8 ×2.51 101.0 40.0 10.4 ×5.47 48.7 40.2 14.2 ×2.41 106.9 40.9 
+
+|B0| = 32 18.9 ×3.38 75.5 81.2 18.9 ×2.66 95.2 39.4 11.6 ×6.11 42.1 37.6 15.3 ×2.59 99.6 40.2 
+
+|B0| = 64 19.5 ×3.48 72.8 80.7 19.3 ×2.72 91.7 38.0 9.2 ×4.84 40.1 25.4 16.1 ×2.73 93.4 42.1 
+
+AdaBlock 17.8 ×3.18 80.1 82.1 18.5 ×2.61 97.6 38.8 9.8 ×5.16 51.8 36.4 14.1 ×2.39 110.9 37.8 DepGA-Block 18.1 ×3.23 80.1 80.6 18.1 ×2.55 100.0 41.6 10.3 ×5.42 50.1 40.0 14.8 ×2.51 105.6 39.6 CAP-Decoding |B0| = 32 20.6 ×3.68 69.1 82.1 20.2 ×2.85 88.8 40.0 12.2 ×6.42 40.6 39.0 16.4 ×2.78 93.0 42.1 
+
+DepGA-Block 20.1 ×3.59 73.9 82.2 19.7 ×2.77 94.1 42.2 10.7 ×5.63 48.9 40.6 16.2 ×2.75 98.5 41.5 When combined with CAP-Decoding, the full DepCap method achieves the strongest overall speed-quality trade-off on the LLaDA family. On MBPP with LLaDA-1.5, for instance, the full method achieves 5.63 × speedup while improving accuracy by 7.4% relative. More broadly, averaged over the eight LLaDA task-model pairs in the Table 1, the full DepCap framework achieves a 3.57 ×
+
+speedup compared with vanilla LLaDA decoding without significant performance degradation. These results indicate that dependency-guided adaptive block partitioning and conflict-aware within-block decoding work best when combined to achieve a better balance between generation quality and decoding speed, which answers Q1. 
+
+Figure 2: Cache-compatible results under No Cache, Prefix Cache, and Dual Cache. Left: accuracy versus throughput. Right: NFE versus throughput. 
+
+To answer Q2. We further evaluate whether DepCap remains effective when combined with existing block-wise cache techniques on LLaDA-8B-Instruct over the GSM8K benchmark. We compare DepCap with Fast-dLLM [ 35 ] and AdaBlock [ 24 ] under three cache settings: No Cache, Prefix Cache [ 35 ]and Dual Cache [35], as shown in Figure 2. Both Prefix Cache and Dual Cache sub-stantially improve throughput for all three methods, while accuracy changes remain small. Among the cache-enabled settings, Fast-dLLM achieves the highest throughput, whereas DepCap with Dual Cache provides the best overall balance, reaching 79.3 accuracy with 51.2 TPS and lower NFE than the two cache-enabled AdaBlock variants. These results show that DepCap remains effective after cache integration and combines naturally with existing block-wise cache techniques, which answers Q2. 
+
+5.3 Ablation Study To answer Q3. To analyze the role of each component in DepCap, we conduct ablation studies on its two core modules. The complete DepCap framework is given by “DepGA-Block + CAP-Decoding”. We isolate each module through “Confidence + DepGA-Block” and “CAP-Decoding + Fixed Block 8(|B0| = 32 )”, and use “Vanilla” as the reference setting where neither module is applied. This design allows us to separately examine the contribution of each module and the benefit of combining them. The ablation results, as shown in Table 1, show that both modules contribute to the final gains in different ways. Under standard confidence-based decoding, replacing fixed schedules with DepGA-Block often improves accuracy while keeping throughput competitive, which confirms the value of DepGA-Block. Under the same block size, CAP-Decoding usually achieves the fastest decoding speed with negligible quality degradation, showing that explicit conflict handling allows more aggressive parallel decoding than confidence-only strategy. When combine the both DepGA-Block and CAP-Decoding, DepCap achieves the best overall trade-off between generation quality and decoding speed, which answers Q3. 
+
+5.4 Hyperparameter Analysis To answer Q4. To study the robustness of DepCap and understand how its behavior changes under different settings, we analyze key hyperparameters. These experiments are intended to show how the speed-quality trade-off changes as the outer DepGA-block and the inner CAP-Decoding become more or less aggressive. Detailed experimental results and analysis are provided in the Appendix B. 
+
+Generation length Lgen . We study how the behavior of DepCap changes under different generation lengths. The results show that DepCap remains effective across different Lgen , although the speed-quality trade-off becomes more challenging as the Lgen grows (i.e., Lgen = 1024 ). 
+
+Maximum block size Lmax . We then analyze the effect of the maximum block size in DepGA-Block. As Lmax increases, TPS generally improves and NFE decreases. However, overly small settings restrict the parallel generation capability of DLMs, while overly aggressive choices make the generation quality-speed trade-off harder to maintain. 
+
+Uncertainty weight λ. We further analyze the effect of the uncertainty weight λ. A moderate range of λ yields stable performance, while larger values mainly make block expansion more conservative without improving the overall speed-quality trade-off. 
+
+Confidence threshold τlow . Next, we study the effect of τlow in CAP-Decoding. Lower thresholds favor more aggressive parallel decoding and higher throughput, while larger thresholds improve accuracy but reduce speed. 
+
+Conflict threshold γ. Finally, we analyze the effect of the conflict threshold γ, which determines when two candidates are treated as conflicting. The results show that a looser threshold improves throughput, whereas a more conservative threshold tends to preserve accuracy at the cost of speed. In a nutshell, the hyperparameter analysis shows that DepCap remains effective across a reasonable range of settings and that its gains do not rely on narrow tuning, which answers Q4. 
+
+## 6 Conclusion and Discussion 
+
+Conclusion. This paper presents DepCap, a training-free framework for efficient block-wise DLM inference. Rather than determining block boundaries from fixed schedules or current-step local cues, and relying on confidence alone for token-level parallelism, DepCap formulates both as inference-time decisions that should be guided by more suitable signals. Specifically, cross-step signals from the last decoded block guide block partitioning, while token conflict signals control within-block parallel decoding, enabling a better quality-speed trade-off. We also provide an information-theoretic analysis of the dependency score by relating cumulative last-block influence to block partitioning decisions. Empirically, DepCap consistently improves decoding efficiency with negligible quality degradation, and remains compatible with existing block-wise cache techniques. 
+
+Discussion. The current work focuses on block-wise DLM inference. A related and equally important direction is sliding-window diffusion decoding [ 30 , 25 , 28 ], where how to adapt the window size by incorporating information from the historical multi-step denoising process is itself an interesting problem. In addition, the present theory only provides an information-theoretic analysis of the dependency score and does not yet establish a strict bound or stronger formal guarantee. Strengthening this analysis, and extending the underlying ideas beyond the block-wise setting, are important directions for our future work. 9References 
+
+[1] Marianne Arriola, Aaron Gokaslan, Justin T. Chiu, Zhihan Yang, Zhixuan Qi, Jiaqi Han, Subham Sekhar Sahoo, and Volodymyr Kuleshov. Block diffusion: Interpolating between au-toregressive and diffusion language models. In Proceedings of the 13th International Conference on Learning Representations , Singapore, Singapore, 2025. [2] Jacob Austin, Daniel D. Johnson, Jonathan Ho, Daniel Tarlow, and Rianne van den Berg. Struc-tured denoising diffusion models in discrete state-spaces. In Advances in Neural Information Processing Systems 34 , pages 17981–17993, Virtual Event, 2021. [3] Jacob Austin, Augustus Odena, Maxwell I. Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie J. Cai, Michael Terry, Quoc V. Le, and Charles Sutton. Program synthesis with large language models. CoRR , abs/2108.07732, 2021. [4] Wenrui Bao, Zhiben Chen, Dan Xu, and Yuzhang Shang. Learning to parallel: Accelerating diffusion large language models via adaptive parallel decoding. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [5] Tiwei Bie, Maosong Cao, Kun Chen, Lun Du, Mingliang Gong, Zhuochen Gong, Yanmei Gu, Jiaqi Hu, Zenan Huang, Zhenzhong Lan, Chengxi Li, Chongxuan Li, Jianguo Li, Zehuan Li, Huabin Liu, Lin Liu, Guoshan Lu, Xiaocheng Lu, Yuxin Ma, Jianfeng Tan, Lanning Wei, Ji-Rong Wen, Yipeng Xing, Xiaolu Zhang, Junbo Zhao, Da Zheng, Jun Zhou, Junlin Zhou, Zhanchao Zhou, Liwang Zhu, and Yihong Zhuang. Llada2.0: Scaling up diffusion language models to 100B. CoRR , abs/2512.15745, 2025. [6] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Pondé de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mohammad Bavarian, Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebgen Guss, Alex Nichol, Alex Paino, Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shantanu Jain, William Saunders, Christopher Hesse, Andrew N. Carr, Jan Leike, Joshua Achiam, Vedant Misra, Evan Morikawa, Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. Evaluating large language models trained on code. CoRR , abs/2107.03374, 2021. [7] Zigeng Chen, Gongfan Fang, Xinyin Ma, Ruonan Yu, and Xinchao Wang. dParallel: Learnable parallel decoding for dLLMs. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [8] Shuang Cheng, Yihan Bian, Dawei Liu, Linfeng Zhang, Qian Yao, Zhongbo Tian, Wenhai Wang, Qipeng Guo, Kai Chen, Biqing Qi, and Bowen Zhou. SDAR: A synergistic diffusion-autoregression paradigm for scalable sequence generation. CoRR , abs/2510.06303, 2025. [9] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems. CoRR , abs/2110.14168, 2021. [10] Shansan Gong, Mukai Li, Jiangtao Feng, Zhiyong Wu, and Lingpeng Kong. DiffuSeq: Sequence to sequence text generation with diffusion models. In Proceedings of the 11th International Conference on Learning Representations , Kigali, Rwanda, 2023. [11] Shansan Gong, Shivam Agarwal, Yizhe Zhang, Jiacheng Ye, Lin Zheng, Mukai Li, Chenxin An, Peilin Zhao, Wei Bi, Jiawei Han, Hao Peng, and Lingpeng Kong. Scaling diffusion language models via adaptation from autoregressive models. In Proceedings of the 13th International Conference on Learning Representations , Singapore, Singapore, 2025. [12] Shansan Gong, Ruixiang Zhang, Huangjie Zheng, Jiatao Gu, Navdeep Jaitly, Lingpeng Kong, and Yizhe Zhang. DiffuCoder: Understanding and improving masked diffusion models for code generation. In Proceedings of the 14th International Conference on Learning Representations ,Rio de Janeiro, Brazil, 2026. 10 [13] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. In 
+
+Advances in Neural Information Processing Systems 33 , Virtual Event, 2020. [14] Zhanqiu Hu, Jian Meng, Yash Akhauri, Mohamed S. Abdelfattah, Jae-sun Seo, Zhiru Zhang, and Udit Gupta. Accelerating diffusion language model inference via efficient KV caching and guided diffusion. In Proceedings of the 14th International Conference on Learning Representa-tions , Rio de Janeiro, Brazil, 2026. [15] Zemin Huang, Zhiyang Chen, Zijun Wang, Tiancheng Li, and Guo-Jun Qi. Reinforcing the diffusion chain of lateral thought with diffusion language models. In Advances in Neural Information Processing Systems 39 , San Diego, CA, 2025. [16] Daniel Israel, Guy Van den Broeck, and Aditya Grover. Accelerating diffusion LLMs via adaptive parallel decoding. In Advances in Neural Information Processing Systems 39 , San Diego, CA, 2025. [17] Yuchu Jiang, Yue Cai, Xiangzhong Luo, Jiale Fu, Jiarui Wang, Chonghan Liu, and Xu Yang. d 2 Cache: Accelerating diffusion-based LLMs via dual adaptive caching. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [18] Samar Khanna, Siddhant Kharbanda, Shufan Li, Harshit Varma, Eric Wang, Sawyer Birnbaum, Ziyang Luo, Yanis Miraoui, Akash Palrecha, Stefano Ermon, Aditya Grover, and Volodymyr Kuleshov. Mercury: Ultra-fast language models based on diffusion. CoRR , abs/2506.17298, 2025. [19] Guanghao Li, Zhihui Fu, Min Fang, Qibin Zhao, Ming Tang, Chun Yuan, and Jun Wang. Dif-fuSpec: Unlocking diffusion language models for speculative decoding. CoRR , abs/2510.02358, 2025. [20] Tianyi Li, Mingda Chen, Bowei Guo, and Zhiqiang Shen. A survey on diffusion language models. CoRR , abs/2508.10875, 2025. [21] Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. Let’s verify step by step. In 
+
+Proceedings of the 12th International Conference on Learning Representations , Vienna, Austria, 2024. [22] Zhiyuan Liu, Yicun Yang, Yaojie Zhang, Junjie Chen, Chang Zou, Qingyuan Wei, Shaobo Wang, and Linfeng Zhang. dLLM-Cache: Accelerating diffusion large language models with adaptive caching. CoRR , abs/2506.06295, 2025. [23] Aaron Lou, Chenlin Meng, and Stefano Ermon. Discrete diffusion modeling by estimating the ratios of the data distribution. In Proceedings of the 41st International Conference on Machine Learning , pages 32819–32848, Vienna, Austria, 2024. [24] Guanxi Lu, Hao Mark Chen, Yuto Karashima, Zhican Wang, Daichi Fujiki, and Hongxiang Fan. AdaBlock-dLLM: Semantic-aware diffusion LLM inference via adaptive block size. In 
+
+Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [25] Lizhuo Luo, Shenggui Li, Yonggang Wen, and Tianwei Zhang. DSB: dynamic sliding block scheduling for diffusion LLMs. CoRR , abs/2602.05992, 2026. [26] Lizhuo Luo, Zhuoran Shi, Jiajun Luo, Zhi Wang, Shen Ren, Wenya Wang, and Tianwei Zhang. DAWN: dependency-aware fast inference for diffusion LLMs. CoRR , abs/2602.06953, 2026. [27] Xinyin Ma, Runpeng Yu, Gongfan Fang, and Xinchao Wang. dKV-Cache: The cache for diffusion language models. In Advances in Neural Information Processing Systems 39 , San Diego, CA, 2025. [28] Quan Nguyen-Tri, Mukul Ranjan, and Zhiqiang Shen. Attention is all you need for KV cache in diffusion LLMs. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. 11 [29] Shen Nie, Fengqi Zhu, Zebin You, Xiaolu Zhang, Jingyang Ou, Jun Hu, Jun Zhou, Yankai Lin, Ji-Rong Wen, and Chongxuan Li. Large language diffusion models. CoRR , abs/2502.09992, 2025. [30] Yingte Shu, Yuchuan Tian, Chao Xu, Yunhe Wang, and Hanting Chen. Deferred commitment decoding for diffusion language models. CoRR , abs/2601.02076, 2026. [31] Yuerong Song, Xiaoran Liu, Ruixiao Li, Zhigeng Liu, Zengfeng Huang, Qipeng Guo, Ziwei He, and Xipeng Qiu. Sparse-dLLM: Accelerating diffusion LLMs with dynamic cache eviction. In Proceedings of the 40th AAAI Conference on Artificial Intelligence , pages 33038–33046, Singapore, Singapore, 2026. [32] Lipeng Wan, Junjie Ma, Jianhui Gu, Zeyang Liu, Xuyang Lu, and Xuguang Lan. GeoBlock: Inferring block granularity from dependency geometry in diffusion language models. CoRR ,abs/2603.26675, 2026. [33] Xu Wang, Chenkai Xu, Yijie Jin, Jiachun Jin, Hao Zhang, and Zhijie Deng. Diffusion LLMs can do faster-than-AR inference via discrete diffusion forcing. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [34] Chengyue Wu, Hao Zhang, Shuchen Xue, Shizhe Diao, Yonggan Fu, Zhijian Liu, Pavlo O. Molchanov, Ping Luo, Song Han, and Enze Xie. Fast-dLLM v2: Efficient block-diffusion LLM. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [35] Chengyue Wu, Hao Zhang, Shuchen Xue, Zhijian Liu, Shizhe Diao, Ligeng Zhu, Ping Luo, Song Han, and Enze Xie. Fast-dLLM: Training-free acceleration of diffusion LLM by enabling KV cache and parallel decoding. In Proceedings of the 14th International Conference on Learning Representations , Rio de Janeiro, Brazil, 2026. [36] Jiacheng Ye, Zhihui Xie, Lin Zheng, Jiahui Gao, Zirui Wu, Xin Jiang, Zhenguo Li, and Lingpeng Kong. Dream 7B: Diffusion large language models. CoRR , abs/2508.15487, 2025. [37] Runpeng Yu, Qi Li, and Xinchao Wang. Discrete diffusion in large language and multimodal models: A survey. CoRR , abs/2506.13759, 2025. [38] Yu Zhang, Xinchen Li, Jialei Zhou, Hongnan Ma, Zhongwei Wan, Yiwei Shi, Duoqian Miao, Qi Zhang, and Longbing Cao. Swordsman: Entropy-driven adaptive block partition for efficient diffusion language models. CoRR , abs/2602.04399, 2026. [39] Siyan Zhao, Devaansh Gupta, Qinqing Zheng, and Aditya Grover. d1: Scaling reasoning in diffusion large language models via reinforcement learning. In Advances in Neural Information Processing Systems 39 , San Diego, CA, 2025. [40] Fengqi Zhu, Rongzhen Wang, Shen Nie, Xiaolu Zhang, Chunwei Wu, Jun Hu, Jun Zhou, Jianfei Chen, Yankai Lin, Ji-Rong Wen, and Chongxuan Li. Llada 1.5: Variance-reduced preference optimization for large language diffusion models. CoRR , abs/2505.19223, 2025. 12 A Detailed Theoretical Analysis 
+
+A.1 Detailed Derivation 
+
+We fix the decoded context c before the latest block and write that block as a random variable 
+
+B ∼ p(B | c). The next candidate future block is Z1: L = ( Z1, . . . , Z L). For each future position k,the analysis compares the predictive distributions before and after decoding the last block: 
+
+pprev  
+
+> k
+
+(·) = p(Zk = · | c), pcurr  
+
+> k
+
+(·) = p(Zk = · | c, B ). (11) The corresponding last-block influence for a realized block is 
+
+Isample  
+
+> k
+
+(b) = KL( p(Zk | c, b ) ∥ p(Zk | c)) . (12) 
+
+A.2 Expected Influence Versus Sample Influence 
+
+The expected influence term used in the analysis is 
+
+Iexp  
+
+> k
+
+= I( Zk; B | c). (13) By the definition of conditional mutual information, 
+
+I( Zk; B | c) = EB∼p(·| c)[KL( p(Zk | c, B ) ∥ p(Zk | c))] . (14) Hence 
+
+Iexp  
+
+> k
+
+= E
+
+h
+
+Isample  
+
+> k
+
+(B)
+
+i
+
+. (15) This is why it is consistent to analyze DepCap through conditional mutual information while imple-menting it with a KL score computed for one realized block. The block-level quantity of interest is the cumulative information that the last decoded block provides to the next L positions: 
+
+I(L) = I( Z1: L; B | c). (16) By the chain rule, 
+
+I( Z1: L; B | c) = 
+
+> L
+
+X
+
+> k=1
+
+I( Zk; B | c, Z <k ). (17) Writing each term as 
+
+I( Zk; B | c, Z <k ) = I( Zk; B | c) −
+
+
+
+I( Zk; B | c) − I( Zk; B | c, Z <k )
+
+
+
+, (18) and summing over k yields the exact identity 
+
+I(L) = 
+
+> L
+
+X
+
+> k=1
+
+Iexp  
+
+> k
+
+− ε(L), (19) where 
+
+ε(L) = 
+
+> L
+
+X
+
+> k=1
+
+
+
+I( Zk; B | c) − I( Zk; B | c, Z <k )
+
+
+
+. (20) This is the overlap correction caused by shared information from the last decoded block across future positions. Under Assumption 1, the overlap term remains moderate for the short local blocks used by DepCap, so 
+
+I(L) ≈
+
+> L
+
+X
+
+> k=1
+
+Iexp  
+
+> k
+
+. (21) In this sense, the per-position last-block influence terms can be viewed as local contributions to the cumulative support supplied by the last decoded block. Influence alone does not determine whether the next block should keep expanding, because support from the last decoded block must be compared against how uncertain the future positions remain. DepCap therefore also considers 
+
+Hk = H( Zk | c, B ). (22) 13 A natural design objective is 
+
+I(L) ≥ λ
+
+> L
+
+X
+
+> k=1
+
+E[Hk]. (23) Substituting Equation (19) yields 
+
+> L
+
+X
+
+> k=1
+
+Iexp  
+
+> k
+
+− λ
+
+> L
+
+X
+
+> k=1
+
+E[Hk] ≥ ε(L). (24) If |ε(L)| remains moderate over the local candidate window, the sign pattern is mainly governed by the per-position terms. Dropping the correction then gives the simpler approximation 
+
+> L
+
+X
+
+> k=1
+
+ Iexp  
+
+> k
+
+− λE[Hk] ≥ 0. (25) The online dependency score 
+
+Sk = Isample  
+
+> k
+
+− λH k (26) is the sample version of the summand above, so it measures whether the support from the last decoded block still outweighs uncertainty at position k.
+
+A.3 Implementation Approximation 
+
+The derivation above uses the theoretical distributions pprev  
+
+> k
+
+and pcurr  
+
+> k
+
+. In the actual implementation, DepCap instead compares the predictive logits immediately before and after the latest block is decoded while keeping the rest of the inference state fixed. We therefore view the implemented score as a computationally tractable approximation to the theoretical last-block influence, rather than as an exact evaluation of the corresponding distributions. This approximation is most faithful when the dominant change between the two inference states is precisely the effect of decoding the latest block. This is also the setting in which DepCap is intended to operate: short local blocks whose effect on nearby future positions can be estimated reliably from the change in the model’s predictive distributions. If last-block influence decays as the decoding process moves away from the frontier while uncertainty remains non-negligible, then Sk naturally transitions from positive to near-zero and then negative. The first negative crossing is therefore the first point at which further expansion receives too little support from the last decoded block relative to its uncertainty. This gives a local stopping rule whose cumulative interpretation is to stop once support no longer dominates uncertainty. 
+
+## B Detailed Hyperparameter Analysis 
+
+B.1 Generation Length 
+
+Table 2: Effect of generation length Lgen on DepCap on LLaDA-8B-Instruct over GSM8K. 
+
+Lgen Acc ⇑ TPS ⇑ NFE ⇓
+
+128 74.5 19.1 48.4 256 78.8 21.4 74.8 512 79.8 15.5 99.2 1024 77.0 8.7 120.4 As shown in Table 2, increasing Lgen makes the decoding problem progressively harder. From 128 to 512 tokens, accuracy improves moderately, which suggests that DepCap can still exploit parallel decoding effectively as the generation horizon grows. At the same time, TPS decreases steadily and NFE increases substantially, indicating that longer sequences require more denoising iterations and are harder to accelerate efficiently. When Lgen further increases to 1024, accuracy also begins to drop, showing that very long generations make the quality-speed trade-off more difficult to maintain. 14 Table 3: Effect of the uncertainty weight λ on DepCap on LLaDA-8B-Instruct over GSM8K. 
+
+λ Acc ⇑ TPS ⇑ NFE ⇓
+
+0.6 78.8 20.6 75.1 0.8 78.9 20.7 74.9 1.0 79.0 20.8 74.8 1.2 78.8 21.4 74.8 1.4 78.8 20.7 74.8 1.6 78.6 20.8 74.9 
+
+B.2 Uncertainty Weight 
+
+As shown in Table 3, the uncertainty weight λ mainly controls how conservatively DepGA-Block expands the next block. Across the tested range, the variation in accuracy, TPS, and NFE is relatively small, which suggests that DepGA-Block is not overly sensitive to the exact choice of λ. Moderate values around 1.0–1.2 provide the strongest overall balance, while larger values make block expansion more conservative without yielding better overall speed-quality trade-offs. 
+
+B.3 Maximum Block Size 
+
+Table 4: Effect of the maximum block size Lmax on DepCap on LLaDA-8B-Instruct over GSM8K. 
+
+Lmax Acc ⇑ TPS ⇑ NFE ⇓
+
+16 79.6 17.6 90.8 32 80.1 19.1 83.6 64 78.5 20.7 77.5 128 78.8 21.4 74.8 256 79.5 21.5 74.8 As shown in Table 4, larger Lmax generally leads to higher TPS and lower NFE, since DepGA-Block is allowed to form longer candidate blocks whenever the last-block influence remains informative. However, the accuracy trend is not monotonic. Very small settings, such as Lmax = 16 , clearly restrict the parallel generation capability of DLMs, while overly aggressive settings favor speed but make the quality-speed trade-off harder to maintain. These results suggest that Lmax controls the ceiling of parallelism in DepGA-Block and should be chosen large enough to avoid unnecessary restriction, but not so large that quality becomes harder to preserve. 
+
+B.4 Candidate Threshold 
+
+Table 5: Effect of the candidate threshold τlow on DepCap on LLaDA-8B-Instruct over GSM8K. 
+
+τlow Acc ⇑ TPS ⇑ NFE ⇓
+
+0.65 78.4 24.8 61.7 0.70 78.5 24.3 65.5 0.75 78.7 18.4 69.8 0.80 78.8 21.4 74.8 0.85 80.3 19.0 80.3 As shown in Table 5, the candidate threshold τlow directly controls how broadly CAP-Decoding ex-pands the candidate pool before conflict filtering. Smaller thresholds make decoding more aggressive, leading to much higher TPS and lower NFE, but they also reduce accuracy. Larger thresholds are more selective and improve accuracy, but this comes at the cost of slower decoding. This behavior is consistent with the role of τlow : it determines the trade-off between exploring a larger parallel candidate set and preserving generation quality. 15 B.5 Conflict Threshold 
+
+Table 6: Effect of the conflict threshold γ on DepCap on LLaDA-8B-Instruct over GSM8K. 
+
+γ Acc ⇑ TPS ⇑ NFE ⇓
+
+-8.0 78.9 23.8 67.2 -12.0 78.4 22.8 70.1 -16.0 78.8 21.4 74.8 -20.0 79.5 19.9 80.6 -24.0 79.5 17.8 86.3 As shown in Table 6, the conflict threshold γ determines how strictly CAP-Decoding removes conflicting candidates inside the current block. A looser threshold improves throughput, with the best TPS achieved at γ = −8.0, while more conservative thresholds gradually reduce speed and increase NFE. Accuracy remains relatively stable across the tested range, which suggests that γ
+
+mainly controls how aggressively CAP-Decoding exploits within-block parallelism after the candidate pool has already been formed. 16
