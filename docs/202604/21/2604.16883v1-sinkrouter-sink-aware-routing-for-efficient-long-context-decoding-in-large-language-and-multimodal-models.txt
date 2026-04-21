@@ -1,0 +1,838 @@
+Title: SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models
+
+URL Source: https://arxiv.org/pdf/2604.16883v1
+
+Published Time: Tue, 21 Apr 2026 00:38:24 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models 
+
+## Junnan Liu 
+
+25S30353@stu.hit.edu.cn Harbin Institute of Technology (Weihai) Weihai, China 
+
+## Xinyan Liu 
+
+xinyliu@hit.edu.cn Harbin Institute of Technology (Weihai) Weihai, China 
+
+## Peifeng Gao 
+
+gaopeifeng@connect.hku.hk University of Hong Kong Hong Kong, China 
+
+## Zhaobo Qi 
+
+qizb@hit.edu.cn Harbin Institute of Technology (Weihai) Weihai, China 
+
+## Beichen Zhang 
+
+beiczhang@hit.edu.cn Harbin Institute of Technology (Weihai) Weihai, China 
+
+## Weigang Zhang 
+
+wgzhang@hit.edu.cn Harbin Institute of Technology (Weihai) Weihai, China 
+
+## Antoni B. Chan 
+
+abchan@cityu.edu.hk City University of Hong Kong Hong Kong, China 
+
+Abstract 
+
+In long-context decoding for LLMs and LMMs, attention becomes increasingly memory-bound because each decoding step must load a large amount of KV-cache data from GPU memory. Existing ac-celeration strategies often trade efficiency for accuracy by relying on heuristic pruning that may discard useful information. At a deeper level, they also tend to indiscriminately preserve all high-scoring tokens, treat early tokens as indispensable anchors, or rely on heuristic head routing, reflecting an insufficient mechanistic understanding of the attention sink phenomenon. In this paper, we show that the attention sink phenomenon corresponds to a stable, reachable, and error-controllable fixed point constructed during training. Based on this insight, we propose SinkRouter , a training-free selective routing framework that detects the sink sig-nal and skips computations that would otherwise produce near-zero output. To translate this mechanism into real-world acceleration, we develop a hardware-aware Triton kernel with block-level branching and Split-K parallelism. We conduct extensive evalu-ations on a diverse suite of long-context benchmarks, including 
+
+LongBench , InfiniteBench , CVBench , MileBench , and MMVP ,using both text-only and multimodal backbones such as Llama-3.1-8B, Llama-3.1-70B, Yi-9B-200K, LLaVA-1.5-7B, and LLaVA-1.5-13B. Across these settings, SinkRouter consistently improves decoding efficiency while maintaining competitive accuracy, and reaches 
+
+2.03 × speedup with a 512K context. 
+
+CCS Concepts 
+
+• Computing methodologies → Natural language generation ;
+
+Natural language processing ; Computer vision .
+
+Keywords 
+
+Long-context inference, attention sink, large multimodal models, efficient decoding 
+
+1 Introduction 
+
+Large Language Models (LLMs) and Large Multimodal Models (LMMs) are increasingly expected to process extended contexts, ranging from long textual histories to high-resolution images and videos [ 7, 13 , 24 , 26 ]. However, long-context autoregressive decod-ing introduces a critical systems bottleneck: at each decoding step, the model must repeatedly load an ever-growing Key-Value (KV) cache for attention computation. As the context length increases, this repeated fetching of the KV cache makes decoding increasingly memory-bound, thereby creating substantial pressure on memory bandwidth and incurring significant latency overhead on modern hardware [2, 10, 21]. A large body of recent work aims to alleviate this bottleneck through token eviction or KV-cache compression [ 15 , 17 , 19 , 28 ]. These approaches are effective in reducing memory footprint and decoding cost, but they primarily operate at the token or cache level. Consequently, they may discard context that later becomes useful, and their token-level sparsity patterns do not naturally align with the execution granularity of Grouped-Query Attention (GQA), which makes it difficult to consistently translate algorithmic sparsity into hardware speedup [31]. Attention sinks have been widely observed in long-context de-coding and are often associated with stabilization or anchor preser-vation [ 28 , 29 ]. Here, we revisit this phenomenon from a mech-anistic perspective. During decoding, initial tokens such as BOS in Llama models often attract a disproportionately large share of attention mass [ 28 ]. Our analysis suggests that this behavior is not merely a byproduct of the architecture, but is instead related to an adaptive bypass pattern acquired during training. Empirically, we find that the norm of the BOS value vector remains close to zero across layers, effectively acting as a numerical vacuum, while the BOS key remains geometrically separated from semantic tokens, making it a stable and easily reachable target. This combination allows certain attention heads to route toward BOS and produce an  
+
+> arXiv:2604.16883v1 [cs.LG] 18 Apr 2026 MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Junnan Liu, Xinyan Liu, Peifeng Gao, Zhaobo Qi, Beichen Zhang, Weigang Zhang, and Antoni B. Chan
+
+approximately null update to the residual stream when additional contextual enrichment is unnecessary. From this perspective, atten-tion sinks provide a natural signal for identifying potentially idle heads during decoding. Motivated by this observation, we propose SinkRouter , a plug-and-play, training-free decoding framework that uses sink-aware signals to selectively bypass weakly contributing attention heads. Rather than evicting tokens or compressing cached states, SinkRouter operates at the head level, reducing unnecessary KV-cache loading while preserving the retained context. To translate this selective computation into practical end-to-end acceleration, we further de-velop a hardware-aware Triton kernel with block-level uniform branching and Split-K parallelism, thereby enabling efficient execu-tion under sparse routing decisions. We evaluate SinkRouter on a diverse suite of long-context bench-marks, including LongBench [ 1], InfiniteBench [ 32 ], MMVP [ 25 ], 
+
+CVBench [ 34 ] and MileBench [ 8], across both text-only and mul-timodal backbones, including Llama-3.1-8B, Llama-3.1-70B, Yi-9B-200K, LLaVA-1.5-7B, and LLaVA-1.5-13B. Across these settings, SinkRouter improves decoding efficiency while maintaining com-petitive task performance, achieving up to 2.03 × speedup with a 512K context on an NVIDIA RTX PRO 6000 GPU. These results demonstrate that SinkRouter provides a practical and mechanisti-cally grounded approach to long-context decoding that is comple-mentary to existing KV-cache reduction methods. 
+
+2 Related Work 
+
+KV-Cache Reduction and Token/Visual Pruning. A major line of work accelerates long-context decoding by reducing the amount of historical information retained in memory. Representative meth-ods include Scissorhands [ 19 ], which prunes tokens based on a persistence-of-importance assumption, and H2O [33 ], which re-tains heavy hitters according to cumulative attention scores. Other approaches further compress or approximate discarded context. For example, LESS [ 9] summarizes evicted content into a constant-sized low-rank cache, while SnapKV [ 18 ] selects important tokens from local prompt windows for subsequent decoding. In multimodal set-tings, methods such as LOOK-M [27 ] and FastV [ 4] reduce visual redundancy through pruning or cache filtering. These methods primarily reduce decoding cost through token retention, pruning, or KV-cache compression. SinkRouter targets a different form of redundancy by performing selective computation at the head level during decoding, and can therefore be naturally combined with existing KV-cache reduction strategies. 
+
+Attention Sinks and Their Interpretations. Attention sinks, in which initial tokens absorb a disproportionately large share of attention mass, have been widely observed in autoregressive de-coding. StreamingLLM [28 ] is the first method to exploit attention sinks as stable anchors for streaming inference. Subsequent studies have examined this phenomenon from several perspectives, includ-ing the conditions under which it emerges during training and its relation to softmax normalization [ 12 ], as well as its functional role as an internal register or a structured global representation [ 6, 16 ]. Other efforts attempt to weaken or avoid sink-related behavior through modified attention formulations [ 3, 22 ]. More broadly, many score-based KV-cache eviction methods still rely on token-level attention magnitude as a proxy for importance, and therefore tend to retain high-attention tokens indiscriminately, even when some of them have limited influence on the final decoding outcome. This observation suggests that the mechanism underlying attention sinks is not yet fully captured by existing heuristics. SinkRouter is related to this line of research, but it uses sink-related behavior as a decoding-time signal for selective computation, rather than fo-cusing on preserving, suppressing, or reparameterizing sink tokens themselves. 
+
+Adaptive Computation and Head-Level Sparsity. Our work is also related to adaptive computation in Transformers, where computation is selectively allocated across heads or attention pat-terns. FastGen [11 ] exploits heterogeneity across attention heads and assigns different cache-retention strategies accordingly. MIn-ference [14 ] identifies head-specific sparse attention patterns and accelerates long-context prefilling with optimized sparse kernels. 
+
+DejaVu [ 20 ] uses learned predictors to select input-dependent subsets of attention heads and MLP parameters during inference. SinkRouter shares the same broad goal of reducing redundant com-putation, but differs in both routing criterion and execution gran-ularity: it uses sink-aware signals to guide training-free selective computation during decoding at the head level. 
+
+Hardware-Aware Attention and Sparse Execution. Practical decoding speedup often depends not only on the sparsity pattern itself, but also on whether the execution is supported by dedicated implementations. Although FlashAttention [5 ] is highly opti-mized for dense attention, many sparse or selective attention meth-ods require customized kernels or system support to realize their theoretical savings in practice. Recent examples include NSA [ 30 ], which couples sparse attention design with hardware-aligned op-timizations and specialized kernels. Related efforts such as Shad-owKV [23 ] combine selective attention or sparse KV access with dedicated implementations to improve practical long-context infer-ence efficiency. SinkRouter follows the same practical perspective: beyond its sink-aware routing rule, it includes a hardware-aware Triton implementation that translates reduced KV loading into end-to-end decoding gains. 
+
+3 Insight 
+
+Our work is motivated by three observations, which we examine empirically using representative text-only and multimodal models, including Llama-3.1-8B, Yi-9B-200K, LLaVA-1.5-7B, and LLaVA-1.5-13B. 
+
+From Attention Sinks to a Low-Impact Update Regime. 
+
+Our key hypothesis is that sink-dominant attention corresponds to a low-impact update regime . When the current query does not require substantial contextual enrichment, softmax normalization still forces the model to allocate attention mass somewhere. Rather than assigning this mass to semantically active tokens and per-turbing the residual stream, the model may route it to a sink state whose contribution to the layer output is small. From this perspec-tive, attention sinks may reflect a learned strategy for producing controlled near-no-op updates during decoding, rather than merely an artifact of attention allocation. SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 0 5 10 15 20 25 30                            
+
+> Transformer Layer ID
+> 0
+> 2
+> 4
+> 6
+> Mean  v
+> LLaMA-3.1-8B
+> LLaMA-3.1-8B BOS token
+> LLaMA-3.1-8B Non-BOS
+> 010 20 30 40
+> Transformer Layer ID
+> 0
+> 5
+> 10
+> 15
+> Mean  v
+> Yi-9B-200K
+> Yi-9B-200K BOS token
+> Yi-9B-200K Non-BOS
+> 0510 15 20 25 30
+> Transformer Layer ID
+> 0
+> 2
+> 4
+> 6
+> 8
+> Mean  v
+> LLaVA-1.5-7B
+> LLaVA-1.5-7B BOS token
+> LLaVA-1.5-7B Non-BOS
+> 0510 15 20 25 30 35
+> Transformer Layer ID
+> 0
+> 2
+> 4
+> 6
+> 8
+> Mean  v
+> LLaVA-1.5-13B
+> LLaVA-1.5-13B BOS token
+> LLaVA-1.5-13B Non-BOS
+> Value-Vector Norm: BOS vs Non-BOS Token (per Transformer Layer) Solid = BOS token Dashed = Non-BOS
+
+Figure 1: Mean ∥𝑣 ∥2 across layers. BOS values remain close to zero, while non-BOS values have much larger norms. Why BOS-Dominant Routing Produces Weak Updates. To formalize this intuition, consider the attention output of head ℎ at layer ℓ during decoding step 𝑡 . Let 𝑥 (ℓ ) 
+
+> 𝑡
+
+denote the current hidden state, and define the head update as 
+
+𝑢 ℓ,ℎ (𝑥 (ℓ ) 
+
+> 𝑡
+
+) =
+
+> 𝑡
+
+∑︁ 
+
+> 𝑖 =1
+
+𝛼 𝑖 (𝑥 (ℓ ) 
+
+> 𝑡
+
+) 𝑣 (ℓ,ℎ ) 
+
+> 𝑖
+
+, (1) where the attention weights 𝛼 𝑖 are determined by the query–key similarities under the current hidden state. The corresponding resid-ual update map is 
+
+𝐹 ℓ,ℎ (𝑥 (ℓ ) 
+
+> 𝑡
+
+) = 𝑥 (ℓ ) 
+
+> 𝑡
+
++ 𝑢 ℓ,ℎ (𝑥 (ℓ ) 
+
+> 𝑡
+
+). (2) A central empirical observation is that the BOS value vector has very small magnitude. As shown in Figure 1, the norm ∥𝑣 BOS ∥2
+
+remains close to zero across layers, whereas non-BOS value norms are substantially larger. Because the output of a head is a weighted sum of value vectors, routing most of the attention mass to BOS tends to produce a small residual update. Table 1 shows that when a head assigns a large attention score to BOS, the attention weights on non-BOS tokens become small. As a result, even if those tokens have large value magnitudes, their contributions to the final head output are suppressed by their low attention weights. Together with the near-zero magnitude of the BOS value vector, this attention pattern is likely to yield a small residual update. Consistent with this interpretation, results in Sup-plementary Section B further show that heads with high BOS atten-tion produce substantially smaller residual writes, and that their updates are also less aligned with the overall attention update di-rection of the layer. Taken together, these observations suggest that BOS-dominant heads tend to contribute less to the residual stream during decoding. More formally, if 
+
+𝛼 BOS (𝑥 ) ≥ 1 − 𝛿 and ∥𝑣 BOS ∥2 ≤ 𝜀 𝑣 , (3) then, by the triangle inequality, 
+
+∥𝑢 ℓ,ℎ (𝑥 )∥ 2 = 𝛼 BOS (𝑥 )𝑣 BOS +∑︁ 
+
+> 𝑖 ≠BOS
+
+𝛼 𝑖 (𝑥 )𝑣 𝑖 2 ≤ 𝜀 𝑣 + 𝛿𝑉 max , (4) where 
+
+𝑉 max = max  
+
+> 𝑖 ≠BOS
+
+∥𝑣 𝑖 ∥2. (5) 
+
+Table 1: Attention concentration statistics on LLaMA-3.1-8B, measured from 500 LongBench samples. Ratio denotes the BOS attention score divided by the maximum non-BOS attention score. 
+
+Regime Metric 8K 16K 64K BOS ≈ 0.4 BOS 0.410 0.409 0.418 Max 2.90e-02 2.60e-02 3.65e-02 Mean 7.49e-05 3.76e-05 9.30e-06 Ratio 16.4 × 17.8 × 12.9 ×
+
+BOS ≈ 0.6 BOS 0.598 0.594 0.600 Max 3.63e-02 3.81e-02 3.42e-02 Mean 5.12e-05 2.59e-05 6.39e-06 Ratio 27.4 × 28.9 × 27.9 ×
+
+BOS ≈ 0.8 BOS 0.803 0.803 0.804 Max 1.82e-02 1.95e-02 1.89e-02 Mean 2.50e-05 1.26e-05 3.13e-06 Ratio 51.8 × 51.0 × 50.5 ×
+
+This bound supports an approximate fixed-point interpretation of sink-dominant routing. Since the residual update map is given by 𝐹 ℓ,ℎ (𝑥 ) = 𝑥 + 𝑢 ℓ,ℎ (𝑥 ), a small update norm implies that 𝐹 ℓ,ℎ (𝑥 )
+
+remains close to 𝑥 . Accordingly, when 𝛿 is small and ∥𝑣 BOS ∥2 re-mains close to zero, sink-dominant states may be viewed as 𝜀 -fixed points of the decode-time attention update, under which the resid-ual stream is only weakly perturbed. 
+
+Why the Sink Is Reachable and Stable. A remaining question is why BOS can consistently receive such large attention mass. The sink behavior of the decoding steps is governed by the interac-tion between the current query 𝑞 𝑡 and the cached BOS key/value 
+
+(𝑘 BOS , 𝑣 BOS ). The attention score between a query and a key is jointly determined by vector norms and directional alignment: 
+
+𝑞𝑘 ⊤ = ∥𝑞 ∥2 ∥𝑘 ∥2 cos (𝑞, 𝑘 ). (6) If BOS were dominant because of an unusually large key norm, then the sink effect would be norm-driven. However, Figure 2 shows the opposite: the BOS key norm ∥𝑘 BOS ∥2 is smaller than that of semantic tokens. This suggests that key magnitude is unlikely to be the main explanation. The dominant factor is therefore more likely to be directional alignment. If BOS receives a large attention score despite its rela-tively small key norm, the query is likely to be aligned with it in direction. This interpretation is consistent with the geometry of the key space. Figure 3 suggests that BOS keys form a compact and stable region in the key space. In the PCA projection, this region appears relatively concentrated and close to the global mean of keys, which is consistent with the hypothesis that BOS keys are largely shaped by a shared, bias-like component rather than token-specific semantic content. Such geometric isolation makes BOS a plausible routing target when a token requires limited contextual retrieval, because the query can move toward this separated BOS di-rection without directly competing with the dense semantic-token manifold. Additional threshold calibration and stability results in Supplementary Section A further indicate that this sink-oriented routing behavior recurs across inputs and can be regulated in a relatively predictable manner under a fixed threshold. MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Junnan Liu, Xinyan Liu, Peifeng Gao, Zhaobo Qi, Beichen Zhang, Weigang Zhang, and Antoni B. Chan 0 5 10 15 20 25 30                            
+
+> Transformer Layer ID
+> 0
+> 5
+> 10
+> 15
+> 20
+> Mean  k
+> LLaMA-3.1-8B
+> LLaMA-3.1-8B BOS token
+> LLaMA-3.1-8B Non-BOS
+> 010 20 30 40
+> Transformer Layer ID
+> 0
+> 10
+> 20
+> Mean  k
+> Yi-9B-200K
+> Yi-9B-200K BOS token
+> Yi-9B-200K Non-BOS
+> 0510 15 20 25 30
+> Transformer Layer ID
+> 0
+> 5
+> 10
+> 15
+> Mean  k
+> LLaVA-1.5-7B
+> LLaVA-1.5-7B BOS token
+> LLaVA-1.5-7B Non-BOS
+> 0510 15 20 25 30 35
+> Transformer Layer ID
+> 0
+> 5
+> 10
+> 15
+> Mean  k
+> LLaVA-1.5-13B
+> LLaVA-1.5-13B BOS token
+> LLaVA-1.5-13B Non-BOS
+> Key-Vector Norm: BOS vs Non-BOS Token (per Transformer Layer) Solid = BOS token Dashed = Non-BOS
+
+Figure 2: Mean ∥𝑘 ∥2 across layers. BOS keys have smaller norms than semantic tokens, suggesting that sink dominance is not explained by key magnitude alone. 0 5 10 15 20 25 30       
+
+> Layer Index
+> 0.5
+> 0.0
+> 0.5
+> 1.0
+> Cosine Similarity
+> LLaMA-3.1-8B
+> BOS-to-nonBOS
+> Within-nonBOS
+> Difference
+> 10 010 20
+> PC1 (21.9%)
+> 20
+> 15
+> 10
+> 5
+> 0
+> 5
+> 10
+> 15
+> PC2 (20.6%)
+> PCA of Key Vectors head 0 (= BOS)
+> non-BOS L4
+> BOS L4
+> non-BOS L8
+> BOS L8
+> non-BOS L16
+> BOS L16
+> non-BOS L24
+> BOS L24
+
+Figure 3: Cosine similarity and PCA of key vectors. BOS keys form a relatively isolated cluster away from the principal manifold of semantic tokens. 
+
+Taken together, these observations suggest that attention sinks may be understood as geometrically isolated, low-impact 𝜀 -fixed points to which the Transformer can route when additional contex-tual computation appears unnecessary. 
+
+4 Method 
+
+Based on the mechanistic perspective developed in Section 3, we propose SinkRouter , a training-free, plug-and-play selective rout-ing framework for long-context decoding. Before loading the his-torical KV cache, SinkRouter estimates whether the current KV group is likely to enter a sink-dominant, low-impact regime. If so, it skips historical KV-cache loading and replaces the corresponding attention output with a cheap surrogate; otherwise, it falls back to standard attention. In this way, SinkRouter uses sink-related behavior as an execution-time signal for decoding acceleration. A central design principle of SinkRouter is that all routing deci-sions are made at the KV-group level . Under grouped-query atten-tion (GQA), multiple query heads share the same KV cache, making the KV group the natural unit of memory access and execution. SinkRouter therefore performs routing, calibration, and evaluation consistently at the group level rather than at the individual-head level. The overall workflow is illustrated in Figure 4. 
+
+4.1 Prefill Phase: Initial-Token Anchor Caching 
+
+For notational generality, we use token 0 to denote the first cached token in each KV group. In the models studied in this work, this token coincides with BOS. SinkRouter leaves the prefill phase un-changed so that prompt processing remains identical to standard full attention. The only additional step is to cache lightweight meta-data associated with token 0 in each layer 𝑙 and KV group 𝑔 :
+
+∥𝐾 (𝑙,𝑔 ) 
+
+> 0
+
+∥2 (7) Since this metadata corresponds to only one token per KV group, its memory overhead is negligible relative to the full KV cache. These anchors provide the minimal information needed for decode-time routing. In the models studied here, Section 3 shows that sink-dominant behavior is associated with strong alignment to the BOS direction and a low-impact attention output. SinkRouter uses the cached initial-token anchors to detect this regime cheaply during decoding, without scanning the full historical context. 
+
+4.2 Decode-Time Group Routing 
+
+During autoregressive decoding, the dominant cost comes from re-peatedly attending over the growing KV cache. SinkRouter reduces this cost by determining, for each KV group, whether its historical KV cache needs to be loaded. Let 𝐻 𝑞 and 𝐻 𝑘𝑣 denote the numbers of query heads and KV heads, respectively, and let 
+
+𝑟 = 𝐻 𝑞 
+
+𝐻 𝑘𝑣 
+
+(8) be the number of query heads associated with each KV group. For group 𝑔 , we denote the corresponding set of query heads by 
+
+Q𝑔 = {𝑞 𝑔, 1, 𝑞 𝑔, 2, . . . , 𝑞 𝑔,𝑟 }. (9) 
+
+Target regime. We first define the target regime that SinkRouter aims to detect. For a query head 𝑞 , let 𝛼 0 denote the attention mass assigned to token 0 under full attention. We regard the query as sink-like if 
+
+𝛼 0 > 𝛾, (10) where 𝛾 is an initial-token dominance threshold. This corresponds to the regime identified in Section 3: once token 0 receives sufficiently large attention mass, the non-initial-token attention weights become small and the resulting attention output is expected to have low impact. In the models studied in this work, token 0 coincides with BOS, and Table 1 shows that around 
+
+𝛼 BOS ≈ 0.6, the competing non-BOS attention weights are already very small. We therefore use a slightly more conservative value, 
+
+𝛾 = 0.65 , as the operational threshold. 
+
+Routing signal. The oracle event in Eq. 10 cannot be evaluated before attention is computed, so SinkRouter uses a lightweight proxy based on alignment with the initial-token anchor. For each query head 𝑞 𝑔,𝑖 ∈ Q 𝑔 , we compute 
+
+𝑠 𝑔,𝑖 = cos (𝑞 𝑔,𝑖 , 𝐾 (𝑙,𝑔 ) 
+
+> 0
+
+) = 𝑞 𝑔,𝑖 𝐾 (𝑙,𝑔 )⊤ 
+
+> 0
+
+∥𝑞 𝑔,𝑖 ∥2 ∥𝐾 (𝑙,𝑔 ) 
+
+> 0
+
+∥2
+
+. (11) This choice follows naturally from Section 3: in the models studied here, the initial-token key does not have an unusually large norm, SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Prompt 
+
+> Vision Encoder
+> Visual Vector
+> How many
+> people are in
+> the picture?
+
+Tokenizer 
+
+> MLP
+> Text Tokens
+> BOS
+> Visual Tokens
+> MLP
+
++
+
+Attention       
+
+> WqWkWv
+> VQK
+> KVCache Layer
+> Head
+> sequence length
+> Store
+> Store ||K 0|| ||K 0|| ||K 0|| ||K 0||
+> Head
+
+Prefill 
+
+𝐀 𝐀 ∙ 𝐀 0
+
+|| 𝐀 𝐀 || || 𝐀 0|| > 𝐀 ?
+
+Current Decode Step Q t Heads 
+
+Standard Path  
+
+> Active Q tHeads
+> Load necessary
+> KVcache
+> Attention
+
+Sink Path   
+
+> NO
+> YES
+> Sink Q tHeads
+> Active KV Heads
+> Skip KVCache loading
+> Retrieve
+> Skip
+
+Attention 
+
+> Output
+> Zero Surrogate
+
+Updated Residual Stream 
+
+Figure 4: Workflow of SinkRouter. During prefill, the model performs standard full attention and extracts lightweight initial-token anchor metadata for each KV group. During decoding, SinkRouter uses these anchors to identify sink-oriented groups before historical KV-cache loading. Sink groups exit early with a zero surrogate, while active groups proceed with standard attention. 
+
+so sink-dominant behavior is more naturally associated with direc-tional alignment than with key magnitude. The score in Eq. 11 is inexpensive to compute and avoids any scan over the historical KV cache. 
+
+Group-level decision. Because all query heads in Q𝑔 share the same KV cache, the routing decision must be made jointly at the KV-group level. We therefore aggregate the query-level scores into a single group score: 
+
+𝑆 𝑔 = 1
+
+𝑟 ∑︁ 𝑞 𝑔,𝑖 ∈ Q 𝑔 
+
+𝑠 𝑔,𝑖 . (12) We then classify group 𝑔 as a Sink Group if 
+
+𝑆 𝑔 > 𝜏 (𝐿 ), (13) and as an Active Group otherwise, where 𝜏 (𝐿 ) is a length-dependent routing threshold. 
+
+Threshold calibration. The score in Eq. 11 is only a proxy, so the threshold 𝜏 (𝐿 ) must be calibrated. A single global threshold is in-sufficient because the operating point changes systematically with context length. Supplementary Section A shows that the threshold required to realize a fixed skip budget varies systematically (and non-monotonically) with context length while exhibiting only lim-ited variation across tasks. We therefore calibrate a length-adaptive threshold 𝜏 (𝐿 ) once per model as a function of context length 𝐿 
+
+by determining the threshold required to realize the target skip ratio at a small set of representative lengths and fitting the result-ing calibration points with a cubic function of normalized context length. 
+
+Execution policy. For Sink Groups, SinkRouter skips historical KV-cache loading and replaces the corresponding attention output with a zero surrogate: 
+
+Output (𝑞 𝑔,𝑖 ) ≈ 0, ∀𝑞 𝑔,𝑖 ∈ Q 𝑔 if 𝑆 𝑔 > 𝜏 (𝐿 ). (14) This surrogate is motivated by the low-impact regime characterized in Section 3. In the models studied here, token 0 coincides with BOS, whose value vector exhibits near-zero magnitude under sink-dominant routing. The zero surrogate therefore serves as a simple and efficient approximation in this regime. For Active Groups, SinkRouter falls back to standard attention over the available KV cache. In this way, SinkRouter preserves exact computation where contextual retrieval is still likely to mat-ter, while turning sink-dominant groups into a cheap decode-time bypass. 
+
+4.3 System-Level Optimization 
+
+Group-level sparsity alone does not guarantee wall-clock speedup. In decode-time attention, the critical path is governed largely by repeated KV-cache movement rather than arithmetic alone. To translate sink-aware sparsity into practical acceleration, we im-plement SinkRouter as a Triton kernel that treats the KV group MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Junnan Liu, Xinyan Liu, Peifeng Gao, Zhaobo Qi, Beichen Zhang, Weigang Zhang, and Antoni B. Chan 
+
+as the basic execution unit and performs routing before historical KV-cache loading. 
+
+Group-centric execution unit. Our implementation follows the native structure of GQA. Queries are organized as 
+
+𝑄 ∈ R𝐵 ×𝐻 𝑘𝑣 ×𝐺 ×𝐷 ,
+
+where 𝐺 is the number of query heads that share one KV head, while the cached keys and values are stored as 
+
+𝐾, 𝑉 ∈ R𝐵 ×𝐻 𝑘𝑣 ×𝐿 ×𝐷 ,
+
+and the initial-token anchor is stored as 
+
+𝐾 0 ∈ R𝐵 ×𝐻 𝑘𝑣 ×𝐷 .
+
+This layout keeps the shared-KV structure explicit throughout exe-cution and avoids explicit repeat_kv -style expansion. 
+
+Inline routing before historical KV loading. Routing is evaluated inside the attention kernel, before any historical KV-cache block is fetched. For each program instance, the kernel first loads the initial-token key of the current KV group, evaluates the alignment score for the query heads in that group, and applies the routing condition. If the group is classified as a Sink Group, the kernel directly writes the zero surrogate and returns without loading historical 𝐾 or 𝑉 .This removes the need for a separate routing kernel and ensures that skipped groups avoid historical KV-cache transfer altogether. 
+
+Split-K attention for active groups. If a group is classified as active, SinkRouter executes attention with Split-K parallelism along the sequence dimension. The sequence of length 𝐿 is partitioned into 
+
+num_splits chunks, and each program instance processes one chunk of the shared KV cache: 
+
+[chunk_start , chunk_end ) ⊆ [ 0, 𝐿 ).
+
+Within each split, the kernel loads one query tile 𝑄 ∈ R𝐺 ×𝐷 and iterates over contiguous KV blocks 𝐾, 𝑉 ∈ R𝐵 𝐾 ×𝐷 using online softmax accumulation. This preserves contiguous KV fetching on the active path and helps maintain hardware utilization when many sink groups exit early. Taken together, these system-level optimizations align SinkRouter with the shared-KV structure of GQA, reduce unnecessary KV-cache traffic, and help translate sink-aware sparsity into practical decoding speedup. 
+
+5 Experiments 5.1 Experimental Setup 
+
+Models. We evaluate SinkRouter on both text-only and multimodal backbones. For text-only evaluation, we use Llama-3.1-8B, Llama-3.1-70B, and Yi-9B-200K. For multimodal evaluation, we use LLaVA-1.5-7B and LLaVA-1.5-13B. All models are evaluated using their pretrained checkpoints without finetuning, and SinkRouter is ap-plied only at inference time. 
+
+Benchmarks. We evaluate text-only models on LongBench [1 ]and InfiniteBench [ 32 ]. For multimodal models, we use MMVP [ 25 ], 
+
+CVBench [ 34 ], and MileBench [ 8]. LongBench is used to assess general long-context task performance, while InfiniteBench is used to probe more demanding long-context retrieval and precision-sensitive settings. For multimodal models, MileBench , CVBench 
+
+and MMVP are used to test whether the same decode-time rout-ing mechanism transfers to multimodal backbones. We follow the official evaluation protocols and metrics of each benchmark. 
+
+Baselines. We compare SinkRouter with the Full Attention base-line and representative training-free decoding baselines. For text-only evaluation, we include FastGen [11 ], StreamingLLM [ 28 ]and H2O [33 ]. For multimodal evaluation, we include LOOK-M [ 27 ]and FastV [4 ]. All baselines are run using their official implemen-tations. 
+
+Budget alignment and fairness. For fair comparison, we align the effective KV-cache budget across methods rather than their method-specific hyperparameters. In our setup, SinkRouter retains about 40% of heads/groups during decoding, corresponding to an effective KV-cache budget of approximately 40%. We therefore configure the baselines to match this budget whenever applica-ble. Specifically, for H2O , we allocate 20% of the cache to recent tokens and 20% to heavy hitters; for StreamingLLM , we retain the first 4 sink tokens and set the recent window to 40% of the cache; and for the multimodal baselines LOOK-M and FastV , we use a 40% compression budget. SinkRouter is calibrated with a routing thresh-old that realizes this retained-head budget in practice. Although the resulting sparsity patterns differ across methods, all methods are evaluated under closely matched resource constraints. 
+
+Implementation and hardware. All efficiency results are mea-sured on an NVIDIA RTX PRO 6000 GPU. All experiments are run in bf16 precision. 
+
+5.2 Accuracy Evaluation 
+
+We evaluate whether SinkRouter preserves task performance on both text-only and multimodal benchmarks under matched decod-ing budgets. Overall, SinkRouter remains close to the correspond-ing Full Attention baselines across most settings, indicating that sink-aware selective computation introduces only limited accuracy degradation in practice. Table 2 reports the text-only results on LongBench. Across all three backbones, SinkRouter remains close to the corresponding Full Attention baseline on the benchmark average. This pattern becomes clearer when compared with more aggressive approxima-tion methods: FastGen and StreamingLLM show substantially larger drops, especially on the smaller and mid-sized models, whereas SinkRouter stays within a much narrower range of the original model performance. H2O is also generally competitive with Full At-tention, but SinkRouter achieves similarly stable behavior through a different mechanism. Overall, these results suggest that SinkRouter preserves long-context task performance with smaller average degradation than stronger token-eviction baselines. Table 3 shows a similar trend on InfiniteBench. SinkRouter re-mains almost identical to Full Attention on the benchmark average and stays competitive on precision-sensitive retrieval-style tasks. At the same time, the results do not indicate a uniform improvement over Full Attention on every task. A more accurate interpretation is that SinkRouter introduces very limited disturbance to the original retrieval behavior while remaining more robust than FastGen in these extreme-context settings. Table 4 reports the basic multimodal perception results on MMVP and CV-Bench. SinkRouter remains very close to the corresponding SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+Table 2: Detailed results on LongBench. Scores are reported in percentage. Δ Avg. denotes the difference from the corresponding Full Attention baseline within each model block. 
+
+Method NQA MF-en HP MQ DR GR PR LCC Avg. Δ Avg. Llama-3.1-8B 
+
+Full Attention 30.00 55.14 56.15 30.08 33.85 35.20 99.50 64.73 50.58 –H2O 29.69 54.99 56.10 30.55 34.11 35.15 99.50 64.81 50.61 +0.03 ↑
+
+FastGen 26.02 52.92 52.79 26.54 18.75 31.61 92.50 64.21 45.67 -4.91 ↓
+
+StreamingLLM 20.70 38.05 40.18 15.90 14.93 31.29 36.50 65.03 32.82 -17.76 ↓
+
+SinkRouter(Ours) 30.08 53.96 55.71 29.62 32.14 33.87 99.50 64.24 49.89 -0.69 ↓
+
+Yi-9B-200K 
+
+Full Attention 11.92 37.60 51.66 27.55 21.66 30.62 59.50 73.62 39.27 –H2O 12.25 36.56 50.73 26.95 21.04 29.30 58.00 72.84 38.46 -0.81 ↓
+
+FastGen 10.65 34.29 43.97 17.52 12.94 24.43 33.50 71.87 31.15 -8.12 ↓
+
+StreamingLLM 4.29 31.17 43.07 17.93 13.75 22.61 19.50 62.83 26.89 -12.38 ↓
+
+SinkRouter(Ours) 11.66 37.24 52.01 27.81 20.81 30.13 50.50 73.22 37.92 -1.35 ↓
+
+Llama-3.1-70B 
+
+Full Attention 34.81 54.24 64.45 47.08 32.70 34.93 98.00 70.88 54.64 –H2O 34.92 54.31 64.45 47.08 32.53 34.92 98.00 69.73 54.49 -0.15 ↓
+
+FastGen 30.24 52.32 62.96 41.28 19.62 31.62 95.29 68.01 50.17 -4.47 ↓
+
+StreamingLLM 25.35 46.42 55.23 26.15 16.39 33.41 60.50 68.95 41.55 -13.09 ↓
+
+SinkRouter(Ours) 34.43 54.67 64.35 46.75 33.01 34.84 98.00 70.46 54.56 -0.08 ↓
+
+Table 3: Results on InfiniteBench for LLaMA-3.1-8B. Scores are reported in percentage. Δ Avg. is computed relative to the Full Attention baseline. 
+
+Dataset Full Attention FastGen SinkRouter(Ours) 
+
+passkey 100.00 99.00 100.00 number_string 99.49 99.00 99.49 kv_retrieval 54.60 40.50 56.80 code_debug 23.52 21.50 22.87 math_find 49.50 34.50 50.00 longdialogue_qa_eng 19.00 17.00 19.00 longbook_choice_eng 68.50 69.00 68.00 longbook_qa_eng 28.52 27.20 27.43 longbook_qa_chn 37.74 37.66 37.66 
+
+Avg. 53.43 49.48 53.47 
+
+Δ Avg. – -3.95 ↓ +0.04 ↑
+
+Table 4: Results on MMVP and CV-Bench. Scores are reported in percentage. Δ Avg. denotes the difference from the corre-sponding Full Attention baseline within each model block. 
+
+Method MMVP CV-Bench 2𝐷 CV-Bench 3𝐷 Avg. LLaVA-1.5-7B 
+
+Full Attention 53.44 46.87 61.83 54.05 SinkRouter(Ours) 52.63 47.15 61.67 53.82 
+
+LLaVA-1.5-13B 
+
+Full Attention 60.73 59.25 62.08 60.69 SinkRouter(Ours) 60.73 58.97 61.92 60.54 
+
+LLaVA baselines on both the 7B and 13B models. The average dif-ferences are small, and there is no sign of systematic degradation in either the 2D or 3D subsets. This suggests that the routing mech-anism primarily affects redundant computation during decoding, while leaving the underlying visual-language alignment largely unchanged. Table 5 further supports this pattern on the more challenging multimodal reasoning tasks in MileBench. SinkRouter remains close to Full Attention on both LLaVA backbones, indicating that the proposed decode-time routing transfers smoothly to multimodal reasoning workloads. LOOK-M shows noticeably degradation on the benchmark average. FastV is competitive on the benchmark average and in some settings is slightly above the Full Attention baseline. However, this advantage is not uniformly reflected in all models and tasks. A more cautious reading of the results is that SinkRouter preserves multimodal performance at a level close to Full Attention, while avoiding the larger degradations seen in more aggressive compression-based baselines. 
+
+5.3 Efficiency Evaluation 
+
+We evaluate the decoding efficiency of SinkRouter on a NVIDIA RTX PRO 6000 GPU. We first examine the accuracy–speed trade-off at a fixed 128K context. In Figure 5, each point corresponds to a routing threshold and is annotated with the realized skip ratio. The trade-off curve exhibits a clear transition around 𝜏 = 0.55 . Before this point, increasing the skip ratio yields efficiency gains while the accuracy changes slightly. Beyond this point, accuracy declines more rapidly as the skip ratio increases. This behavior suggests that moderate skip ratios capture most of the efficiency gain while maintaining accuracy near the dense baseline. We next evaluate end-to-end decoding latency across context lengths and SinkRouter uses a length-dependent threshold cali-brated to achieve an average skip ratio of approximately 60%. As MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Junnan Liu, Xinyan Liu, Peifeng Gao, Zhaobo Qi, Beichen Zhang, Weigang Zhang, and Antoni B. Chan 
+
+Table 5: Results on MileBench. Scores are reported in percentage. Δ Avg. denotes the difference from the corresponding Full Attention baseline within each model block. Method ObjectExistence ActionLocalization DocVQA TQA SpotTheDiff CLEVR-Change MMCoQA Avg. Δ Avg. LLaVA-1.5-7B 
+
+Full Attention 51.5 24.0 43.5 42.0 15.8 14.7 40.5 33.14 –FastV 51.0 26.5 43.0 41.5 16.2 15.3 41.5 33.57 +0.43 ↑
+
+LOOK-M 50.5 24.0 41.0 38.5 17.1 11.9 9.5 27.50 -5.64 ↓
+
+SinkRouter(Ours) 51.5 24.0 44.0 42.0 15.8 15.9 37.0 32.89 -0.25 ↓
+
+LLaVA-1.5-13B 
+
+Full Attention 47.5 31.5 51.0 51.5 14.8 15.2 45.0 36.64 –FastV 48.5 32.5 51.5 52.5 15.2 14.8 45.0 37.14 +0.50 ↑
+
+LOOK-M 47.5 30.0 50.5 51.5 13.6 13.5 9.5 30.87 -5.77 ↓
+
+SinkRouter(Ours) 47.5 31.5 51.0 51.5 15.4 16.6 44.0 36.79 +0.15 ↑0.95 1.00 1.05 1.10 1.15 1.20 1.25 1.30 1.35 
+
+Speedup   
+
+> 25
+> 30
+> 35
+> 40
+> 45
+> 50
+> Accuracy
+> 22%
+> =0.65 40%
+> =0.6 58%
+> =0.55
+> 71%
+> =0.5
+> 85%
+> =0.45
+> 89%
+> =0.35
+
+SinkRouter Trade-off 
+
+> Skip Ratio
+> Mean: 40.9
+
+Figure 5: Accuracy–speed trade-off of SinkRouter at a fixed 128K context. Accuracy is measured by the average score on 
+
+LongBench . Each point corresponds to a routing threshold and is annotated with the realized skip ratio. 
+
+shown in Figure 6, SinkRouter consistently reduces per-token de-coding latency, and the absolute latency gap widens steadily as the context grows. Figure 7 further explains this behavior through latency com-position. As the context grows, the attention path occupies an increasingly larger fraction of total decoding latency, while the non-attention path changes more modestly. Similarly, the end-to-end speedup of SinkRouter also increases with context length. These results show that both the absolute time saved and the resulting speedup become more pronounced as decoding is increasingly dom-inated by the attention path. The gain remains limited before 64K. In this regime, historical KV-cache loading is still relatively modest, so memory-bandwidth pressure has not yet become the dominant bottleneck. Consequly, the benefit of SinkRouter mainly comes from its hardware-aware execution path, which avoids redundant memory traffic and ten-sor expansion associated with explicit repeat_kv operations in 8K 32K 64K 128K 256K 512K    
+
+> Context Length
+> 20
+> 30
+> 40
+> 50
+> 60
+> Decoding Latency (ms/token)
+> --0.3 ms -1.0 ms -1.4 ms -5.9 ms
+> -14.0 ms
+> -32.7 ms
+> Decode Latency
+> Baseline (Full Attention)
+> SinkRouter
+
+Figure 6: End-to-end per-token decoding latency across con-text lengths. SinkRouter consistently reduces decoding la-tency relative to the Full Attention baseline, and the absolute latency reduction becomes increasingly pronounced as the context grows. 
+
+grouped-query attention. As the context grows further, attention-related data movement accounts for a much larger share of total latency, so skipping routed groups could translate into end-to-end gains. 
+
+6 Conclusion 
+
+In this work, we present SinkRouter, a training-free routing frame-work that repurposes attention sinks as an emergent idling sig-nal. By characterizing the initial token as a numerical vacuum with a near-zero Value norm, we enable the model to identify and bypass non-contributing attention groups during decoding. To achieve real-world efficiency, we developed a hardware-aware Tri-ton kernel.Evaluated on diverse text and multimodal benchmarks, SinkRouter maintains near-lossless performance across Llama-3.1 and LLaVA-1.5 backbones, and achieves up to 2.03 × faster decoding with a 512K context. SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 8K 32K 64K 128K 256K 512K    
+
+> Context Length
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> Decode Latency (ms/token)
+> 37%
+> 20%
+> 43% 19%
+> 53%
+> 22% 62% 26%
+> 73%
+> 35%
+> 80%
+> 46%
+
+Decode Latency, Attention Share, and Speedup  
+
+> Baseline Attention
+> Baseline Non-Attention
+> SinkRouter Attention
+> SinkRouter Non-Attention
+> Speedup
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> 2.2
+> Speedup (×)
+> 0.99×
+> 1.04× 1.06×
+> 1.25×
+> 1.52×
+> 2.03×
+
+Figure 7: Latency composition and end-to-end speedup across context lengths. The stacked bars show the attention and non-attention contributions to per-token decoding latency for Full Attention and SinkRouter, while the line shows the resulting speedup. 
+
+References 
+
+[1] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , Lun-Wei Ku, Andre Martins, and Vivek Srikumar (Eds.). Association for Computational Linguistics, Bangkok, Thailand, 3119–3137. doi:10.18653/v1/2024.acl-long.172 [2] Payman Behnam, Yaosheng Fu, Ritchie Zhao, Po-An Tsai, Zhiding Yu, and Alexey Tumanov. 2026. RocketKV: accelerating long-context LLM inference via two-stage KV cache compression. In Proceedings of the 42nd International Conference on Machine Learning (Vancouver, Canada) (ICML’25) . JMLR.org, Vancouver, Canada, Article 123, 35 pages. [3] Yelysei Bondarenko, Markus Nagel, and Tijmen Blankevoort. 2023. Quantizable transformers: removing outliers by helping attention heads do nothing. In Pro-ceedings of the 37th International Conference on Neural Information Processing Systems (New Orleans, LA, USA) (NIPS ’23) . Curran Associates Inc., Red Hook, NY, USA, Article 3282, 30 pages. [4] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang Lin, Chang Zhou, and Baobao Chang. 2024. An Image is Worth 1/2 Tokens After Layer 2: Plug-and-Play Inference Acceleration for Large Vision-Language Models. In Computer Vision – ECCV 2024: 18th European Conference, Milan, Italy, September 29–October 4, 2024, Proceedings, Part LXXXI (Milan, Italy). Springer-Verlag, Berlin, Heidelberg, 19–35. doi:10.1007/978-3-031-73004-7_2 [5] Tri Dao. 2024. FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning. In The Twelfth International Conference on Learning Repre-sentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net, Vienna, Austria, 1–14. https://openreview.net/forum?id=mZn2Xyh9Ec [6] Timothée Darcet, Maxime Oquab, Julien Mairal, and Piotr Bojanowski. 2024. Vision Transformers Need Registers. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenRe-view.net, Vienna, Austria, 1–21. https://openreview.net/forum?id=2dnO3LLiJ1 [7] Yiran Ding, Li Lyna Zhang, Chengruidong Zhang, Yuanyuan Xu, Ning Shang, Jiahang Xu, Fan Yang, and Mao Yang. 2024. LongRoPE: Extending LLM Context Window Beyond 2 Million Tokens. arXiv:2402.13753 [cs.CL] https://arxiv.org/ abs/2402.13753 [8] Song Dingjie, Shunian Chen, Guiming Hardy Chen, Fei Yu, Xiang Wan, and Benyou Wang. 2024. MileBench: Benchmarking MLLMs in Long Context. In 
+
+First Conference on Language Modeling . Philadelphia, PA, USA, 1–31. https: //openreview.net/forum?id=Uhwze2LEwq [9] Harry Dong, Xinyu Yang, Zhenyu Zhang, Zhangyang Wang, Yuejie Chi, and Beidi Chen. 2024. Get more with LESS: synthesizing recurrence with KV cache compression for efficient LLM inference. In Proceedings of the 41st International Conference on Machine Learning (ICML’24) . JMLR.org, Vienna, Austria, Article 454, 16 pages. [10] Yao Fu. 2024. Challenges in Deploying Long-Context Transformers: A Theoretical Peak Performance Analysis. arXiv:2405.08944 [cs.LG] https://arxiv.org/abs/2405. 08944 [11] Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang, Jiawei Han, and Jianfeng Gao. 2024. Model Tells You What to Discard: Adaptive KV Cache Compression for LLMs. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net, Vienna, Austria, 1–14. https://openreview.net/forum?id=uNrFpDPMyo [12] Xiangming Gu, Tianyu Pang, Chao Du, Qian Liu, Fengzhuo Zhang, Cunxiao Du, Ye Wang, and Min Lin. 2025. When Attention Sink Emerges in Language Models: An Empirical View. In The Thirteenth International Conference on Learning Repre-sentations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net, Singapore, 1–31. https://openreview.net/forum?id=78Nn4QJTEN [13] Anwen Hu, Haiyang Xu, Jiabo Ye, Ming Yan, Liang Zhang, Bo Zhang, Chen Li, Ji Zhang, Qin Jin, Fei Huang, and Jingren Zhou. 2024. mPLUG-DocOwl 1.5: Unified Structure Learning for OCR-free Document Understanding. arXiv:2403.12895 [cs.CV] https://arxiv.org/abs/2403.12895 [14] Huiqiang Jiang, Yucheng Li, Chengruidong Zhang, Qianhui Wu, Xufang Luo, Surin Ahn, Zhenhua Han, Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. MInference 1.0: accelerating pre-filling for long-context LLMs via dynamic sparse attention. In Proceedings of the 38th International Con-ference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) . Curran Associates Inc., Red Hook, NY, USA, Article 1663, 35 pages. [15] Dongwon Jo, Jiwon Song, Yulhwa Kim, and Jae-Joon Kim. 2026. FastKV: De-coupling of Context Reduction and KV Cache Compression for Prefill-Decoding Acceleration. arXiv:2502.01068 [cs.LG] https://arxiv.org/abs/2502.01068 [16] Seil Kang, Jinyeong Kim, Junhyeok Kim, and Seong Jae Hwang. 2025. See What You Are Told: Visual Attention Sink in Large Multimodal Models. In The Thir-teenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net, Singapore, 1–28. https://openreview.net/ forum?id=7uDI7w5RQA [17] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM Knows What You are Looking for Before Generation. arXiv:2404.14469 [cs.CL] https://arxiv.org/abs/2404.14469 [18] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM knows what you are looking for before generation. In Proceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) . Curran Associates Inc., Red Hook, NY, USA, Article 722, 24 pages. [19] Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyrillidis, and Anshumali Shrivastava. 2023. Scissorhands: Exploit-ing the Persistence of Importance Hypothesis for LLM KV Cache Compression at Test Time. In Advances in Neural Information Processing Systems 36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16, 2023 , Alice Oh, Tristan Naumann, Amir Globerson, Kate Saenko, Moritz Hardt, and Sergey Levine (Eds.). Curran Asso-ciates, Inc., LA, USA, 1–23. http://papers.nips.cc/paper_files/paper/2023/hash/ a452a7c6c463e4ae8fbdc614c6e983e6-Abstract-Conference.html [20] Zichang Liu, Jue Wang, Tri Dao, Tianyi Zhou, Binhang Yuan, Zhao Song, An-shumali Shrivastava, Ce Zhang, Yuandong Tian, Christopher Re, and Beidi Chen. 2023. Deja Vu: Contextual Sparsity for Efficient LLMs at Inference Time. arXiv:2310.17157 [cs.LG] https://arxiv.org/abs/2310.17157 [21] Xiurui Pan, Endian Li, Qiao Li, Shengwen Liang, Yizhou Shan, Ke Zhou, Yingwei Luo, Xiaolin Wang, and Jie Zhang. 2024. InstInfer: In-Storage Attention Offloading for Cost-Effective Long-Context LLM Inference. arXiv:2409.04992 [cs.AR] https: //arxiv.org/abs/2409.04992 [22] Zihan Qiu, Zekun Wang, Bo Zheng, Zeyu Huang, Kaiyue Wen, Songlin Yang, Rui Men, Le Yu, Fei Huang, Suozhi Huang, Dayiheng Liu, Jingren Zhou, and Junyang Lin. 2025. Gated Attention for Large Language Models: Non-linearity, Sparsity, and Attention-Sink-Free. CoRR abs/2505.06708 (2025), 1–17. arXiv:2505.06708 doi:10.48550/ARXIV.2505.06708 [23] Hanshi Sun, Li-Wen Chang, Wenlei Bao, Size Zheng, Ningxin Zheng, Xin Liu, Harry Dong, Yuejie Chi, and Beidi Chen. 2025. ShadowKV: KV Cache in Shad-ows for High-Throughput Long-Context LLM Inference. In Forty-second Interna-tional Conference on Machine Learning, ICML 2025, Vancouver, BC, Canada, July 13-19, 2025 (Proceedings of Machine Learning Research) , Aarti Singh, Maryam Fazel, Daniel Hsu, Simon Lacoste-Julien, Felix Berkenkamp, Tegan Maharaj, Kiri Wagstaff, and Jerry Zhu (Eds.). PMLR / OpenReview.net, Vancouver, Canada, 1–21. https://proceedings.mlr.press/v267/sun25b.html [24] Llama Team. 2024. The Llama 3 Herd of Models. CoRR abs/2407.21783 (2024), 1–92. arXiv:2407.21783 doi:10.48550/ARXIV.2407.21783 [25] Shengbang Tong, Zhuang Liu, Yuexiang Zhai, Yi Ma, Yann LeCun, and Saining Xie. 2024. Eyes Wide Shut? Exploring the Visual Shortcomings of Multimodal LLMs. arXiv:2401.06209 [cs.CV] https://arxiv.org/abs/2401.06209 MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Junnan Liu, Xinyan Liu, Peifeng Gao, Zhaobo Qi, Beichen Zhang, Weigang Zhang, and Antoni B. Chan 
+
+[26] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yas-mine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhos-ale, Dan Bikel, Lukas Blecher, Cristian Canton Ferrer, Moya Chen, Guillem Cucu-rull, David Esiobu, Jude Fernandes, Jeremy Fu, Wenyin Fu, Brian Fuller, Cynthia Gao, Vedanuj Goswami, Naman Goyal, Anthony Hartshorn, Saghar Hosseini, Rui Hou, Hakan Inan, Marcin Kardas, Viktor Kerkez, Madian Khabsa, Isabel Kloumann, Artem Korenev, Punit Singh Koura, Marie-Anne Lachaux, Thibaut Lavril, Jenya Lee, Diana Liskovich, Yinghai Lu, Yuning Mao, Xavier Martinet, Todor Mihaylov, Pushkar Mishra, Igor Molybog, Yixin Nie, Andrew Poulton, Jeremy Reizenstein, Rashi Rungta, Kalyan Saladi, Alan Schelten, Ruan Silva, Eric Michael Smith, Ranjan Subramanian, Xiaoqing Ellen Tan, Binh Tang, Ross Taylor, Adina Williams, Jian Xiang Kuan, Puxin Xu, Zheng Yan, Iliyan Zarov, Yuchen Zhang, Angela Fan, Melanie Kambadur, Sharan Narang, Aurelien Ro-driguez, Robert Stojnic, Sergey Edunov, and Thomas Scialom. 2023. Llama 2: Open Foundation and Fine-Tuned Chat Models. arXiv:2307.09288 [cs.CL] https://arxiv.org/abs/2307.09288 [27] Zhongwei Wan, Ziang Wu, Che Liu, Jinfa Huang, Zhihong Zhu, Peng Jin, Longyue Wang, and Li Yuan. 2024. LOOK-M: Look-Once Optimization in KV Cache for Efficient Multimodal Long-Context Inference. In Findings of the Association for Computational Linguistics: EMNLP 2024 , Yaser Al-Onaizan, Mohit Bansal, and Yun-Nung Chen (Eds.). Association for Computational Linguistics, Miami, Florida, USA, 4065–4078. doi:10.18653/v1/2024.findings-emnlp.235 [28] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth In-ternational Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net, Vienna, Austria, 1–21. https://openreview.net/ forum?id=NG7sS51zVF [29] Suho Yoo, Youngjoon Jang, and Joon Son Chung. 2026. On the Nature of Attention Sink that Shapes Decoding Strategy in MLLMs. arXiv:2603.14337 [cs.CV] https: //arxiv.org/abs/2603.14337 [30] Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Yuxing Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. 2025. Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention. In ACL (1) . Association for Computational Linguistics, Vienna, Austria, 23078–23097. [31] Ted Zadouri, Hubert Strauss, and Tri Dao. 2025. Hardware-Efficient Attention for Fast Decoding. In ES-FoMo III: 3rd Workshop on Efficient Systems for Foundation Models . 1–37. https://openreview.net/forum?id=8ixiZ1b8rr [32] Xinrong Zhang, Yingfa Chen, Shengding Hu, Zihang Xu, Junhao Chen, Moo Hao, Xu Han, Zhen Thai, Shuo Wang, Zhiyuan Liu, and Maosong Sun. 2024. ∞Bench: Extending Long Context Evaluation Beyond 100K Tokens. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , Lun-Wei Ku, Andre Martins, and Vivek Srikumar (Eds.). Association for Computational Linguistics, Bangkok, Thailand, 15262–15277. doi:10.18653/ v1/2024.acl-long.814 [33] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang "At-las" Wang, and Beidi Chen. 2023. H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In Advances in Neural In-formation Processing Systems , A. Oh, T. Naumann, A. Globerson, K. Saenko, M. Hardt, and S. Levine (Eds.), Vol. 36. Curran Associates, Inc., Red Hook, NY, USA, 34661–34710. https://proceedings.neurips.cc/paper_files/paper/2023/file/ 6ceefa7b15572587b78ecfcebb2827f8-Paper-Conference.pdf [34] Nannan Zhu, Yonghao Dong, Teng Wang, Xueqian Li, Shengjun Deng, Yijia Wang, Zheng Hong, Tiantian Geng, Guo Niu, Hanyan Huang, Xiongfei Yao, and Shuaiwei Jiao. 2026. CVBench: Benchmarking Cross-Video Synergies for Complex Multimodal Reasoning. arXiv:2508.19542 [cs.CV] https://arxiv.org/abs/ 2508.19542 SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+Appendix A Threshold Calibration and Budget Stability 
+
+We further analyze the calibration behavior of SinkRouter and the stability of its realized compute budget. Our goal is to understand whether a routing threshold can provide a predictable skip ratio across different tasks and context lengths, and how this behavior should be incorporated into the dynamic threshold used at inference time. Our analysis proceeds in two stages. We first perform a threshold sweep at 16K context using 50 calibration samples, and measure the realized head skip ratio under different cosine-similarity thresholds. Based on this sweep, we select the threshold that gives a skip ratio closest to the target budget of 60%, which yields 𝜏 = 0.55 in our setup. We then use this fixed threshold to evaluate stability across tasks and context lengths. Figure 8 summarizes three observations and one fitted calibra-tion rule. First, the realized head skip ratio varies smoothly and monotonically with the threshold, which makes budget calibration well-defined. Second, when the calibrated threshold 𝜏 = 0.55 is applied across tasks from LongBench and InfiniteBench , the realized skip ratio shows only limited variation, indicating that task identity has relatively little influence on the operating point. Third, when the same threshold is applied across context lengths, the re-alized skip ratio changes systematically with length: it increases from short contexts to medium-length contexts, peaks around the mid-range, and then decreases again at longer contexts. This pat-tern shows that a single fixed threshold is not sufficient across a wide length range, even though it is reasonably stable across tasks. Motivated by this result, we further calibrate the threshold re-quired to realize a fixed 60% skip ratio at different context lengths. The resulting threshold curve is itself non-monotonic: it first in-creases with context length, reaches its maximum in the mid-range, and then gradually decreases at longer contexts. To capture this behavior, we fit a cubic function of normalized context length, 
+
+𝜏 (𝑥 ) = 𝑎𝑥 3 + 𝑏𝑥 2 + 𝑐𝑥 + 𝑑, 
+
+where 𝑥 denotes the normalized context-length variable. In practice, this fitted curve serves as the dynamic threshold function used by SinkRouter during decoding. Taken together, these results suggest that the routing threshold is relatively stable across tasks but varies systematically with context length. This supports the use of lightweight calibration together with a length-dependent threshold function, rather than a single global threshold. 
+
+B Layer-Wise Residual-Stream Analysis of BOS-Dominant Heads 
+
+To better understand whether BOS-dominant heads behave as weakly contributing computation, we analyze their effects on the residual stream at the layer level. For each decoding step 𝑡 , layer 
+
+𝑙 , and head ℎ, we define the vector written by that head into the residual stream as 
+
+𝑐 𝑙,ℎ,𝑡 = 𝑊 (ℎ)
+
+𝑂 𝑜 𝑙,ℎ,𝑡 ,
+
+where 𝑜 𝑙,ℎ,𝑡 denotes the head output before output projection and 
+
+𝑊 (ℎ)
+
+𝑂 denotes the corresponding block of the output projection 0.2 0.3 0.4 0.5 0.6 0.7                       
+
+> Threshold
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Head Skip Ratio (%)  =0.55
+> (58%)
+> narrativeqa
+> hotpotqa
+> gov_report
+> multifieldqa_en
+> passage_ret_en
+> longbook_qa
+> longdialogue_qa
+> longbook_choice
+> longbook_sum
+> kv_retrieval
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> Head Skip Ratio (%)
+> 1K 2K 4K 8K 16K 32K 48K 64K 96K 108K 128K
+> Context Length
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> Head Skip Ratio (%)
+> 39%
+> 41% 44%
+> 50%
+> 58%
+> 66%
+> 69% 69%
+> 64% 63%
+> 58%
+> 2K 8K 16K 32K 48K 64K 96K 108K 128K
+> Context Length
+> 0.51
+> 0.52
+> 0.53
+> 0.54
+> 0.55
+> 0.56
+> 0.57
+> 0.58
+> Threshold for 60% Skip Ratio
+> 0.506
+> 0.525
+> 0.543
+> 0.566
+> 0.574 0.574
+> 0.562
+> 0.556
+> 0.543
+> Cubic fit (norm L)
+
+Figure 8: Threshold calibration, stability, and dynamic-threshold fitting. Top-left: threshold sweep at 16K context using 50 calibration samples; Top-right: realized skip ratios across LongBench and InfiniteBench tasks under the fixed threshold. Bottom-left: realized skip ratios across context lengths under the same fixed threshold. Bottom-right: thresh-old required to realize a 60% skip ratio at different context lengths, together with a cubic fit over normalized context length. 
+
+matrix. We compare two groups of heads: high-BOS heads with 
+
+𝛼 BOS > 0.7 and low-BOS heads with 𝛼 BOS < 0.3.In the left panel of Figure 9, the y-axis represents the residual write magnitude 
+
+𝑅 res = ∥𝑐 𝑙,ℎ,𝑡 ∥2
+
+∥𝑟 in 
+
+𝑙,𝑡 ∥2 + 𝜖 ,
+
+which measures the magnitude of a head’s residual-stream write relative to the input residual norm of the attention block. Smaller values indicate weaker updates to the residual stream. In the right panel, the y-axis represents the update-direction alignment 
+
+𝐴 align = cos  𝑐 𝑙,ℎ,𝑡 , Δ𝑟 attn 
+
+𝑙,𝑡 
+
+,
+
+where 
+
+Δ𝑟 attn 
+
+𝑙,𝑡 = 𝑟 out 
+
+𝑙,𝑡 − 𝑟 in 
+
+𝑙,𝑡 
+
+denotes the aggregate residual update produced by the attention block. This quantity measures whether the vector written by a given head is aligned with the dominant update direction of the entire attention module. As shown in Figure 9, high-BOS heads produce substantially smaller residual writes across most layers and are generally less aligned with the aggregate attention update than low-BOS heads. This behavior is consistent with the view that BOS-dominant rout-ing corresponds to an evolved near-silent regime: while the model cannot literally avoid updating the residual stream, since the at-tention block must still return a valid output, the induced write is often weak enough to be functionally close to silent. We further observe that the first two layers behave atypically, particularly in MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Junnan Liu, Xinyan Liu, Peifeng Gao, Zhaobo Qi, Beichen Zhang, Weigang Zhang, and Antoni B. Chan 0 2 4 6 8 10 12 14 16 18 20 22 24 26 28 30                    
+
+> Layer
+> 0.00
+> 0.02
+> 0.04
+> 0.06
+> 0.08
+> 0.10
+> 0.12
+> 0.14
+> Rres  = cl, h / rin
+> Residual Write Magnitude by Layer
+> High BOS ( > 0.7)
+> Low BOS ( < 0.3)
+> 0246810 12 14 16 18 20 22 24 26 28 30
+> Layer
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> Aalign  = cos( cl, h, rattn )
+> Alignment with Attention Update by Layer
+> High BOS ( > 0.7)
+> Low BOS ( < 0.3)
+
+Figure 9: Layer-wise comparison between high-BOS heads and low-BOS heads. Left: residual-stream write magnitude across layers. Right: alignment with the aggregate attention update across layers. 0.0 0.2 0.4 0.6 0.8 1.0     
+
+> Recall
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Precision
+> AUPRC=0.7730
+> PR Curve
+> 0.3 0.4 0.5 0.6 0.7
+> Proxy Threshold
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Score
+> Precision / Recall / F1 vs
+> Precision
+> Recall
+> F1
+
+Figure 10: Predictive performance of cos (𝑞, 𝐾 BOS ) as a routing proxy on Llama-3.1-8B at the KV-group level. Left: precision– recall curve for predicting the oracle sink event defined from full-attention BOS scores. Right: precision, recall, and F1 as functions of the proxy threshold 𝜏 ; the dashed vertical line marks the operating threshold 𝜏 = 0.55 used in SinkRouter. 
+
+alignment, suggesting a distinct role in early input processing. Ac-cordingly, we exclude these two layers from routing in our actual implementation. 
+
+C Reliability of the Cosine Routing Proxy 
+
+We further assess the reliability of cos (𝑞, 𝐾 BOS ) as the routing signal used by SinkRouter. Our goal is not only to determine whether the skipped set is enriched with sink-like heads, but also to quantify whether the proxy carries useful predictive information about the oracle sink event. We first examine this question from a distributional perspec-tive at 16K context. Figure 11 compares BOS-attention statistics between skipped and active heads under a sweep of the cosine threshold. The left panel reports, for skipped heads, the fraction whose BOS attention exceeds a range of cutoffs, while the middle panel reports the same statistics for active heads. Across all tested BOS-attention cutoffs, skipped heads consistently contain a larger fraction of high-BOS heads than active heads. In particular, un-der the cutoff 𝛼 BOS > 0.6, the skipped set remains dominated by high-BOS heads throughout the entire threshold range. The right panel further shows that the mean BOS attention of skipped heads remains consistently higher than that of active heads, although the variance within each set is non-negligible. This variance re-flects heterogeneity across individual heads rather than a lack of separation: the enrichment statistics in the left and middle panels show that, at the population level, skipped heads remain consis-tently more BOS-dominant. Part of this variance is also expected because SinkRouter operates at the KV-group level rather than the individual-head level. Since each group aggregates multiple query heads, both proxy scores and oracle labels are necessarily coarser and may mix heads with different degrees of BOS dominance. This makes the separation less sharp than in a purely head-level analy-sis, while keeping the evaluation aligned with the actual routing granularity used by SinkRouter. We next quantify the predictive value of the same proxy at the actual routing granularity of SinkRouter, i.e., the KV-group level, using Llama-3.1-8B . We cast sink detection as a binary classifica-tion problem. At the KV-group level, we define the oracle sink label using the full-attention BOS score of the group, and use the cor-responding group-level cosine score as the proxy prediction score. Figure 10 shows that this proxy achieves useful predictive perfor-mance, with an AUPRC of 0.7730. The right panel further illustrates the precision–recall trade-off induced by the proxy threshold. As the threshold increases, precision improves steadily while recall decreases, and the operating threshold used in SinkRouter, 𝜏 = 0.55 ,lies in a favorable region where F1 remains close to its peak. This suggests that the selected threshold is not only compatible with the target skip budget, but also achieves a favorable balance between proxy reliability and sink coverage. Taken together, Figures 11 and 10 provide complementary ev-idence for the reliability of cos (𝑞, 𝐾 BOS ). The former shows that the skipped set is qualitatively enriched with BOS-dominant heads, whereas the latter shows that the proxy has quantitatively useful predictive value for the oracle sink event at the same KV-group granularity used by SinkRouter. These results support cos (𝑞, 𝐾 BOS )
+
+as a reliable and lightweight pre-attention routing signal. SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+Figure 11: Distribution-level evidence for the cosine routing proxy at 16K context. Left: for skipped heads, the fraction whose BOS attention exceeds different cutoffs. Middle: the same statistics for active heads. Right: mean BOS attention of skipped and active heads as the cosine-similarity threshold varies; gray bars indicate the realized skip ratio.

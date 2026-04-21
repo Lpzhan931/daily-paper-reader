@@ -1,0 +1,533 @@
+Title: SLO-Guard: Crash-Aware, Budget-Consistent Autotuning for SLO-Constrained LLM Serving
+
+URL Source: https://arxiv.org/pdf/2604.17627v1
+
+Published Time: Tue, 21 Apr 2026 01:39:16 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# SLO-Guard: Crash-Aware, Budget-Consistent Autotuning for SLO-Constrained LLM Serving 
+
+Christian Lysenstøen 
+
+Inland Norway University of Applied Sciences Visiting Student, University of California, Berkeley  
+
+> christian@lysenstoen.net github.com/Chrislysen
+
+April 2026 
+
+Abstract 
+
+Serving large language models (LLMs) under latency service-level objectives (SLOs) is a configuration-heavy systems problem with an unusually failure-prone search space: many plausible configurations crash outright or miss user-visible latency targets, and standard black-box optimizers treat these failures as wasted trials. We present SLO-Guard, a crash-aware autotuner for vLLM serving that treats crashes as first-class observations. SLO-Guard combines a feasible-first Thermal Budget Annealing (TBA) exploration phase with a warm-started Tree-structured Parzen Estimator (TPE) exploitation phase; the handoff replays all exploration history, including crashes encoded as extreme constraint violations. We additionally contribute a configuration-repair pass, a GPU-aware KV-cache memory guard, and a four-category crash taxonomy. On Qwen2-1.5B 
+
+served with vLLM 0.19 on an NVIDIA A100 40 GB, and across a pre-specified five-seed study, both SLO-Guard and uniform random search attain 75 / 75 feasibility with zero crashes, and are statistically indistinguishable on best-achieved latency (Mann–Whitney two-sided p = 0.84). SLO-Guard’s advantage lies in budget consistency : it allocates significantly more trials to the fast-serving regime (10.20 ±1.10 vs. 7.40 ±2.51 out of 15; one-sided p = 0.014) and maintains higher post-handoff consistency (0.876 ±0.123 vs. 0.539 ±0.224; p = 0.010). Under concurrent load, SLO-Guard’s cross-seed standard deviation on best latency is 4.4 × tighter than random search’s (2.26 ms vs. 10.00 ms). A harness-replication analysis shows that the consistency findings survive an independent sequential-dispatch measurement condition. We present SLO-Guard as a method paper with narrow but replicated empirical validation rather than a general solution to LLM serving autotuning: the central claim is not that SLO-Guard finds a better final configuration, but that it spends a fixed tuning budget more predictably once the fast regime has been found. 
+
+Keywords: LLM serving, vLLM, autotuning, constrained Bayesian optimization, crash-aware search, service-level objectives, goodput. 
+
+## 1 Introduction 
+
+Serving LLMs under latency service-level objectives is now a systems problem as much as a modeling problem. Once a model is chosen, engineers must still select runtime parameters— batch size, token budget, memory utilization, execution mode, prefill strategy, and prefix caching—that interact in non-obvious ways with user-visible latency, memory pressure, and failure risk. A configuration that looks attractive on aggregate throughput may still be unusable if it violates time-to-first-token (TTFT) or inter-token latency (ITL) targets, or if it crashes the serving engine under realistic concurrent request mixes. 
+
+> arXiv:2604.17627v1 [cs.LG] 19 Apr 2026
+
+Three properties of LLM-serving tuning differentiate it from classical hyperparameter optimization: • Failure-prone. Candidate configurations may crash at engine start, during single-request preflight, or only under realistic concurrent load. These are not observation noise; they are structural holes in the feasible set. • Conditional. Several knobs are meaningful only when others take specific values (e.g.  
+
+> enable_chunked_prefill
+
+is relevant only when enforce_eager =false in vLLM 0.19). A naive Cartesian search space misstates the problem. • Small-budget. Each trial starts a serving engine, warms it up, measures latency under load, and tears it down. In practice, tens of trials is a realistic budget; thousands is not. 
+
+Research question. This paper asks a narrow but practically important question: when many vLLM configurations are crash-prone or unstable, can a crash-aware optimizer use a limited tuning budget more effectively than crash-agnostic baselines? We are not looking for asymptotic optimality, but for robust behavior under small budgets with mixed discrete/continuous, conditional search spaces and heavy-tailed failure events. 
+
+Approach. We present SLO-Guard, a two-phase crash-aware autotuner. The method extends the author’s earlier Thermal Budget Annealing (TBA) work on constrained ML deployment [12] to the LLM inference setting: 1. TBA-explore : a feasible-first, crash-aware annealing phase that searches for viable regions and records unstable subspaces. 2. TPE-exploit : a warm-started Optuna TPE phase that exploits history gathered during exploration, including crashes represented as extreme constraint violations. A configuration-repair pass and a GPU-aware KV-cache guard bridge the gap between clean mathematical problem statements and the messy reality of a production-style serving API. Both pieces are deliberately boring engineering rather than learned components; their job is to remove implementation-level impossibilities so the optimizer can spend its limited budget on informative decisions. 
+
+Key finding. Our primary empirical result is not a peak-latency win. Under the corrected concurrent harness, both SLO-Guard and random search are 75/75 feasible with zero crashes and are statistically tied on best-achieved latency. What differs is how the 15-trial budget is spent . SLO-Guard allocates more trials to the fast-serving regime, stays there more reliably after entering it, and yields substantially tighter cross-seed variance on the best-latency statistic. We therefore frame the contribution around budget consistency rather than peak-value superiority. 
+
+Contributions. The paper makes four contributions: 1. A crash-aware formulation of SLO-constrained serving autotuning, including the re-pair map and GPU-aware feasibility guard that make the formulation implementable (Section 3). 22. A simple two-phase optimizer (TBA-explore → warm-started TPE-exploit) that encodes crashes as extreme constraint violations and replays them through the TPE bad-density model (Section 3). 3. A pre-specified, multi-seed empirical study with non-parametric testing and explicit effect-size reporting, arguing that SLO-Guard’s value lies in consistent budget allocation rather than in final-latency gains (Section 5). 4. A harness-replication analysis showing that the consistency result survives correction of the load-dispatch pipeline from sequential to truly concurrent request dispatch (Section 5.4). We position the work as a case study in crash-aware serving autotuning. The method contribution is real, the implementation and data are public, the originally-flagged mea-surement defect is corrected and replicated, and the conclusions are deliberately kept at the level the evidence supports. 
+
+## 2 Background and Related Work 
+
+2.1 vLLM, serving knobs, and search-space structure 
+
+vLLM is a widely used LLM serving engine built around PagedAttention-style KV-cache management [ 9 ]. The configuration space studied here contains eight knobs: quantization ,
+
+> max_num_seqs
+
+, max_num_batched_tokens , gpu_memory_utilization , max_model_len , enforce_eager ,
+
+> enable_chunked_prefill
+
+, and enable_prefix_caching . Together they span batching, memory pressure, context length, execution mode, and prompt reuse. Several of these knobs interact structurally in vLLM 0.19: enable_chunked_prefill is only meaningful when enforce_eager =false ; max_num_batched_tokens must be at least both max_num_seqs and max_model_len ; and the product max_num_seqs × max_model_len 
+
+must fit the available KV-cache budget on the specific GPU. This makes the tuning problem mixed-type, conditional, and hardware-aware. 
+
+2.2 SLOs and goodput 
+
+Raw throughput is insufficient as a standalone metric for user-facing LLM serving because users experience latency, not aggregate token counts [ 18 ]. Following this line of work we optimize goodput : throughput that remains within the latency envelope. Formalism follows in Section 3. Our TTFT/ITL thresholds parallel the inference-benchmark conventions of MLPerf [14] and the metric set used by NVIDIA’s GenAI-Perf measurement tool [13]. 
+
+2.3 Model-serving autotuning 
+
+Auto-configuration for model serving predates the current LLM wave. Morphling [ 17 ] uses meta-learning to transfer cloud-native serving configurations across deployments. Managed tuning services such as AWS SageMaker Automatic Model Tuning [ 3 ] and Google Vizier [ 7]are mature examples of black-box optimization as a service. These systems are important context but do not specifically address the question of how to use crash signals when the serving configurations themselves are unstable. A separate line of systems work focuses on building serving engines and scaling mechanisms rather than autotuning their configurations: Orca [ 19 ] introduces contin-uous batching for transformer inference; Alpa [ 20 ] automates inter- and intra-operator parallelism; FlexGen [ 15 ] demonstrates high-throughput offload-based generative inference; 3FlashAttention [ 5 ] shows that kernel-level execution choices can dominate runtime behavior. LLM-specific SLO-directed serving systems include DistServe [ 21 ] and SARATHI-Serve [ 1 ]. SLO-Guard is complementary to these: it does not propose a new serving engine, but tunes the knobs that such engines expose. 
+
+2.4 Constrained and crash-aware black-box optimization 
+
+Constrained Bayesian optimization is the closest methodological ancestor. Gelbart et al. [ 6]treat unknown constraints explicitly within BO; Letham et al. [ 10 ] extend the setting to noisy constrained experiments. SMAC [ 8 ] introduced random-forest-based sequential model-based algorithm configuration for noisy evaluations. TPE [ 4], especially as exposed through Optuna [ 2 ], provides a practical density-ratio view of exploitation in mixed spaces. Under small budgets with heavy-tailed failures and conditional structure, however, the overhead of fitting global surrogates can be prohibitive relative to the measurement cost of each trial. More directly related is crash-aware or crash-constrained BO. Stenger et al. [ 16 ] study controller tuning with crash constraints, arguing that crashes should influence subsequent search rather than simply terminate trials. SLO-Guard follows the same philosophy but targets vLLM serving specifically and adopts a pragmatic hybrid: simulated-annealing-style feasibility discovery followed by warm-started TPE. To our knowledge, crash-aware autotuning specifically for LLM serving configurations under explicit SLO constraints is not yet well-covered. Adjacent threads exist—serving engines, general serving autotuners, goodput metrics, constrained BO—but SLO-Guard sits at the intersection of all four. 
+
+## 3 Problem Formulation and Method 
+
+3.1 Feasibility and goodput 
+
+Let θ ∈ Θ denote a (repaired) vLLM configuration and let a trial issue n requests. Define the feasible set 
+
+F =
+
+n
+
+θ ∈ Θ : ¬ crash (θ), TTFT p99 (θ) ≤ τTTFT , ITL p99 (θ) ≤ τITL , M(θ) ≤ τM
+
+o
+
+, (1) where τTTFT , τITL , and τM are user-specified SLO thresholds for tail time-to-first-token, inter-token latency, and GPU memory. Note that ¬ crash (θ) is a first-class membership condition: a crashing configuration is excluded from F even if its partial metrics would otherwise satisfy the remaining thresholds. For a trial with batch wall-clock duration T(θ) and per-request output token counts 
+
+u1, . . . , un, goodput is Goodput (θ) = 1
+
+T(θ)
+
+> n
+
+# ∑
+
+> i=1
+
+1 ri(θ) satisfies the SLO · ui, (2) with Goodput (θ) = 0 assigned to crashed trials. Under concurrent dispatch, T(θ) is the elapsed batch wall-clock—the interval from first-issued to last-completed request—and not 
+
+the sum of per-request latencies. This distinction becomes material in Section 5.4. The optimization problem is 
+
+θ⋆ ∈ arg max 
+
+> θ∈Θ
+
+Goodput (θ) subject to θ ∈ F . (3) 4Crashes are modeled as extreme constraint violations in the implementation: a crashed trial is assigned a large positive violation score and utility −∞ for the purpose of TPE warm-starting. 
+
+3.2 Repair map and GPU-aware memory guard 
+
+Before execution, every proposed θ passes through a repair map R : Θ → Θ that resolves known vLLM incompatibilities and applies a GPU-aware memory guard. For GPU memory utilization u, available VRAM V, estimated model footprint F, per-token KV-cache cost κ,and safety margin α ∈ (0, 1 ], the estimated KV token budget is 
+
+Kmax (u) = 
+
+
+
+α · u V − F
+
+κ
+
+
+
+. (4) If max_num_seqs × max_model_len > Kmax (u), the map first reduces max_model_len and then max_num_seqs to restore the inequality, preferring to preserve batch parallelism. V
+
+is auto-detected via torch.cuda.get_device_properties ; F and κ are loaded from a per-model registry with a fallback probe of the Hugging Face config for models not in the registry. The intent is not to make all configurations good, but to remove API-level impossibilities that would otherwise masquerade as optimizer failure. 
+
+3.3 TBA-explore phase 
+
+TBA-explore is a feasible-first annealing procedure over the repaired space. The first ninit 
+
+trials are sampled uniformly at random; subsequent trials are proposed by combining structural mutations (categorical flips, e.g. enforce_eager ) with local numeric perturba-tions, with the structural-move probability annealed over time. Before the first feasible point is found, the optimizer minimizes total constraint violation; after the first feasible point, it switches to goodput optimization within F . Crashes and infeasible trials are not discarded: they update a per-category bad-region tracker that discourages repeated sampling of structurally-similar configurations. 5Algorithm 1 TBA-explore: feasible-first annealing with crash memory 
+
+Require: space Θ, budget B, SLO thresholds C, repair map R 
+
+> 1:
+
+Initialize temperature T, history H ← ∅, current state θ⋆ ← None  
+
+> 2:
+
+for t = 1, . . . , B do  
+
+> 3:
+
+if t ≤ ninit or θ⋆ = None then  
+
+> 4:
+
+Sample θt uniformly at random from Θ 
+
+> 5:
+
+else  
+
+> 6:
+
+Propose θt as a temperature-T neighbor of θ⋆ 
+
+> 7:
+
+end if  
+
+> 8:
+
+θt ← R(θt) ▷ apply repair and KV-cache guard (4)  
+
+> 9:
+
+Execute benchmark; observe crash flag ct, metrics mt 
+
+> 10:
+
+H ← H ∪ { (θt, ct, mt)} 
+
+> 11:
+
+if ct = 1 then  
+
+> 12:
+
+Record crash category κt in bad-region tracker; decay T as non-improving step; 
+
+continue  
+
+> 13:
+
+end if  
+
+> 14:
+
+Compute total constraint violation vt from mt and C 
+
+> 15:
+
+if θ⋆ = None then  
+
+> 16:
+
+if vt = 0 then  
+
+> 17:
+
+θ⋆ ← θt ▷ first feasible point  
+
+> 18:
+
+else  
+
+> 19:
+
+accept θt with probability exp (−∆v/T); update θ⋆ 
+
+> 20:
+
+end if  
+
+> 21:
+
+else  
+
+> 22:
+
+accept θt with probability min {1, exp (∆ Goodput / T)}; update θ⋆ 
+
+> 23:
+
+end if  
+
+> 24:
+
+Update temperature T 
+
+> 25:
+
+if handoff condition (Algorithm 2) satisfied then  
+
+> 26:
+
+break  
+
+> 27:
+
+end if  
+
+> 28:
+
+end for  
+
+> 29:
+
+return H
+
+3.4 Warm-started TPE exploitation 
+
+After sufficient feasible and bad-region history accumulates, SLO-Guard hands off to Optuna’s TPE sampler with zero startup trials. All TBA history, including crashes (encoded as large positive constraint violations), is replayed into the Optuna study before the exploit phase begins. TPE then maintains two kernel-density estimates over the promising and non-promising regions of Θ, denoted ℓ(θ) and g(θ) respectively, and samples candidates with high ratio 
+
+θt ∈ arg max 
+
+> θ∈Θ
+
+ℓ(θ)
+
+g(θ) . (5) The warm start matters: a cold-start TPE with only a handful of trials has almost no density signal at this budget, whereas warm-started TPE immediately sees both the feasible region and the crash boundary. 6Algorithm 2 Phase transition from TBA-explore to warm-started TPE-exploit 
+
+Require: TBA history H, budget B 
+
+> 1:
+
+tmin ← max (3, ⌊B/5 ⌋); tmax ← max (5, ⌊0.4 B⌋) 
+
+> 2:
+
+if |H| < tmin then  
+
+> 3:
+
+return stay -in -tba  
+
+> 4:
+
+else if |H| ≥ tmax then  
+
+> 5:
+
+goto handoff  
+
+> 6:
+
+else  
+
+> 7:
+
+n f ← #{feasible trials in H} ; nb ← #{crashes or SLO-violating trials in H}  
+
+> 8:
+
+if n f ≥ nmin  
+
+> f
+
+and nb ≥ nmin  
+
+> b
+
+then  
+
+> 9:
+
+goto handoff  
+
+> 10:
+
+else  
+
+> 11:
+
+return stay -in -tba  
+
+> 12:
+
+end if  
+
+> 13:
+
+end if 
+
+handoff : 
+
+> 14:
+
+Instantiate Optuna study with constrained TPE sampler and zero startup trials  
+
+> 15:
+
+for all (θi, ci, mi) ∈ H do  
+
+> 16:
+
+Inject as completed trial; crashes recorded with large violation score  
+
+> 17:
+
+end for  
+
+> 18:
+
+return run -tpe -for -remainder 
+
+For the 15-trial budget used throughout this paper, the handoff empirically occurs at trial 7 in all reported runs. 
+
+3.5 Crash taxonomy 
+
+Each trial is classified into one of four categories according to where in the pipeline the outcome is determined: • Healthy : engine started, preflight completed, all benchmark requests returned; goodput is computable. • Startup failure : engine never reached /health within the startup timeout (typically KV-cache warmup OOM or CUDA init failure). • Preflight failure : engine healthy but cannot serve a single-token completion (typically an invalid flag combination such as enforce_eager =true with enable_chunked_prefill =true 
+
+in vLLM 0.19). • Runtime failure : preflight succeeded but the benchmark phase returned 500-class errors or connection resets under load. These categories are not cosmetic. Startup failures are geometry/memory problems in F ;preflight failures are flag-combination problems; runtime failures indicate stability under load. The bad-region tracker is therefore conditioned on category, which makes crash observations generalize across nearby configurations rather than attach to a single failed point. 74 Experimental Setup 
+
+Hardware and software. All results use Google Colab A100 40 GB, model Qwen/Qwen2-1.5B ,vLLM 0.19, Optuna for TPE, and BoTorch for the (unused-in-this-paper) constrained BO baseline. Serving processes are launched with preexec_fn=os.setsid so they can be hard-killed at the process-group level between trials. 
+
+Workload and SLOs. Each trial issues five requests at a nominal target rate of 1 req/s with a fixed-template prompt and a 100-token output cap. Under the concurrent harness—our primary condition—the five requests are dispatched with overlap subject to a bounded-concurrency semaphore, and T(θ) in Equation (2) is measured as batch wall-clock. SLO thresholds are TTFT p99 ≤ 500 ms, ITL p99 ≤ 100 ms, with memory feasibility enforced by Equation (4). 
+
+Optimizers compared. The repository implements uniform random search, cold-start Optuna TPE, TBA-only, SLO-Guard (TBA-TPE hybrid), and a GP-based constrained BO baseline via BoTorch. The primary head-to-head reported at the full multi-seed scale is Random vs. SLO-Guard . We use uniform random search as the primary baseline because, at 15 trials with a discrete-dominated conditional space, random is the tougher reference; more sophisticated surrogates typically need more evaluations to separate from uniform sampling in this regime [ 8 ]. The additional baselines are discussed as future work (Section 7). 
+
+Multi-seed protocol. The main study is 5 seeds × 2 optimizers × 15 trials = 150 trials per measurement condition, with seeds {42, 142, 242, 342, 442 }. The runner alternates optimizers within seed so that partial completion remains balanced across Colab disconnections, and persists each trial result with flush() +fsync() so interrupted runs are recoverable via replay. 
+
+Metrics. We report three per-seed summary statistics: 1. Fast-cluster trials (out of 15): number of feasible trials with average request latency below 1000 ms. The 1000 ms threshold separates the two visibly distinct latency bands in this workload (Section 5.5) and was chosen for that structural reason rather than to maximize the method’s apparent advantage. 2. Post-hit consistency : let t⋆ be the first trial with average latency below 1000 ms; consis-tency is # {t > t⋆ : trial t is fast-cluster }/ #{t > t⋆}. It answers: after the fast regime has been found, what fraction of remaining trials stay there? 
+
+3. Best latency : min t avg. latency over feasible trials for the (optimizer, seed ) pair. 
+
+Statistical methodology. Pairwise comparisons use Mann–Whitney U tests on per-seed summaries. For fast-cluster count and post-hit consistency, the alternative is one-sided (SLO-Guard > Random), matching the directional hypothesis that a crash-aware optimizer should allocate budget to the right regime more reliably than blind sampling. For best latency, no directional claim is made, and the test is two-sided. We report raw p-values and also apply Holm–Bonferroni correction across the three-metric family; both are shown. Effect sizes are reported as cross-seed variance ratios σ2Random /σ2SLO-Guard and per-seed win 8counts. With five seeds, the study is intentionally sized to detect only large and consistent effects, and every statistical claim is reported in that spirit. 
+
+## 5 Results 
+
+5.1 Primary multi-seed result under concurrent dispatch 
+
+Table 1 reports the head-to-head under the concurrent harness. Both optimizers reach the feasibility ceiling, and best-achieved latency is statistically tied. The structural differences appear on the budget-allocation metrics.   
+
+> Table 1. Primary concurrent-harness result. Values are mean
+
+± standard deviation across five seeds. p-values from Mann–Whitney U tests: one-sided (SLO-Guard > Random) for the consistency metrics, two-sided for best latency. Holm–Bonferroni-adjusted p-values across the three-metric family are padj = 0.028, 0.030, 1.00 respectively. Metric Random ( n=5) SLO-Guard ( n=5) Mann–Whitney p  
+
+> Fast-cluster trials / 15 (higher is better) 7.40
+
+± 2.51 10 .20 ± 1.10 0.014   
+
+> Post-hit consistency (higher is better) 0.539
+
+± 0.224 0.876 ± 0.123 0.010   
+
+> Best latency, ms (lower is better) 470.5
+
+± 10.00 465.7 ± 2.26 0.84 (tied) Feasibility / 75 75/75 75/75 —Crashes 0 0 —
+
+SLO-Guard wins on fast-cluster count in 4 of 5 seeds with 1 tie: Random {9, 8, 3, 9, 8 } vs. SLO-Guard {9, 9, 11, 11, 11 } for seeds {42, 142, 242, 342, 442 }. The most dramatic difference is on seed 242, where Random places only 3 of 15 trials in the fast regime while SLO-Guard places 11. This asymmetry motivates reporting worst-case budget usage alongside mean behavior, not only peak performance. 
+
+5.2 How the budget-allocation advantage is spent 
+
+Figure 1 visualizes the two primary statistics. The left panel shows per-seed fast-cluster counts; the right panel shows post-hit consistency. Both panels move in the same direction and support the headline framing.     
+
+> Figure 1. Primary consistency figures (concurrent harness). Left: per-seed count of fast-cluster trials (avg. latency
+
+< 1000 ms) out of 15. Right: post-hit consistency—fraction of trials remaining in the fast cluster after the first fast trial. SLO-Guard is both higher and less variable on both metrics. 
+
+9Figure 2 plots best-so-far latency across all five seeds. Random search sometimes enters the fast regime earlier than SLO-Guard, but several random trajectories continue to sample slower configurations after already finding a fast one. SLO-Guard deliberately spends early trials exploring structure; once its TBA-to-TPE handoff fires, the trajectories flatten and remain inside the fast regime. This is the trajectory-level explanation for the post-hit consistency statistic in Table 1.     
+
+> Figure 2. Best-so-far average latency over trials for all five seeds under the concurrent harness. Left:
+> random search. Right: SLO-Guard. The important visual fact is not only where the curves end, but how quickly they stop wandering: random occasionally jumps back to slow configurations after finding fast ones, whereas SLO-Guard settles after handoff and refines within the fast regime.
+
+If one measures only time to first fast point , random is competitive and in some seeds better. If one measures consistency after a good point is found , SLO-Guard is substantially better. This is why the paper’s headline metric is post-hit consistency, not time-to-first-hit. 
+
+5.3 Best-latency spread: tied means, tighter variance 
+
+Figure 3 shows per-seed best-achieved latency. Means are statistically indistinguishable, so we do not claim a best-latency win. What differs is the cross-seed spread: Random’s best-latency standard deviation is 10.00 ms and SLO-Guard’s is 2.26 ms, a ratio of 4.42 ×.10 Figure 3. Best latency reached by each seed under the concurrent harness. Means are statistically tied (two-sided Mann–Whitney p = 0.84); the cross-seed spread is not. Random σ = 10.00 ms vs. SLO-Guard σ = 2.26 ms, a ratio of 4.42 ×.
+
+This matters in deployment: an operator does not run a tuning job once. A method that occasionally lands on an excellent point but varies widely across restarts is less attractive than one that reaches essentially the same good point every time. The graph justifies the “tied means, tighter variance” wording without over-claiming. 
+
+5.4 Harness replication: sequential vs. concurrent dispatch 
+
+An earlier version of the measurement pipeline serialized requests: successive requests were issued only after the previous one returned, so despite a nominal concurrency setting the actual in-flight count was one. We flag this openly, correct it by replacing the loop with an 
+
+> asyncio.Semaphore
+
+-capped concurrent dispatcher, and re-ran the complete optimizer/seed matrix through the corrected harness. Per-trial batch-wall-clock times in the published JSONL confirm the correction: slow-cluster trials with per-request latency ≈ 2500 ms now exhibit batch wall-clock ≈ 4100 ms (real overlap), not ≈ 12500 ms (serialized). Both data sets are retained and published. Table 2 reports all three metrics under both conditions; Figure 4 plots them side by side.                 
+
+> Table 2. Harness replication. The consistency conclusions survive the transition from sequential to concurrent measurement. The best-latency variance advantage is visible only under concurrent load. Sequential harness Concurrent harness Metric Random SLO-Guard Random SLO-Guard Feasibility / 75 75 75 75 75 Crashes 0000Fast-cluster trials / 15 7.40
+
+± 2.51 10.60 ± 0.89 7.40 ± 2.51 10.20 ± 1.10 Post-hit consistency 0.539 ± 0.224 0.876 ± 0.123 0.539 ± 0.224 0.876 ± 0.123 Best latency, ms 431.1 ± 1.74 431.6 ± 1.90 470.5 ± 10.00 465.7 ± 2.26             
+
+> p(fast-cluster, one-sided) 0.008 0.014
+> p(post-hit, one-sided) 0.010 0.010
+> p(best latency, two-sided) 0.84 0.84 Variance ratio σ2
+> R/σ2
+> Son best latency 0.84
+
+× 4.42 ×
+
+11 Figure 4. Sequential-versus-concurrent harness comparison. Consistency statistics move negligibly under correction; absolute latency rises and its variance becomes more realistic. The central conclusion survives; the corrected harness additionally reveals a variance structure that sequential dispatch compressed away. 
+
+That two independent measurement protocols yield statistically equivalent conclusions on the consistency metrics is direct evidence that those findings are not an artifact of the load-generator implementation. The best-latency variance advantage is specific to the concurrent condition because only under genuine concurrent load does the fast cluster exhibit measurable within-cluster variation (from scheduler jitter and contention inside vLLM). 
+
+5.5 Structural context: the search space is sharply bimodal 
+
+Figure 5 provides a trial-level scatter of the concurrent-harness search space. Feasible points separate into two distinct latency bands. The dominant explanatory variable is a single binary knob: configurations with enforce_eager =true populate the slow regime (∼ 2100 ms) and those with enforce_eager =false populate the fast regime ( ∼ 470 ms). In our sample, this single knob explains over 95% of latency variance. 12 Figure 5. Trial-level view of the concurrent-harness search space. The dominant explanatory variable is enforce_eager : true ⇒ slow regime, false ⇒ fast regime. This structural observation is why the paper frames its contribution as regime-discovery consistency rather than general many-knob co-optimization. 
+
+This structure keeps the paper honest. A smooth, gently varying landscape would invite broader autotuning claims. A regime-switching landscape dominated by one binary knob reframes the problem: the first-order task is finding the right setting of enforce_eager ; only then does fine-grained knob tuning matter. Crash-aware small-budget search is well-suited to regime discovery, which is why the contribution is still interesting, but the generalization claim must be kept narrow. 
+
+5.6 Representative phase-transition trajectory 
+
+Figure 6 shows a single-seed view of the TBA-to-TPE handoff. Trials 1–6 are TBA-explore, of which all land in the slow cluster; trial 7 marks the handoff to TPE-exploit, which immediately enters the fast cluster and remains there for trials 7–15. The figure is a mechanistic illustration, not a proof; the aggregate argument is Figures 1 and 2. 13 Figure 6. Representative seed-42 trajectory for SLO-Guard under the concurrent harness. Trials 1–6: TBA-explore (slow regime). Trial 7: handoff to TPE-exploit. Trials 7–15: fast regime, with variance tightening as TPE concentrates sampling. The handoff corresponds to a real change in search behavior rather than a cosmetic phase label. 
+
+5.7 Ablations the evidence suggests 
+
+The current results motivate several natural ablations: 1. TBA-only vs. TBA-TPE. Does the handoff help, or is pure TBA equally good at this budget? 2. Cold-start TPE vs. warm-started TPE. How much of the gain comes from replaying crash-annotated history into the TPE study, as opposed to using TPE alone? 3. Repair map on/off. Does the GPU-aware memory guard (Equation (4)) account for the zero-crash rate across 150 concurrent-harness trials? 4. Fix enforce_eager . With the dominant binary knob held constant, does the consistency advantage persist as a within-cluster fine-tuning effect, or does it collapse? The repository implements the other baselines, but the multi-seed ablation study at this scale is left to a follow-up paper. 
+
+## 6 Discussion 
+
+The results support a specific and deliberately limited interpretation. SLO-Guard is not winning because it finds a uniquely better final configuration; it is winning because, under a small budget, it allocates more trials to the correct regime and spends fewer late trials wandering back into slow configurations after already finding a fast one. The right verbal summary is therefore crash-aware two-phase search improves budget consistency under fixed-budget vLLM autotuning , not SLO-Guard solves LLM serving autotuning .
+
+When should crash-awareness help? The evidence suggests a testable answer: crash-awareness helps most when the search budget is small, the feasible set is ragged, and regime switches exist that a cold-start optimizer can enter but not reliably stay within. In deployments where the feasible set is simply connected and crashes are rare, we expect the 14 advantage to shrink; cold-start BO or even random search should catch up. Testing that regime is future work. 
+
+Deployment takeaways. Two practical lessons are robust across our experiments. First, auto-detect the GPU and apply a memory guard; a hard-coded VRAM assumption is a reliable way to silently inflate crash rates on non-A100 hardware. Second, measure with real concurrent load: the sequential/concurrent comparison in Section 5.4 shows that the fast cluster has ∼ 40 ms of additional per-config variation under concurrent load that is invisible under serialized dispatch. Ranking optimizers on sequentially-measured latency can hide consistency advantages that matter in production. 
+
+What the bimodal finding actually shows. The dominant factor in this evaluation is a single binary switch related to eager execution and CUDA-graph use. That makes the tuning problem simpler than the fully general LLM-serving tuning problem: realistic deployments can exhibit stronger interactions among sequence count, batched-token budget, KV-cache sizing, long-context behavior, and prefill strategy. The present paper should be read as a case study of one crash-aware tuning setting, not a universal statement about LLM autotuning. The correct next step is not “claim bigger”; it is to check whether the same consistency story holds when the workload structure is richer. 
+
+## 7 Threats to Validity and Limitations 
+
+Construct validity. The study optimizes goodput under TTFT/ITL constraints, follow-ing [ 18 ]. The construct assumes that tail latencies over short benchmark runs generalize to sustained serving behavior. Production serving is bursty; sustained workloads may stress configurations differently. 
+
+Internal validity. Feasibility was observed to be stochastic across repeated Colab runs in early engineering work. The repair map and GPU-aware memory guard appear to have stabilized feasibility at 100% on the reported runs, but the feasibility boundary may still partly depend on environment state not observable from within a Colab notebook. 
+
+External validity. All multi-seed results use one model ( Qwen/Qwen2-1.5B ) and one GPU (A100 40 GB). Larger models, multi-GPU serving, and consumer GPUs introduce different memory geometries and different dominant knobs. The bimodal enforce_eager effect may not transfer. 
+
+Statistical validity. Five seeds is deliberately modest. Under non-parametric testing, this budget only detects large, consistent effects. We report effect sizes (variance ratios, per-seed win counts) explicitly and apply Holm–Bonferroni across the three-metric family; both adjusted and raw p-values are shown. The replication across two measurement harnesses strengthens the statistical case for the consistency claims. 
+
+Workload realism. The benchmark prompt is a fixed template with a 100-token output cap. Realistic traffic is bursty, varied, and includes multi-turn interactions; the present study does not test those conditions. The corrected harness does introduce genuine concurrent overlap, but not full trace replay. 15 Baseline coverage. The repository includes TBA-only, cold-start TPE, and GP-based constrained BO baselines, but the full multi-seed result reported here is Random vs. SLO-Guard . That suffices for the narrow claim; it does not establish dominance over all reasonable alternatives. 
+
+Absolute tuning-cost objective. The SLO-Guard implementation includes a utility-style objective that can penalize evaluation cost directly. The main-text experiments retain goodput as the objective for comparability with the earlier pilot; full utility-objective results are left for follow-up work. 
+
+Pending citation details. Two citations to the author’s own pending 2026 preprints use placeholder entries; arXiv identifiers will be filled in on public release. 
+
+## 8 Reproducibility 
+
+Code, raw per-trial JSONL logs under both harness conditions, summary statistics, and figures are public at the project repository [ 11 ]. Each trial is logged with the full repaired configuration, the crash category (if any), per-request latencies, batch wall-clock, and aggregate metrics. The multi-seed runner is resumable: it skips completed (optimizer , seed )
+
+pairs and, for partially-completed pairs, replays the persisted trials through a fresh optimizer instance so that the optimizer state is consistent with the partial log before resuming. This matters because the TBA-to-TPE handoff depends on history, not merely on trial count. The concurrent harness records batch wall-clock time per trial, allowing the reader to verify concurrency at the record level (a truly concurrent five-request batch with per-request latency ≈ 2500 ms has batch wall-clock ≈ 4000 ms, not the ≈ 12500 ms that a serialized five-request loop would produce). The statistical analysis is reproduced by 
+
+> scripts/compute_multiseed_stats.py
+
+.Commit hashes corresponding to the numbers in this paper: • Sequential-harness data: 54bddd2 .• Concurrent-harness data: f26022f .• Load-generator concurrency fix: d4cbc15 .• Utility-objective implementation: 68667c9 .• Metrics-collector correction: 2f94f1a .To reproduce the concurrent-harness study, clone the repository at commit f26022f and run                 
+
+> python scripts/run_multiseed.py -output-dir results/multiseed_concurrent/ \-seeds 42 142 242 342 442 -optimizers random tba-tpe \-budget 15 -model Qwen/Qwen2-1.5B
+
+on an A100 40 GB instance. 
+
+## 9 Conclusion and Future Work 
+
+SLO-Guard is a crash-aware two-phase autotuner for vLLM serving: a feasible-first TBA exploration phase that treats crashes as first-class observations, followed by a warm-started 16 TPE exploitation phase that exploits the full exploration history. Across 150 concurrent-harness trials on Qwen2-1.5B /A100, and a second 150-trial sequential-harness replication, the optimizer does not achieve a significantly lower best latency than uniform random search, but it uses a fixed 15-trial budget more consistently: more fast-regime trials, higher post-handoff consistency, and under concurrent load a 4.4 × tighter cross-seed best-latency spread. The paper’s strongest contribution is not the optimizer in isolation but the combination of the method with a careful, replicated empirical argument about what the method actually improves. The next steps are concrete: complete the baseline matrix (cold-start TPE, TBA-only, constrained BO) at the multi-seed scale, to disentangle the contribution of warm-starting from the contribution of crash-aware exploration per se; test whether the consistency story survives on a second model class (e.g. Phi-2 or Llama-3.2-1B) and a second hardware class (e.g. L4 or T4); and move from fixed synthetic prompts to realistic traces with burstiness and multi-turn structure. An honest autotuning claim for production serving must ultimately be measured against production-shaped traffic; this paper is the first step toward that measurement. 
+
+## Acknowledgments 
+
+This work was conducted as a student research project at Inland Norway University of Applied Sciences while the author was on exchange at the University of California, Berkeley. It benefited from the open-source vLLM, Optuna, and BoTorch ecosystems. An external reviewer of an early draft flagged the load-generator concurrency issue; the resulting harness replication materially strengthened the empirical case of the paper. 
+
+## References 
+
+[1] Amey Agrawal et al. Sarathi-serve: Efficient LLM inference by piggybacking decodes with chunked prefills. arXiv preprint , 2024. Verify final bibliographic details before submission. [2] Takuya Akiba, Shotaro Sano, Toshihiko Yanase, Takeru Ohta, and Masanori Koyama. Optuna: A next-generation hyperparameter optimization framework. In Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining ,pages 2623–2631, 2019. [3] Amazon Web Services. Amazon SageMaker automatic model tuning. https://docs. aws.amazon.com/sagemaker/latest/dg/automatic-model-tuning.html , 2025. Doc-umentation page. [4] James Bergstra, Rémi Bardenet, Yoshua Bengio, and Balázs Kégl. Algorithms for hyper-parameter optimization. In Advances in Neural Information Processing Systems 24 ,pages 2546–2554, 2011. [5] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Processing Systems 35 , pages 16344–16359, 2022. [6] Michael A. Gelbart, Jasper Snoek, and Ryan P. Adams. Bayesian optimization with unknown constraints. arXiv preprint arXiv:1403.5607 , 2014. 17 [7] Daniel Golovin, Benjamin Solnik, Subhodeep Moitra, David Kochanski, John Karro, and D. Sculley. Google vizier: A service for black-box optimization. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining ,pages 1487–1495, 2017. [8] Frank Hutter, Holger H. Hoos, and Kevin Leyton-Brown. Sequential model-based optimization for general algorithm configuration. In Proceedings of the 5th International Conference on Learning and Intelligent Optimization , pages 507–523, 2011. [9] Woojin Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Jinyang Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles , pages 611–626, 2023. [10] Benjamin Letham, Brian Karrer, Guilherme Ottoni, and Eytan Bakshy. Constrained bayesian optimization with noisy experiments. Bayesian Analysis , 14(2):495–519, 2019. [11] Christian Lysen. SLO-Guard: Crash-aware autotuning for llm serving, 2026. URL 
+
+> https://github.com/Chrislysen/SLO-Guard
+
+.[12] Christian Lysenstøen. Thermal budget annealing: Feasible-first exploration for con-strained ml deployment, 2026. arXiv preprint pending; update citation details after public release. [13] NVIDIA. GenAI-Perf: Generative AI performance measurement for Triton and OpenAI-compatible apis. https://docs.nvidia.com/ deeplearning/triton-inference-server/user-guide/docs/perf_benchmark/ genai-perf-README.html , 2025. Documentation page. [14] Vijay Janapa Reddi, Christine Cheng, David Kanter, Peter Mattson, Guenther Schmuelling, Carole-Jean Wu, Brian Anderson, Max Breughe, Maximilien Charlebois, William Chou, et al. MLPerf inference benchmark. arXiv preprint arXiv:1911.02549 ,2020. [15] Ying Sheng, Lianmin Zheng, Binhang Yu, Siyuan Zhuang, Zhuohan Li, Max Ryabinin, Alex Touzalin, Joseph E. Gonzalez, Cho-Jui Hsieh, and Ion Stoica. Flexgen: High-throughput generative inference of large language models with a single GPU or CPU. In Proceedings of the 40th International Conference on Machine Learning , pages 31094–31116, 2023. [16] David Stenger, Dominik Scheurenberg, and Sebastian Trimpe. Local bayesian opti-mization for controller tuning with crash constraints. arXiv preprint arXiv:2411.16267 ,2024. [17] Luping Wang, Lingyun Yang, Yinghao Yu, Wei Wang, Bo Li, Xianchao Sun, Jian He, and Liping Zhang. Morphling: Fast, near-optimal auto-configuration for cloud-native model serving. In Proceedings of the 12th ACM Symposium on Cloud Computing , pages 639–653, 2021. [18] Zhibin Wang, Shipeng Li, Yuhang Zhou, Xue Li, Rong Gu, Cam-Tu Nguyen, Chen Tian, and Sheng Zhong. Revisiting SLO and goodput metrics in LLM serving. arXiv preprint arXiv:2410.14257 , 2024. 18 [19] Gyeong-In Yu, Jeongmin Jeong, Gunho Kim, Soojeong Shin, and Byung-Gon Chun. Orca: A distributed serving system for transformer-based generative models. In 16th USENIX Symposium on Operating Systems Design and Implementation , pages 521–538, 2022. [20] Lianmin Zheng, Zhen Jia, Minmin Sun, Sheng Wu, Juncen Yu, Ameer Haj-Ali, Yida Wang, Jie Yang, Danyang Zhuo, Kaushik Sen, Joseph E. Gonzalez, and Ion Stoica. Alpa: Automating inter- and intra-operator parallelism for distributed deep learning. In 16th USENIX Symposium on Operating Systems Design and Implementation , pages 559–578, 2022. [21] Yongkang Zhong et al. Distserve: Disaggregating prefill and decoding for goodput-optimized large language model serving. arXiv preprint , 2024. Verify final bibliographic details before submission. 
+
+## A Per-seed summaries 
+
+Tables 3 and 4 expand the aggregate statistics to the per-seed level. With only five seeds, the reader should be able to see every point that enters the non-parametric tests.   
+
+> Table 3. Per-seed results under the corrected concurrent harness. Fast = avg. request latency
+
+< 1000 ms. Post-hit consistency is the fraction of later trials that remain fast after the first fast trial. Optimizer Seed Fast / 15 Post-hit First fast trial Best latency (ms) Random 42 9 0.727 4 464.85 Random 142 8 0.636 4 461.42 Random 242 3 0.167 3 486.38 Random 342 9 0.667 3 465.88 Random 442 8 0.500 1 474.05 SLO-Guard 42 9 1.000 7 467.54 SLO-Guard 142 9 1.000 7 468.04 SLO-Guard 242 11 0.833 3 462.96 SLO-Guard 342 11 0.833 3 466.19 SLO-Guard 442 11 0.714 1 463.73 
+
+19 Table 4. Per-seed results under the earlier sequential harness. Absolute latencies differ from the concurrent harness because sequential dispatch under-stresses the system; the consistency ranking is preserved. Optimizer Seed Fast / 15 Post-hit First fast trial Best latency (ms) Random 42 9 0.727 4 429.40 Random 142 8 0.636 4 429.14 Random 242 3 0.167 3 431.59 Random 342 9 0.667 3 432.80 Random 442 8 0.500 1 432.61 SLO-Guard 42 11 1.000 5 432.00 SLO-Guard 142 9 1.000 7 430.01 SLO-Guard 242 11 0.833 3 431.41 SLO-Guard 342 11 0.833 3 434.55 SLO-Guard 442 11 0.714 1 429.86 
+
+## B Metric definitions 
+
+Fast-cluster trial. A feasible trial is counted as fast-cluster when its average request latency is below 1000 ms. The threshold is chosen to cleanly separate the two visibly distinct latency bands in Figure 5 rather than to maximize the method’s apparent advantage. 
+
+Post-hit consistency. Let t⋆ be the first trial whose average request latency is below 1000 ms. Post-hit consistency is PHC = #{t > t⋆ : trial t is fast-cluster }
+
+#{t > t⋆} .It answers: once the fast regime is discovered, how often does the optimizer continue to spend later trials there? 
+
+Best latency. min t avg. latency (t) over feasible trials for a given (optimizer , seed ) pair. Reported because it is standard and easy to compare, but deliberately not the headline metric because the mean difference between optimizers is not statistically persuasive. 
+
+Directionality of tests. The directional hypothesis is that a crash-aware two-phase opti-mizer should spend more of a fixed budget in the right regime than random search, not less; hence one-sided tests on fast-cluster count and post-hit consistency. No corresponding directional claim is made on best latency, so the best-latency test is two-sided. 20
