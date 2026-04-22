@@ -6,91 +6,76 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-21
-- 运行时间：2026-04-21 20:18:30 UTC
+- 最新运行日期：2026-04-22
+- 运行时间：2026-04-22 20:39:43 UTC
 - 运行状态：成功
-- 本次总论文数：23
-- 精读区：12
-- 速读区：11
+- 本次总论文数：18
+- 精读区：8
+- 速读区：10
 
 ### 今日简报（AI）
-今日深度解析 23 篇 AI 论文，聚焦 KV Cache 极致压缩与大模型推理效率的突破性进展。
-重点推荐两篇满分论文：HieraSparse 引入分层半结构化稀疏，而图引导通道消除技术则开辟了缓存压缩新路径。
-建议优先研读 KV 缓存优化与边缘端 LoRA 调度方案，掌握长文本推理与多任务并发的核心提效手段。
-- 详情：[/202604/21/README](/202604/21/README)
+今日深度研读 18 篇 AI 论文，聚焦大模型长文本推理优化与 KV Cache 压缩技术。
+满分论文 SAW-INT4 与 DASH-KV 分别通过系统感知量化和非对称哈希，实现了推理性能的跨越式提升。
+建议优先关注 KV Cache 优化方案，这是当前解决长文本推理成本与速度瓶颈的核心路径。
+- 详情：[/202604/22/README](/202604/22/README)
 
 ### 精读区论文标签
-1. [HieraSparse: Hierarchical Semi-Structured Sparse KV Attention](/202604/21/2604.16864v1-hierasparse-hierarchical-semi-structured-sparse-kv-attention)  
+1. [SAW-INT4: System-Aware 4-Bit KV-Cache Quantization for Real-World LLM Serving](/202604/22/2604.19157v1-saw-int4-system-aware-4-bit-kv-cache-quantization-for-real-world-llm-serving)  
    标签：评分：10.0/10、query:llm
-   evidence：分层半结构化稀疏KV注意力
-2. [Graph-Guided Adaptive Channel Elimination for KV Cache Compression](/202604/21/2604.16983v1-graph-guided-adaptive-channel-elimination-for-kv-cache-compression)  
+   evidence：系统感知的4比特KV缓存量化
+2. [DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing](/202604/22/2604.19351v1-dash-kv-accelerating-long-context-llm-inference-via-asymmetric-kv-cache-hashing)  
    标签：评分：10.0/10、query:llm
-   evidence：通过通道剪枝进行KV缓存压缩
-3. [MoE-nD: Per-Layer Mixture-of-Experts Routing for Multi-Axis KV Cache Compression](/202604/21/2604.17695v1-moe-nd-per-layer-mixture-of-experts-routing-for-multi-axis-kv-cache-compression)  
+   evidence：通过KV缓存哈希加速长文本推理
+3. [GRASPrune: Global Gating for Budgeted Structured Pruning of Large Language Models](/202604/22/2604.19398v1-grasprune-global-gating-for-budgeted-structured-pruning-of-large-language-models)  
    标签：评分：10.0/10、query:llm
-   evidence：多轴KV缓存压缩
-4. [WISV: Wireless-Informed Semantic Verification for Distributed Speculative Decoding in Device-Edge LLM Inference](/202604/21/2604.17701v1-wisv-wireless-informed-semantic-verification-for-distributed-speculative-decoding-in-device-edge-llm-inference)  
-   标签：评分：10.0/10、query:llm-sd
-   evidence：投机解码的语义接受策略
-5. [Neural Garbage Collection: Learning to Forget while Learning to Reason](/202604/21/2604.18002v1-neural-garbage-collection-learning-to-forget-while-learning-to-reason)  
-   标签：评分：10.0/10、query:llm
-   evidence：学习剔除KV缓存条目以提高效率
-6. [HybridGen: Efficient LLM Generative Inference via CPU-GPU Hybrid Computing](/202604/21/2604.18529v1-hybridgen-efficient-llm-generative-inference-via-cpu-gpu-hybrid-computing)  
-   标签：评分：10.0/10、query:llm
-   evidence：针对长文本KV缓存管理的高效混合注意力框架
-7. [Reducing Peak Memory Usage for Modern Multimodal Large Language Model Pipelines](/202604/21/2604.16734v1-reducing-peak-memory-usage-for-modern-multimodal-large-language-model-pipelines)  
+   evidence：FFN和KV头的结构化剪枝
+4. [Topology-Aware Layer Pruning for Large Vision-Language Models](/202604/22/2604.16502v1-topology-aware-layer-pruning-for-large-vision-language-models)  
    标签：评分：9.0/10、query:llm
-   evidence：减少 KV 缓存中的峰值内存使用
-8. [SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models](/202604/21/2604.16883v1-sinkrouter-sink-aware-routing-for-efficient-long-context-decoding-in-large-language-and-multimodal-models)  
+   evidence：大模型的层剪枝
+5. [How Much Cache Does Reasoning Need? Depth-Cache Tradeoffs in KV-Compressed Transformers](/202604/22/2604.17935v1-how-much-cache-does-reasoning-need-depth-cache-tradeoffs-in-kv-compressed-transformers)  
    标签：评分：9.0/10、query:llm
-   evidence：高效长文本解码与KV缓存加载
-9. [Open-TQ-Metal: Fused Compressed-Domain Attention for Long-Context LLM Inference on Apple Silicon](/202604/21/2604.16957v1-open-tq-metal-fused-compressed-domain-attention-for-long-context-llm-inference-on-apple-silicon)  
+   evidence：KV缓存压缩与权衡研究
+6. [Unlocking the Edge deployment and ondevice acceleration of multi-LoRA enabled one-for-all foundational LLM](/202604/22/2604.18655v1-unlocking-the-edge-deployment-and-ondevice-acceleration-of-multi-lora-enabled-one-for-all-foundational-llm)  
    标签：评分：9.0/10、query:llm
-   evidence：融合压缩域注意力和KV缓存量化
-10. [SLO-Guard: Crash-Aware, Budget-Consistent Autotuning for SLO-Constrained LLM Serving](/202604/21/2604.17627v1-slo-guard-crash-aware-budget-consistent-autotuning-for-slo-constrained-llm-serving)  
+   evidence：端侧加速与多流解码
+7. [Efficient Mixture-of-Experts LLM Inference with Apple Silicon NPUs](/202604/22/2604.18788v1-efficient-mixture-of-experts-llm-inference-with-apple-silicon-npus)  
    标签：评分：9.0/10、query:llm
-   evidence：针对SLO约束的LLM服务自动调优
-11. [Stability Implies Redundancy: Delta Attention Selective Halting for Efficient Long-Context Prefilling](/202604/21/2604.18103v1-stability-implies-redundancy-delta-attention-selective-halting-for-efficient-long-context-prefilling)  
+   evidence：在NPU上实现高效的MoE大模型推理
+8. [SimDiff: Depth Pruning via Similarity and Difference](/202604/22/2604.19520v1-simdiff-depth-pruning-via-similarity-and-difference)  
    标签：评分：9.0/10、query:llm
-   evidence：高效注意力机制与预填充阶段的标记剪枝
-12. [River-LLM: Large Language Model Seamless Exit Based on KV Share](/202604/21/2604.18396v1-river-llm-large-language-model-seamless-exit-based-on-kv-share)  
-   标签：评分：9.0/10、query:llm
-   evidence：提前退出中的 KV 缓存缺失问题
+   evidence：用于提升LLM效率的深度剪枝
 
 ### 速读区论文标签
-1. [POLAR: Online Learning for LoRA Adapter Caching and Routing in Edge LLM Serving](/202604/21/2604.16583v1-polar-online-learning-for-lora-adapter-caching-and-routing-in-edge-llm-serving)  
+1. [Event Tensor: A Unified Abstraction for Compiling Dynamic Megakernel](/202604/22/2604.13327v2-event-tensor-a-unified-abstraction-for-compiling-dynamic-megakernel)  
    标签：评分：8.0/10、query:llm
-   evidence：边缘推理中 LoRA 适配器缓存与路由的在线学习
-2. [D-QRELO: Training- and Data-Free Delta Compression for Large Language Models via Quantization and Residual Low-Rank Approximation](/202604/21/2604.16940v1-d-qrelo-training--and-data-free-delta-compression-for-large-language-models-via-quantization-and-residual-low-rank-approximation)  
+   evidence：为大模型推理吞吐量编译动态大算子
+2. [Predicting LLM Compression Degradation from Spectral Statistics](/202604/22/2604.18085v1-predicting-llm-compression-degradation-from-spectral-statistics)  
    标签：评分：8.0/10、query:llm
-   evidence：用于内存高效LLM服务的增量压缩
-3. [HiveMind: OS-Inspired Scheduling for Concurrent LLM Agent Workloads](/202604/21/2604.17111v1-hivemind-os-inspired-scheduling-for-concurrent-llm-agent-workloads)  
+   evidence：预测LLM压缩性能下降
+3. [Copy-as-Decode: Grammar-Constrained Parallel Prefill for LLM Editing](/202604/22/2604.18170v1-copy-as-decode-grammar-constrained-parallel-prefill-for-llm-editing)  
    标签：评分：8.0/10、query:llm
-   evidence：受操作系统启发的并发大模型智能体工作负载调度
-4. [Speculative Decoding for Autoregressive Video Generation](/202604/21/2604.17397v1-speculative-decoding-for-autoregressive-video-generation)  
-   标签：评分：8.0/10、query:llm-sd
-   evidence：基于宽松验证的视频生成投机解码
-5. [ONTO: A Token-Efficient Columnar Notation for LLM Input Optimization](/202604/21/2604.17512v1-onto-a-token-efficient-columnar-notation-for-llm-input-optimization)  
+   evidence：与投机解码共享内核的并行预填充机制
+4. [$R^2$-dLLM: Accelerating Diffusion Large Language Models via Spatio-Temporal Redundancy Reduction](/202604/22/2604.18995v1-r2-dllm-accelerating-diffusion-large-language-models-via-spatio-temporal-redundancy-reduction)  
    标签：评分：8.0/10、query:llm
-   evidence：LLM推理的标记高效输入优化
-6. [DeInfer: Efficient Parallel Inferencing for Decomposed Large Language Models](/202604/21/2604.17709v1-deinfer-efficient-parallel-inferencing-for-decomposed-large-language-models)  
+   evidence：加速扩散大语言模型解码
+5. [LBLLM: Lightweight Binarization of Large Language Models via Three-Stage Distillation](/202604/22/2604.19167v1-lbllm-lightweight-binarization-of-large-language-models-via-three-stage-distillation)  
    标签：评分：8.0/10、query:llm
-   evidence：用于并行推理的高性能推理系统
-7. [ProbeLogits: Kernel-Level LLM Inference Primitives for AI-Native Operating Systems](/202604/21/2604.11943v2-probelogits-kernel-level-llm-inference-primitives-for-ai-native-operating-systems)  
+   evidence：用于LLM部署的轻量化二值化
+6. [Learning to Seek Help: Dynamic Collaboration Between Small and Large Language Models](/202604/22/2604.17827v1-learning-to-seek-help-dynamic-collaboration-between-small-and-large-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：内核级大语言模型推理原语
-8. [Forge-UGC: FX optimization and register-graph engine for universal graph compiler](/202604/21/2604.16498v1-forge-ugc-fx-optimization-and-register-graph-engine-for-universal-graph-compiler)  
+   evidence：大小模型动态协作以实现高效推理
+7. [Linear-Time and Constant-Memory Text Embeddings Based on Recurrent Language Models](/202604/22/2604.18199v1-linear-time-and-constant-memory-text-embeddings-based-on-recurrent-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：用于 NPU 上 Transformer 部署的通用图编译器
-9. [BARD: Bridging AutoRegressive and Diffusion Vision-Language Models Via Highly Efficient Progressive Block Merging and Stage-Wise Distillation](/202604/21/2604.16514v1-bard-bridging-autoregressive-and-diffusion-vision-language-models-via-highly-efficient-progressive-block-merging-and-stage-wise-distillation)  
+   evidence：Transformer推理的高效替代方案
+8. [Geometry-Guided 3D Visual Token Pruning for Video-Language Models](/202604/22/2604.18260v1-geometry-guided-3d-visual-token-pruning-for-video-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：高效解码的扩散视觉语言模型
-10. [HeadRank: Decoding-Free Passage Reranking via Preference-Aligned Attention Heads](/202604/21/2604.17237v1-headrank-decoding-free-passage-reranking-via-preference-aligned-attention-heads)  
-   标签：评分：7.0/10、query:llm
-   evidence：通过注意力头实现无解码重排序以降低延迟
-11. [Configuration Over Selection: Hyperparameter Sensitivity Exceeds Model Differences in Open-Source LLMs for RTL Generation](/202604/21/2604.17102v1-configuration-over-selection-hyperparameter-sensitivity-exceeds-model-differences-in-open-source-llms-for-rtl-generation)  
+   evidence：用于高效推理的视觉标记剪枝
+9. [BARD: Bridging AutoRegressive and Diffusion Vision-Language Models Via Highly Efficient Progressive Block Merging and Stage-Wise Distillation](/202604/22/2604.16514v2-bard-bridging-autoregressive-and-diffusion-vision-language-models-via-highly-efficient-progressive-block-merging-and-stage-wise-distillation)  
    标签：评分：6.0/10、query:llm
-   evidence：推理时解码配置
+   evidence：视觉语言模型的并行解码范式
+10. [NIM4-ASR: Towards Efficient, Robust, and Customizable Real-Time LLM-Based ASR](/202604/22/2604.18105v1-nim4-asr-towards-efficient-robust-and-customizable-real-time-llm-based-asr)  
+   标签：评分：6.0/10、query:llm
+   evidence：高效的基于LLM的语音识别框架
 
 
 <div class="dpr-home-promo-card">
