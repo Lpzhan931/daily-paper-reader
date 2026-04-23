@@ -6,76 +6,110 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-22
-- 运行时间：2026-04-22 20:39:43 UTC
+- 最新运行日期：2026-03-25 ~ 2026-04-23
+- 运行时间：2026-04-23 02:47:19 UTC
 - 运行状态：成功
-- 本次总论文数：18
-- 精读区：8
-- 速读区：10
+- 本次总论文数：29
+- 精读区：0
+- 速读区：29
 
 ### 今日简报（AI）
-今日深度研读 18 篇 AI 论文，聚焦大模型长文本推理优化与 KV Cache 压缩技术。
-满分论文 SAW-INT4 与 DASH-KV 分别通过系统感知量化和非对称哈希，实现了推理性能的跨越式提升。
-建议优先关注 KV Cache 优化方案，这是当前解决长文本推理成本与速度瓶颈的核心路径。
-- 详情：[/202604/22/README](/202604/22/README)
+本期速读 29 篇前沿论文，深度聚焦大模型推理性能的极致优化与架构创新。
+重点解析了 KV 缓存管理策略对比、TPU 专用高性能算子及序贯蒙特卡罗推理加速等核心突破。
+建议优先研读 KV Cache 与 TPU 算子优化相关成果，以应对大模型部署中的显存与速度瓶颈。
+- 详情：[/20260325-20260423/README](/20260325-20260423/README)
 
 ### 精读区论文标签
-1. [SAW-INT4: System-Aware 4-Bit KV-Cache Quantization for Real-World LLM Serving](/202604/22/2604.19157v1-saw-int4-system-aware-4-bit-kv-cache-quantization-for-real-world-llm-serving)  
-   标签：评分：10.0/10、query:llm
-   evidence：系统感知的4比特KV缓存量化
-2. [DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing](/202604/22/2604.19351v1-dash-kv-accelerating-long-context-llm-inference-via-asymmetric-kv-cache-hashing)  
-   标签：评分：10.0/10、query:llm
-   evidence：通过KV缓存哈希加速长文本推理
-3. [GRASPrune: Global Gating for Budgeted Structured Pruning of Large Language Models](/202604/22/2604.19398v1-grasprune-global-gating-for-budgeted-structured-pruning-of-large-language-models)  
-   标签：评分：10.0/10、query:llm
-   evidence：FFN和KV头的结构化剪枝
-4. [Topology-Aware Layer Pruning for Large Vision-Language Models](/202604/22/2604.16502v1-topology-aware-layer-pruning-for-large-vision-language-models)  
-   标签：评分：9.0/10、query:llm
-   evidence：大模型的层剪枝
-5. [How Much Cache Does Reasoning Need? Depth-Cache Tradeoffs in KV-Compressed Transformers](/202604/22/2604.17935v1-how-much-cache-does-reasoning-need-depth-cache-tradeoffs-in-kv-compressed-transformers)  
-   标签：评分：9.0/10、query:llm
-   evidence：KV缓存压缩与权衡研究
-6. [Unlocking the Edge deployment and ondevice acceleration of multi-LoRA enabled one-for-all foundational LLM](/202604/22/2604.18655v1-unlocking-the-edge-deployment-and-ondevice-acceleration-of-multi-lora-enabled-one-for-all-foundational-llm)  
-   标签：评分：9.0/10、query:llm
-   evidence：端侧加速与多流解码
-7. [Efficient Mixture-of-Experts LLM Inference with Apple Silicon NPUs](/202604/22/2604.18788v1-efficient-mixture-of-experts-llm-inference-with-apple-silicon-npus)  
-   标签：评分：9.0/10、query:llm
-   evidence：在NPU上实现高效的MoE大模型推理
-8. [SimDiff: Depth Pruning via Similarity and Difference](/202604/22/2604.19520v1-simdiff-depth-pruning-via-similarity-and-difference)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于提升LLM效率的深度剪枝
+- 本次无精读推荐。
 
 ### 速读区论文标签
-1. [Event Tensor: A Unified Abstraction for Compiling Dynamic Megakernel](/202604/22/2604.13327v2-event-tensor-a-unified-abstraction-for-compiling-dynamic-megakernel)  
+1. [Comparative Characterization of KV Cache Management Strategies for LLM Inference](/20260325-20260423/2604.05012v1-comparative-characterization-of-kv-cache-management-strategies-for-llm-inference)  
+   标签：评分：10.0/10、query:llm
+   evidence：LLM推理中KV缓存管理策略的特性分析
+2. [Ragged Paged Attention: A High-Performance and Flexible LLM Inference Kernel for TPU](/20260325-20260423/2604.15464v1-ragged-paged-attention-a-high-performance-and-flexible-llm-inference-kernel-for-tpu)  
+   标签：评分：10.0/10、query:llm
+   evidence：针对TPU大模型推理的高效注意力内核
+3. [Faster LLM Inference via Sequential Monte Carlo](/20260325-20260423/2604.15672v1-faster-llm-inference-via-sequential-monte-carlo)  
+   标签：评分：10.0/10、query:llm-sd
+   evidence：基于近似推理和重采样的投机解码
+4. [Self-Distillation for Multi-Token Prediction](/20260325-20260423/2603.23911v1-self-distillation-for-multi-token-prediction)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：多词预测加速大模型推理
+5. [ScoutAttention: Efficient KV Cache Offloading via Layer-Ahead CPU Pre-computation for LLM Inference](/20260325-20260423/2603.27138v1-scoutattention-efficient-kv-cache-offloading-via-layer-ahead-cpu-pre-computation-for-llm-inference)  
+   标签：评分：9.0/10、query:llm
+   evidence：通过CPU预计算实现LLM推理的KV缓存卸载
+6. [Efficient Inference of Large Vision Language Models](/20260325-20260423/2603.27960v1-efficient-inference-of-large-vision-language-models)  
+   标签：评分：9.0/10、query:llm-ef
+   evidence：加速推理的最先进技术综述
+7. [Prompt Compression in the Wild: Measuring Latency, Rate Adherence, and Quality for Faster LLM Inference](/20260325-20260423/2604.02985v1-prompt-compression-in-the-wild-measuring-latency-rate-adherence-and-quality-for-faster-llm-inference)  
+   标签：评分：9.0/10、query:llm
+   evidence：通过提示词压缩降低大模型推理延迟
+8. [SLaB: Sparse-Lowrank-Binary Decomposition for Efficient Large Language Models](/20260325-20260423/2604.04493v1-slab-sparse-lowrank-binary-decomposition-for-efficient-large-language-models)  
+   标签：评分：9.0/10、query:llm
+   evidence：用于大语言模型高效部署的模型压缩与剪枝技术
+9. [Don't Waste Bits! Adaptive KV-Cache Quantization for Lightweight On-Device LLMs](/20260325-20260423/2604.04722v1-dont-waste-bits-adaptive-kv-cache-quantization-for-lightweight-on-device-llms)  
+   标签：评分：9.0/10、query:llm
+   evidence：大语言模型推理中的自适应KV缓存量化
+10. [Blink: CPU-Free LLM Inference by Delegating the Serving Stack to GPU and SmartNIC](/20260325-20260423/2604.07609v1-blink-cpu-free-llm-inference-by-delegating-the-serving-stack-to-gpu-and-smartnic)  
+   标签：评分：9.0/10、query:llm
+   evidence：利用SmartNIC和GPU实现无CPU参与的LLM推理架构
+11. [AsyncTLS: Efficient Generative LLM Inference with Asynchronous Two-level Sparse Attention](/20260325-20260423/2604.07815v1-asynctls-efficient-generative-llm-inference-with-asynchronous-two-level-sparse-attention)  
+   标签：评分：9.0/10、query:llm
+   evidence：用于高效LLM推理的异步两级稀疏注意力机制
+12. [YOCO++: Enhancing YOCO with KV Residual Connections for Efficient LLM Inference](/20260325-20260423/2604.13556v1-yoco-enhancing-yoco-with-kv-residual-connections-for-efficient-llm-inference)  
+   标签：评分：9.0/10、query:llm
+   evidence：KV缓存压缩与大语言模型高效推理
+13. [Robust Ultra Low-Bit Post-Training Quantization via Stable Diagonal Curvature Estimate](/20260325-20260423/2604.13806v1-robust-ultra-low-bit-post-training-quantization-via-stable-diagonal-curvature-estimate)  
+   标签：评分：9.0/10、query:llm
+   evidence：用于推理加速的超低比特训练后量化
+14. [River-LLM: Large Language Model Seamless Exit Based on KV Share](/20260325-20260423/2604.18396v1-river-llm-large-language-model-seamless-exit-based-on-kv-share)  
+   标签：评分：9.0/10、query:llm
+   evidence：KV缓存管理与早停机制加速推理
+15. [HybridGen: Efficient LLM Generative Inference via CPU-GPU Hybrid Computing](/20260325-20260423/2604.18529v1-hybridgen-efficient-llm-generative-inference-via-cpu-gpu-hybrid-computing)  
+   标签：评分：9.0/10、query:llm
+   evidence：大模型的KV缓存管理与CPU-GPU混合计算
+16. [GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling](/20260325-20260423/2604.18556v1-gsq-highly-accurate-low-precision-scalar-quantization-for-llms-via-gumbel-softmax-sampling)  
+   标签：评分：9.0/10、query:llm
+   evidence：用于大模型高效部署的低比特标量量化
+17. [LBLLM: Lightweight Binarization of Large Language Models via Three-Stage Distillation](/20260325-20260423/2604.19167v1-lbllm-lightweight-binarization-of-large-language-models-via-three-stage-distillation)  
+   标签：评分：9.0/10、query:llm
+   evidence：用于大模型推理优化的轻量化二值化框架
+18. [MemBoost: A Memory-Boosted Framework for Cost-Aware LLM Inference](/20260325-20260423/2603.26557v1-memboost-a-memory-boosted-framework-for-cost-aware-llm-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：为大模型推理吞吐量编译动态大算子
-2. [Predicting LLM Compression Degradation from Spectral Statistics](/202604/22/2604.18085v1-predicting-llm-compression-degradation-from-spectral-statistics)  
+   evidence：具有答案复用功能的成本感知型LLM服务框架
+19. [Understand and Accelerate Memory Processing Pipeline for Disaggregated LLM Inference](/20260325-20260423/2603.29002v1-understand-and-accelerate-memory-processing-pipeline-for-disaggregated-llm-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：预测LLM压缩性能下降
-3. [Copy-as-Decode: Grammar-Constrained Parallel Prefill for LLM Editing](/202604/22/2604.18170v1-copy-as-decode-grammar-constrained-parallel-prefill-for-llm-editing)  
+   evidence：加速解耦式大语言模型推理中的内存处理流水线
+20. [Scheduling LLM Inference with Uncertainty-Aware Output Length Predictions](/20260325-20260423/2604.00499v1-scheduling-llm-inference-with-uncertainty-aware-output-length-predictions)  
    标签：评分：8.0/10、query:llm
-   evidence：与投机解码共享内核的并行预填充机制
-4. [$R^2$-dLLM: Accelerating Diffusion Large Language Models via Spatio-Temporal Redundancy Reduction](/202604/22/2604.18995v1-r2-dllm-accelerating-diffusion-large-language-models-via-spatio-temporal-redundancy-reduction)  
+   evidence：基于输出长度预测的LLM推理调度
+21. [Universal YOCO for Efficient Depth Scaling](/20260325-20260423/2604.01220v1-universal-yoco-for-efficient-depth-scaling)  
    标签：评分：8.0/10、query:llm
-   evidence：加速扩散大语言模型解码
-5. [LBLLM: Lightweight Binarization of Large Language Models via Three-Stage Distillation](/202604/22/2604.19167v1-lbllm-lightweight-binarization-of-large-language-models-via-three-stage-distillation)  
+   evidence：高效注意力机制与KV缓存扩展
+22. [DWDP: Distributed Weight Data Parallelism for High-Performance LLM Inference on NVL72](/20260325-20260423/2604.01621v1-dwdp-distributed-weight-data-parallelism-for-high-performance-llm-inference-on-nvl72)  
    标签：评分：8.0/10、query:llm
-   evidence：用于LLM部署的轻量化二值化
-6. [Learning to Seek Help: Dynamic Collaboration Between Small and Large Language Models](/202604/22/2604.17827v1-learning-to-seek-help-dynamic-collaboration-between-small-and-large-language-models)  
-   标签：评分：7.0/10、query:llm
-   evidence：大小模型动态协作以实现高效推理
-7. [Linear-Time and Constant-Memory Text Embeddings Based on Recurrent Language Models](/202604/22/2604.18199v1-linear-time-and-constant-memory-text-embeddings-based-on-recurrent-language-models)  
-   标签：评分：7.0/10、query:llm
-   evidence：Transformer推理的高效替代方案
-8. [Geometry-Guided 3D Visual Token Pruning for Video-Language Models](/202604/22/2604.18260v1-geometry-guided-3d-visual-token-pruning-for-video-language-models)  
-   标签：评分：7.0/10、query:llm
-   evidence：用于高效推理的视觉标记剪枝
-9. [BARD: Bridging AutoRegressive and Diffusion Vision-Language Models Via Highly Efficient Progressive Block Merging and Stage-Wise Distillation](/202604/22/2604.16514v2-bard-bridging-autoregressive-and-diffusion-vision-language-models-via-highly-efficient-progressive-block-merging-and-stage-wise-distillation)  
-   标签：评分：6.0/10、query:llm
-   evidence：视觉语言模型的并行解码范式
-10. [NIM4-ASR: Towards Efficient, Robust, and Customizable Real-Time LLM-Based ASR](/202604/22/2604.18105v1-nim4-asr-towards-efficient-robust-and-customizable-real-time-llm-based-asr)  
-   标签：评分：6.0/10、query:llm
-   evidence：高效的基于LLM的语音识别框架
+   evidence：大语言模型高性能推理的分布式并行化
+23. [AA-SVD : Anchored and Adaptive SVD for Large Language Model Compression](/20260325-20260423/2604.02119v1-aa-svd--anchored-and-adaptive-svd-for-large-language-model-compression)  
+   标签：评分：8.0/10、query:llm
+   evidence：用于大语言模型压缩的低秩分解
+24. [REAM: Merging Improves Pruning of Experts in LLMs](/20260325-20260423/2604.04356v1-ream-merging-improves-pruning-of-experts-in-llms)  
+   标签：评分：8.0/10、query:llm
+   evidence：MoE大模型中的专家剪枝与合并
+25. [SHIELD: A Segmented Hierarchical Memory Architecture for Energy-Efficient LLM Inference on Edge NPUs](/20260325-20260423/2604.07396v1-shield-a-segmented-hierarchical-memory-architecture-for-energy-efficient-llm-inference-on-edge-npus)  
+   标签：评分：8.0/10、query:llm
+   evidence：通过存储架构实现边缘NPU上的高效LLM推理
+26. [Fast Heterogeneous Serving: Scalable Mixed-Scale LLM Allocation for SLO-Constrained Inference](/20260325-20260423/2604.07472v1-fast-heterogeneous-serving-scalable-mixed-scale-llm-allocation-for-slo-constrained-inference)  
+   标签：评分：8.0/10、query:llm
+   evidence：针对SLO约束推理的可扩展LLM分配方案
+27. [Flow-Controlled Scheduling for LLM Inference with Provable Stability Guarantees](/20260325-20260423/2604.11001v1-flow-controlled-scheduling-for-llm-inference-with-provable-stability-guarantees)  
+   标签：评分：8.0/10、query:llm
+   evidence：优化大模型服务的吞吐量与延迟
+28. [Reducing Peak Memory Usage for Modern Multimodal Large Language Model Pipelines](/20260325-20260423/2604.16734v1-reducing-peak-memory-usage-for-modern-multimodal-large-language-model-pipelines)  
+   标签：评分：8.0/10、query:llm
+   evidence：多模态大模型推理中的KV缓存优化
+29. [DeInfer: Efficient Parallel Inferencing for Decomposed Large Language Models](/20260325-20260423/2604.17709v1-deinfer-efficient-parallel-inferencing-for-decomposed-large-language-models)  
+   标签：评分：8.0/10、query:llm
+   evidence：大语言模型高性能并行推理系统
 
 
 <div class="dpr-home-promo-card">

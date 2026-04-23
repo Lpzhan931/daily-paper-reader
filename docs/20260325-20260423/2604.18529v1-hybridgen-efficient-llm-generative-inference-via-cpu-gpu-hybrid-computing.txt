@@ -1,0 +1,985 @@
+Title: HybridGen: Efficient LLM Generative Inference via CPU-GPU Hybrid Computing
+
+URL Source: https://arxiv.org/pdf/2604.18529v1
+
+Published Time: Tue, 21 Apr 2026 03:05:25 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing 
+
+Mao Lin 
+
+mlin59@ucmerced.edu 
+
+University of California, Merced Merced, California, USA 
+
+Xi Wang 
+
+swang166@ucmerced.edu 
+
+University of California, Merced Merced, California, USA 
+
+Guilherme Cox 
+
+gcox@nvidia.com 
+
+NVIDIA Santa Clara, California, USA 
+
+Dong Li 
+
+dli35@ucmerced.edu 
+
+University of California, Merced Merced, California, USA 
+
+Hyeran Jeon 
+
+hjeon7@ucmerced.edu 
+
+University of California, Merced Merced, California, USA 
+
+Abstract 
+
+As modern LLMs support thousands to millions of tokens, KV caches grow to hundreds of gigabytes, stressing mem-ory capacity and bandwidth. Existing solutions, such as KV cache pruning and offloading, alleviate these but underuti-lize hardware by relying solely on either GPU or CPU for attention computing, and considering yet limited CPU lo-cal memory for KV cache storage. We propose HybridGen ,an efficient hybrid attention framework for long-context LLM inference. HybridGen enables CPU–GPU collaborative attention on systems with expanded tiered memory (e.g., CXL memory), addressing three key challenges: (1) multi-dimensional attention dependencies, (2) intensifying CPU-GPU load imbalance with longer sequences, and (3) NUMA penalty of tiered memories. HybridGen tackles these by introducing attention logit parallelism, a feedback-driven scheduler, and semantic-aware KV cache mapping. Experi-ments with three LLM models with eleven different sizes on three GPU platforms with a CXL-expanded memory show that HybridGen outperforms six state-of-the-art KV cache management methods by 1.41 ×–3.2 × on average while main-taining superior accuracy. 
+
+Keywords: KV cache management, CPU-GPU hybrid com-puting 
+
+1 Introduction 
+
+Large language models (LLMs) have rapidly expanded across domains, with context lengths growing from GPT-1’s 512 tokens to millions in recent models like GPT-4.1 and Gemini 3 Pro. As sequence length increases, key-value (KV) caches grow proportionally, significantly increasing memory usage and often exceeding GPU memory capacity. For example, a 70B-parameter model with a 1M-token context can re-quire hundreds of gigabytes of KV cache, making it a major bottleneck in LLM inference. Figure 1 shows the escalating memory demand of the KV cache in the OPT-13B model [ 46 ]. Unlike fixed model weights (blue dotted line), the KV cache scales linearly with sequence length and batch size. 1K 2K 4K 8K 16K 32K 64K     
+
+> Sequence Length (Tokens)
+> 0
+> 100
+> 200
+> 300
+> 400
+> KV Cache Size (GB)
+> Weight Size
+> Batch Size: 1234
+
+Figure 1. KV cache memory consumption of OPT-13B across varying sequence lengths and batch sizes. The dashed line indicates the model’s weight size for comparison. To address the KV cache size exceeding GPU memory, prior studies proposed KV cache pruning [ 11 , 19 , 25 ] and offloading [ 16 , 21 , 33 ]. KV cache pruning retains only im-portant tokens in GPU memory but risks accuracy loss from discarded context. Offloading preserves all KV tokens in the larger CPU memory to avoid accuracy degradation. How-ever, GPU-based attention computing requires streaming KV entries back to the GPU for computation, incurring high data transfer overhead. Recent studies mitigate this by selectively fetching important tokens [ 21 ] or by offloading the entire attention computation to the CPU [ 5, 33 ]. Although these approaches reduce memory and bandwidth pressure on the GPU, they still fail to fully utilize available system resources. Existing offloading approaches rely entirely on either GPU or CPU for attention computation, underutilizing system resources. Using only CPU memory wastes CPU compute power, especially as some modern systems adopt 1:1 or 1:2 CPU–GPU ratios (e.g., GH100 and GB200 NVL72 [ 29 ] plat-forms). On the other hand, fully offloading attention com-putation to the CPU unnecessarily wastes GPUs’ massive parallelism. Furthermore, as KV cache sizes continue to grow, larger memory tiers such as CXL memory should be con-sidered. However, the performance implications of tiered memory for KV cache management have not been explored thoroughly [ 17 , 38 , 41 , 43 ]. A recent study [ 31 ] examined KV cache management with CXL memory, but it targets atten-tion on processing-in-memory (PIM) and is not applicable to conventional CPU–GPU systems. 
+
+> 1
+> arXiv:2604.18529v1 [cs.PF] 20 Apr 2026
+
+Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon 
+
+In this paper, we introduce an efficient hybrid attention framework, HybridGen . HybridGen parallelizes attention across CPU and GPU to fully utilize available compute power and exploit fast access to KV tokens in each processor’s lo-cal memory (e.g., GPU processes recent tokens, while CPU handles older offloaded tokens). As shown in Figure 2, Hy-bridGen significantly reduces inference time compared to existing offloading and selective attention methods. To enable efficient hybrid attention computing, there are three challenges. 1) Multi-dimensional dependencies: the attention pipeline has two strong dependencies, within and across layers. Within a layer, softmax requires all K vectors, making it hard for CPU and GPU to concurrently process distinct sets of KV tokens. Across layers, since each layer’s output becomes the input of the next layer, the CPU must wait for the GPU to complete the remaining functions of the transformer block, limiting pipelined CPU-GPU execution. To tackle this, HybridGen decouples attention logits from the attention pipeline and enables the CPU to proactively compute the next layer’s attention using the current layer’s input, leveraging similarities between the inputs of consecu-tive transformer layers [ 5, 21 , 27 , 42 ], thereby overlapping CPU–GPU computation. 2) Inherent load imbalance be-tween CPU and GPU: As sequence length grows, due to limited GPU memory, more tokens will be offloaded to the CPU. Without a load-balancing mechanism, CPU will be-come the performance bottleneck. HybridGen addresses this with a feedback scheduler that dynamically adjusts CPU work-load based on performance and accuracy. 3) non-uniform-memory-access (NUMA) penalty of tiered memory: To support large KV caches, we expand memory with tiered memory (e.g., via CXL). However, tiered memories are slower than local DRAMs [ 22 , 39 ]. To mitigate this NUMA impact, 
+
+HybridGen proposes a semantic-aware KV cache mapping 
+
+that removes CXL access latency from the critical path. Our contributions are as follows: 
+
+• We provide an in-depth analysis of existing KV manage-ment methods and show potential benefits and challenges of hybrid attention computing for LLM inference. Hy-bridGen realizes well-balanced pipelined hybrid atten-tion computing with lightweight software modules on off-the-shelf CPU-GPU platforms. 
+
+• To efficiently orchestrate hybrid attention computing, we propose a feedback scheduler. The feedback scheduler uses both performance and accuracy statistics for balancing the loads between CPU and GPU, unlike existing solutions that focus on either accuracy or performance, not both. 
+
+• To accommodate increasing KV cache size, HybridGen 
+
+supports emerging tiered memory architecture. To alle-viate the NUMA impact of tiered memory, we propose a semantic-aware KV cache mapping, which effectively removes long memory access time from the critical path. Attention FFN Attention FFN                         
+
+> Attention FFN Attention FFN
+> Attention FFN
+> (1) All on GPU (Oracle case for full attention)
+> (2) KV Cache Offloading on CPU
+> (3) Offloading with Prefetch (e.g., FlexGen )
+> Migrate Cache
+> Attention FFN
+> (4) Offloading with Partial Attention using Important Tokens ( e.g., InfiniGen )
+> Partial Attention FFN
+> Migrate Cache
+> Partial Attn. FFN
+> (5) Offloading with Hybrid Attention (HybridGen )
+> KV Sel.
+> Mig. Cache
+> (next layer)
+> Partial Attn. FFN
+> Partial Attention FFN KV Sel.
+> Mig. Cache
+> (next layer)
+> V Sel.
+> & Attn. Cache &Attn
+> (next layer) V Sel.
+> & Attn. Cache &Attn
+> (next layer)
+> GPU
+> CPU
+> GPU
+> CPU
+> GPU
+> CPU
+> GPU
+> CPU
+> GPU
+> Time
+> Time
+> Time
+> Time
+> Time
+
+Figure 2. Estimated LLM inference time under various KV cache management: (1) Oracle case where GPU memory is large enough and attention can be done on GPU only, (2) Conventional KV cache offloading to CPU memory, where the KV caches are streamed to GPU from CPU memory everytime, (3) Advanced offloading where KV caches are prefetched to save migration overhead [ 33 ], (4) State-of-the-art using selective attention where GPU runs an algorithm to identify important tokens and and fetch only those from CPU memory [ 21 ], and (5) HybridGen , which parallelizes the attention computation on CPU and GPU, where both processors use tokens in their local memory, their workloads are balanced via a feedback scheduler, and KV storage is expanded to tiered memory via novel KV cache mapping. 𝑡 !                     
+
+> Transformer Block 2~𝑁
+> 𝑡 !"#
+> Projection to Vocabulary
+> Generate
+> 𝑋 $%%&'(%
+> 𝑋 ))*'(%
+> 𝐹𝐹𝑁
+> 𝑄 %!
+> +𝐾 𝑉
+> 𝑆𝑜𝑓𝑡𝑚𝑎𝑥 (𝑄 %!
+> +×𝐾 ,)
+> 𝑎 %!
+> +
+> 𝐴 ×𝑉
+> Attention
+> •••
+> ×𝑤 -
+> +
+> ×𝑤 .
+> +×𝑤 /
+> +
+> Transformer Block 2~𝑁
+> 𝑡 +
+> Projection to Vocabulary
+> Generate
+> 𝑋 $%%&'(%
+> 𝑋 ))* '(%
+> 𝐹𝐹𝑁 Transformer
+> Block
+> 𝑄 𝐾 𝑉
+> 𝑆𝑜𝑓𝑡𝑚𝑎𝑥 (𝑄 ×𝐾 ,)
+> ••• 𝐴 ×𝑉
+> Attention
+> 𝑎 &𝑎 +𝑎 #
+> ×𝑤 -
+> +
+> ×𝑤 .
+> +×𝑤 /
+> +
+> 𝑥 +𝑥 #••• 𝑥 &
+> 𝐾 %!
+> +𝑉 %!
+> +
+> Transformer
+> Block
+> (a) Prefill Phase (b) Generation Phase
+> Input Prompt Previous Generated Token
+> Repeated
+
+Figure 3. LLM generative inference. 
+
+• We evaluate HybridGen and six state-of-the-art KV cache management baselines with diverse LLMs in various sizes on three GPU platforms, with and without a CXL shared memory pool. HybridGen outperforms the compared so-lutions by 1.41 ×–3.2 × on average with superior accuracy. 
+
+2 Background 
+
+2.1 LLM Generative Inference 
+
+LLM inference consists of two stages: prefill and generation 
+
+(or decode ). Each token attends to all prior tokens in LLM inference, making recomputation of past key ( K) and value 
+
+2HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing 
+
+(V) vectors prohibitively expensive. Modern LLMs avoid this by caching K and V tensors from prefill and updating them incrementally during generation, known as the KV cache .During prefill (Figure 3(a)), the model processes the entire input prompt (e.g., 𝑥 0, . . . , 𝑥 𝑛 ) and produces the first output token ( 𝑡 0), serving as the initial input to the subsequent gen-eration iterations. For each transformer layer, key and value vectors of all tokens are computed and stored in the KV cache for reuse. During generation, the model autoregressively pro-duces tokens. As shown in Figure 3(b), for a new token 𝑡 𝑖 ,the query, key, and value vectors ( Q0 
+
+> 𝑡 𝑖
+
+, K0 
+
+> 𝑡 𝑖
+
+, V0 
+
+> 𝑡 𝑖
+
+) are computed at the first layer, and the new K0 
+
+> 𝑡 𝑖
+
+and V0 
+
+> 𝑡 𝑖
+
+are appended to the KV cache. Attention logits are computed as Q0 
+
+> 𝑡 𝑖
+
+× K𝑇 /√𝑑 , where 𝑑 
+
+is the per-head dimension. These logits capture raw rele-vance between the current and past tokens, where larger logits indicate stronger relevance. Applying softmax pro-duces attention scores that weight value vectors to generate the attention output, where higher scores indicate greater influence. This process continues until an end-of-sequence (EoS) token is produced or a maximum length is reached. relevance between the current token 𝑡 𝑖 and previous to-kens, where larger logits indicate stronger relevance. 
+
+2.2 Long Context LLM Inference 
+
+Long contexts, spanning hundreds of thousands to millions of tokens, enable LLMs to capture long-range dependencies and improve output quality. However, as sequence length (context) increases, the KV cache size also scales linearly, creating significant memory pressure [ 47 ]. Several studies tackled the exploding KV cache size through KV cache of-floading and pruning. KV cache pruning retains only a subset of important tokens in GPU memory using strategies such as recent-window attention [ 26 , 40 ], attention sinks [ 23 , 40 , 47 ], or fixed-size top-𝐾 selection [ 12 , 23 , 47 ]. While these reduce memory usage and enable constant-time attention, they may degrade accuracy due to discarded context. Offloading pre-serves all KV tokens by storing them in larger CPU memory or storage [ 21 , 33 , 44 ] to avoid accuracy loss. However, it requires expensive KV token streaming back to the GPU at each generation step. To mitigate this, recent work pro-poses speculative prefetching of important tokens [ 21 ]. It predicts important tokens by approximating attention us-ing the prior layer’s input, exploiting the inherent similarity between inputs of consecutive layers. 
+
+2.3 Memory Expansion via CXL 
+
+As application size becomes bigger, memory subsystems have also evolved quickly. One promising solution is memory ex-pansion via Compute Express Link (CXL), an industry stan-dard that enables connecting memory and compute devices via PCIe. Through CXL protocol, a set of DRAMs or SSDs can be connected to PCIe switch, mapped to the host CPU 10 4 10 5
+
+> Sequence Length (Tokens)
+> 0
+> 25
+> 50
+> 75
+> 100
+> Transferred Size for
+> Attention Computation
+> Per Iteration (GB)  Attention on GPU
+> Attention on CPU
+> HybridGen
+
+Figure 4. Estimated data traffic during attention layer com-putation per iteration under different strategies. 1K 2K 4K 8K 16K 32K 64K  
+
+> Sequence Length (Tokens)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Computation Load
+> (FLOPs)
+> 1e9
+> Attention on GPU
+> HybridGen
+> Attention on CPU
+> GPU CPU
+
+Figure 5. Computation distribution on transformer block computation per iteration under different strategies. address space, and accessed by the host CPU or other accel-erators (e.g., GPUs) via memory load/store instructions. Due to the extra PCIe and protocol latencies, CXL memories are known to be a few times slower than local memories. Thus, several studies introduced data mapping and prefetching algorithms between CXL and local memories, considering data access frequency (hotness) and locality [ 18 , 34 , 38 , 48 ]. 
+
+3 Motivation 
+
+This section analyzes the benefits and limitations of existing KV cache offloading methods when attention computation is done either on CPU or GPU. 
+
+3.1 Data Traffic Depending on Attention Affinity 
+
+To analyze how processor affinity affects data transfer over-head, we measure data traffic under two settings: (1) KV cache offloaded to CPU with attention on GPU ( AoG ), and (2) both KV cache and attention on CPU ( AoC ). In AoG, both key-value tensors must be transferred from CPU to GPU, resulting in 2×𝑁 ×𝑑 data transfer volume per layer, where 𝑁 
+
+is sequence length and 𝑑 is attention dimension. In contrast, AoC transfers only the fixed-size output 𝑑 , incurring con-stant data traffic. Thus, AoG scales linearly with sequence length, while AoC remains constant, as shown in Figure 4. As sequence length increases, AoC becomes more advantageous in reducing data transfer. 
+
+3.2 Load Imbalance Depending on Attention Affinity 
+
+Data traffic alone does not determine which approach is bet-ter, so we break down the computation loads of CPU and GPU when different sequence lengths are used. As shown in Figure 5, AoG exhibits the most imbalanced computation load across CPU and GPU, because GPU handles all computa-tions, including attention, FFN, and layernorm, etc. Though 
+
+> 3
+
+Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon 
+
+GPU has a higher throughput than CPU, given the increasing amount of data when the sequence becomes longer, GPU can be easily overloaded, while leaving CPU idle. In contrast, AoC maintains nearly constant GPU computation load per decoding iteration, as non-attention operations are indepen-dent of sequence length. However, CPU workload increases with longer sequences due to attention over larger KV caches. At 64K sequence length, CPU computes almost 5 × more op-erations than GPU. Since CPUs have lower parallelism, AoC is not scalable despite reducing data traffic compared to AoG. 
+
+3.3 Ball-park Latency Estimation 
+
+We also did a ballpark latency estimation of the two ap-proaches by using an estimated theoretical FLOPS of CPU and GPU as 46 GFLOPS and 1.3 TFLOPS based on the ma-chine A in Table 1 1. The transfer time is measured by mi-grating a given amount of data using the memory-copy API on the machine. We also assumed that all computations can find data from the local memory through perfect prefetch-ing. As we do not assume any computation and data traffic overlapping scheme, we show the data transfer latency and computation latency in separate bar charts. As shown in Figure 6, AoG encounters higher data transfer latency while AoC suffers from at least 4 × longer execution time than AoG due to CPU’s lower computational throughput. 
+
+3.4 CPU-GPU Hybrid Attention Computing 
+
+The previous results show obvious limitations of both solu-tions: AoG is constrained by memory capacity, while AoC is limited by compute capacity. This motivates CPU–GPU hybrid attention computing. In this design, the CPU com-putes attention for tokens offloaded to CPU memory, while the GPU handles tokens residing in GPU memory (e.g., re-cently generated ones) and completes the remaining atten-tion pipeline. As shown in Figures 4 - 6, hybrid attention computing (denoted as HybridGen ) reduces data transfer by avoiding movement of raw KV vectors, while leveraging GPU parallelism. At the same time, as CPU only calculates attentions of a subset of tokens, we do not suffer from CPU’s limited compute capacity. With these benefits, our estimated performance shows that hybrid computing is the best among the three approaches. 
+
+3.4.1 Can Faster Interconnect Help? Recent superchip architectures (e.g., GH100) integrate CPU and GPU within a single package using high-bandwidth interconnects (NVLink C2C), significantly improving data transfer speed. To evalu-ate whether this reduces AoG’s data transfer overhead, we 
+
+> 1
+
+A fused multiply–add (FMA) operation is assumed to take 4 cycles on the NVIDIA A100 GPU [ 1], while a floating-point operation typically takes 5 cycles on the Intel CPU [ 14 ]. The NVIDIA A100 consists of 6912 CUDA cores running at 765 MHz, providing an approximate throughput of 1.3 ×
+
+10 12 operations per second, whereas the Intel Xeon CPU has 104 cores at 2.2 GHz, yielding roughly 4.6 × 10 10 operations per second. 64 128 256 512 1024 2048     
+
+> Sequence Length (Tokens)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> Latency (s)
+> Attention on GPU Attention on CPU HybridGen
+> GPU compute CPU compute Data transfer
+
+Figure 6. Estimated latency under different strategies. 256 512 1024 2048 4096 8192     
+
+> Sequence Length (Tokens)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Latency (s)
+> Attention on GPU Attention on CPU HybridGen
+> GPU compute CPU compute Data transfer
+
+Figure 7. Estimated latency of Grace-Hopper-like architec-ture: Note that due to the limited GPU resource, AoG can not process longer sequences or larger batches (e.g., 3490 tokens with a batch size of 4), while the other two approaches can. </s>  
+
+> The
+> quick
+> brown
+> fox
+> jumps
+> over
+> the
+> lazy
+> dog
+> Source (keys)
+> </s>
+> The
+> quick
+> brown
+> fox
+> jumps
+> over
+> the
+> lazy
+> dog
+> Target (queries)
+> opt-13b Attention L13 H9
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+
+(a) Layer 13. </s>   
+
+> The
+> quick
+> brown
+> fox
+> jumps
+> over
+> the
+> lazy
+> dog
+> Source (keys)
+> </s>
+> The
+> quick
+> brown
+> fox
+> jumps
+> over
+> the
+> lazy
+> dog
+> Target (queries)
+> opt-13b Attention L36 H25
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+
+(b) Layer 36. 
+
+Figure 8. Heatmap of the attention scores from different layers in OPT-13B. 256 512 1024 2048 4096 8192     
+
+> Sequence Length (Tokens)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Latency (s)
+> Attention on GPU Attention on CPU HybridGen
+> GPU compute CPU compute Data transfer
+
+Figure 9. Estimated latency of Grace-Hopper-like architec-ture with KV cache pruning: 40% tokens used for attention. estimated latencies under the GH100 configuration [ 6 ], as shown in Figure 7. Note that results are shown only when all three approaches can process the given sequence. AoG failed for longer sequences or larger batches due to limited GPU resources, while AoC and HybridGen remain feasible. Compared to Figure 6, the faster interconnect effectively re-duces memory copy overhead. However, due to the limited parallel processing power and local DRAM bandwidth, AoC is the least desirable solution. HybridGen achieves better 
+
+4HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing 
+
+performance than AoG, but AoG can surpass HybridGen at longer sequence lengths. However, AoG is not scalable due to stricter limits on input size and batch size. Thus, faster interconnects mitigate data transfer overhead but cannot be an ultimate solution for long-context LLM inference. 
+
+3.4.2 Can KV Cache Pruning Help? As discussed in Section 2, KV cache pruning maintains only selected tokens, so it could solve the KV cache memory pressure problem. However, such methods risk accuracy loss by discarding 
+
+seemingly unimportant tokens [ 12 , 40 , 47 ]. This is because important token positions vary across iterations, layers, and heads, despite some common patterns. To examine the con-sistency of important token positions, we measured attention scores across iterations for individual layers. Figure 8 shows a heatmap of the attention scores of two sample layers. Find-ings are: 1) tokens important in one iteration (e.g., “over”, “lazy” in iteration 9) may become unimportant in the next iteration, and 2) while early and recent tokens are often important, middle tokens can also be critical without a con-sistent pattern. Thus, for accuracy, KV cache offloading (i.e., preserving context) and dynamic token pruning are needed. To analyze AoG, AoC, and HybridGen under dynamic token selection, we re-estimated latency on GH100 assuming 40% of KV tokens are important. For HybridGen , we assign 20% tokens to CPU and 20% to GPU, excluding token pre-diction latency due to algorithm variability. Figure 9 shows the results. Dynamic token selection significantly improves performance by reducing token counts. However, AoC still scales poorly due to limited compute power. HybridGen 
+
+outperforms both approaches by balancing workloads be-tween CPU and GPU and leveraging GPU parallelism for remaining computation. This demonstrates that, even with identical pruning, performance strongly depends on work-load mapping strategy. 
+
+4 HybridGen 
+
+4.1 Overview & Challenges 
+
+We propose HybridGen , which tackles the computation and data traffic imbalances of AoC and AoG by leveraging both CPU and GPU resources. Unlike prior approaches, Hy-bridGen offloads a large portion of KV cache and attention computation to the CPU, enabling both CPU and GPU to operate on tokens in their local memory, thereby reducing data transfer and improving utilization. However, there are several challenges for hybrid attention computing; 1) the attention pipeline has intra-layer and inter-layer dependencies, 2) due to limited GPU memory capacity, it is hard to balance the loads; CPU needs to process more tokens for longer sequences, and 3) CPU memory capacity could also reach the limit for a significantly longer context. 
+
+HybridGen addresses these challenges with a lightweight software framework, as shown in Figure 10. Section 4.2 de-scribes how HybridGen resolves attention dependencies KV Cache Manager   
+
+> Eviction
+> Engine
+> Token
+> Mapper
+> Model Executor
+> GPU
+> Token Concatenator
+> Prefetcher
+> CPU
+> HybridGen Core
+> Host Memory
+> Logits
+> Calculator Token Selector
+> Feedback
+> Scheduler
+> CXL Memory
+> KV Cache Storage
+> Prefetch
+> Evict
+> Semanti c-Aware
+> Data Mapper
+
+Figure 10. Architecture of HybridGen .0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 
+
+> Layer Index
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Cosine Similarity
+> OPT-6.7B (32 layers)
+> Qwen2.5-7B (28 layers)
+> Llama-3.1-8B (32 layers)
+
+Figure 11. Cosine similarity between inputs of consecutive transformer layers (layer i vs. layer i+1) during decoding for OPT-6.7B, Qwen2.5-7B, and Llama-3.1-8B. (challenge 1) with Logits Calculator on CPU and Token Con-catenator on GPU. Section 4.3 presents a novel Feedback Scheduler that dynamically balances CPU–GPU workloads as sequence length increases (challenge 2) to prevent CPU bottlenecks while preserving accuracy. Section 4.4 describes how HybridGen extends to shared memory systems (e.g., CXL) for super long sequences (challenge 3) via a Semantic-aware Data Mapper that mitigates NUMA overhead. 
+
+4.2 Attention Process Parallelization 
+
+HybridGen aims to enable parallel attention computation across CPU and GPU . However, partitioning attention com-putation across heterogeneous processors is challenging due to strong data dependencies in the attention pipeline. As illustrated in Figure 3, conventional attention first computes logits QK 𝑇 (scaled by 1/√𝑑 ), followed by softmax to obtain attention scores over all tokens. These attention scores cap-ture the contextual relevance between the current token and historical tokens, and are subsequently used for value 
+
+V aggregation. This softmax operation introduces a global dependency across tokens, making partitioning difficult. To address this, HybridGen decouples attention computation into two stages and parallelizes the first stage. Specifically, while the softmax and value aggregation steps require global logits, the attention logit computation itself, Q · K𝑇 , is fully in-dependent across tokens. Exploiting this, HybridGen allows the CPU and GPU to compute logits for keys in their local memory in parallel. The GPU then concatenates all logits, applies softmax, and completes value aggregation and the remaining transformer operations. 
+
+> 5
+
+Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon HybridGen                      
+
+> Transformer (𝑖 ~𝑛 )
+> 𝑡 !"#
+> Projection to Vocabulary
+> Generate
+> 𝑡 $%%!&'%
+> 𝑡 (()&'%
+> 𝐹𝐹𝑁 ,𝐿𝑎𝑦𝑒𝑟𝑁𝑜𝑟𝑚
+> Transformer
+> Block
+> 𝑄 %
+> *𝐾 𝑉
+> 𝑆𝑜𝑓𝑡𝑚𝑎𝑥
+> Attention 𝑖
+> ×𝑤 +
+> *
+> ×𝑤 ,
+> *×𝑤 +
+> *
+> 𝑡 !
+> 𝑡 -./*%0
+> 𝑡 12*/3%0
+> ••• m••• •••
+> 𝑄 %
+> *
+> 𝑘 4
+> 𝑘 4"#
+> •••
+> •••
+> 𝑣 4
+> 𝑣 4"#
+> •••
+> •••
+> GPU
+> GPU Cached
+> Value Vectors
+> GPU Cached
+> Key Vectors
+> 𝑣 #
+> 𝑣 5
+> 𝑣 !
+> n13
+> ••• m••• ••• n13
+> 𝑣 4
+> 𝑣 4"#
+> •••
+> •••
+> 𝑣 #
+> 𝑣 5
+> 𝑣 !
+> Concat
+> Concat
+> 3
+> 4
+> 5
+> 𝑄 %
+> *6#
+> 𝑘 #
+> 𝑘 7
+> 𝑘 5
+> •••
+> •••
+> 𝑘 !
+> Offloaded Keys
+> Logit Calculator
+> CPU
+> Feedback
+> Scheduler
+> Token Selector
+> Selection
+> strategy
+> # Tokens to
+> process (K)
+> Selected
+> important
+> token IDs
+> 𝑣 #
+> 𝑣 5
+> 𝑣 !
+> n13
+> Selected
+> Value Vectors
+> Important
+> logits
+> 𝑣 #
+> 𝑣 7
+> •••
+> •••
+> 𝑣 !6#
+> 𝑣 !
+> Offloaded
+> Value Vectors
+> 2
+> Tiered Memory
+> (e.g., CXL -
+> expanded
+> memory) Prefetch
+> ••• ••• n123
+> 1
+> 6
+
+Figure 12. Workflow of HybridGen : 1○ While the GPU executes attention and the FFN for layer 𝑖 , the CPU selects important tokens and computes attention logits for layer 𝑖 + 1 using the input of layer 𝑖 , leveraging similarity across consecutive layers. 2○- 3○ The CPU transfers the computed logits and corresponding value vectors from tiered memory to the GPU. 4○ In parallel, the GPU computes logits for tokens cached in GPU memory. 5○ The GPU concatenates logits and value vectors, restores the original token order, applies softmax, performs value aggregation, and completes the remaining transformer computations. 6○ The GPU transfers the transformer block output to the CPU for the next layer. Another dependency exists across layers: since the next layer’s input is produced by the GPU, the CPU must wait until the GPU completes the attention pipeline for each layer. To tackle this, we leverage similarity between the inputs of consecutive transformer layers. As discussed in Section 4.2.1 and observed in prior works [ 5, 21 , 42 ], layer inputs change gradually and are highly similar. Prior studies show that reusing inputs across consecutive layers (with layer-specific weights) yields comparable accuracy [ 42 ]. Exploiting this, the CPU proactively computes attention logits for the next layer using the current layer’s input and next-layer weights, while the GPU completes the current layer. The CPU results are then used by the GPU to finish attention in a pipelined manner, after which the output is shared back with the CPU. 
+
+4.2.1 Consecutive-Layer Input Similarity. To validate our key assumption for mitigating inter-layer dependencies, we measured the cosine similarity between inputs of con-secutive transformer layers (the residual stream before each layer) on three LLMs, as shown in Figure 11. We ran decod-ing on a common prompt set and calculated similarity across all consecutive layer pairs across the model depth. Results show that similarity increases sharply after the first layer and remains high throughout the network for all models. This indicates that neighboring layers operate on highly cor-related representations, supporting the use of layer 𝑖 ’s input as a proxy for layer 𝑖 +1 in our design. 
+
+4.2.2 CPU-Side Support for Hybrid Attention. To en-able CPU-side attention logit computation, HybridGen in-corporates a Logits Calculator , as shown in Figure 10 and 12. It computes attention logits using K vectors in CPU memory, after which the CPU transfers the resulting logits (a compact vector) and corresponding V vectors to the GPU. By trans-ferring logits and selected V vectors instead of raw K and V
+
+vectors, HybridGen significantly reduces CPU–GPU data movement, as also discussed in Section 3.1. For a pipelined CPU–GPU computing, the logits calculator enables the CPU to compute attention logits for layer 𝑖 +1
+
+using the input of layer 𝑖 and the weights of layer 𝑖 +1, while the GPU executes attention and FFN computation for layer 𝑖 .This pipelined execution model effectively overlaps CPU and GPU computations, thereby improving overall utilization and reducing end-to-end inference latency. 
+
+4.2.3 Device-Side Support for Hybrid Attention. Hy-bridGen employs a set of device-side components to pre-serve correct attention semantics under hybrid CPU–GPU ex-ecution. These components ensure functional equivalence to conventional attention despite KV cache partitioning, with-out introducing any new algorithmic behavior or requiring hardware modifications. Eviction Engine manages KV cache residency by offloading older tokens from GPU to CPU un-der memory pressure, using a least-recently-generated (LRG) replacement policy [ 21 , 33 ]. Evicted tokens remain available for CPU-side attention computation. The lightweight Token Mapper tracks positional ranges of GPU- and CPU-resident KV segments, allowing the GPU to reassemble attention logits without runtime sorting or synchronization. Token Concatenator merges CPU- and GPU-computed logits and value vectors in the original token order tracked by the to-ken mapper. The GPU then applies softmax and completes 
+
+6HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing n1 3          
+
+> Important logits
+> 𝑄 !
+> "#$
+> 𝑘 $
+> 𝑘 %
+> 𝑘 &
+> •••
+> •••
+> 𝑘 '
+> Offloaded Keys
+> Pre -QK ᵀSelection
+> 𝑄 !
+> "#$
+> 𝑘 $
+> 𝑘 %
+> 𝑘 &
+> •••
+> •••
+> 𝑘 '
+> Offloaded Keys
+> ••• ••• n123
+> Post -QK ᵀSelection
+> ••• ••• n123
+
+Figure 13. Attention logits computation under two token selection mechanism: Feedback scheduler chooses one of these at runtime to balance the performance. 
+
+Algorithm 1 Feedback Scheduler Policy 
+
+Require: GPU stage latency 𝑇 gpu 
+
+Require: CPU stage latency 𝑇 cpu 
+
+Require: Transfer latency 𝑇 tx 
+
+Require: Offline accuracy threshold 𝐾 min 
+
+Ensure: Token count 𝐾 , selection strategy  
+
+> 1:
+
+Initialize 𝐾 ← 𝐾 min  
+
+> 2:
+
+Initialize strategy ← Post-QK T 
+
+> 3:
+
+if 𝑇 cpu + 𝑇 tx ≤ 𝑇 gpu then  
+
+> 4:
+
+Increase 𝐾 to improve accuracy  
+
+> 5:
+
+else  
+
+> 6:
+
+if 𝐾 > 𝐾 min then  
+
+> 7:
+
+Decrease 𝐾 while ensuring 𝐾 ≥ 𝐾 min  
+
+> 8:
+
+else  
+
+> 9:
+
+strategy ← Pre-QK T 
+
+> 10:
+
+end if  
+
+> 11:
+
+end if  
+
+> 12:
+
+return (𝐾, strategy )
+
+value aggregation, producing outputs identical to monolithic execution while enabling parallel CPU–GPU computation. 
+
+4.3 Load Balancing with Feedback Scheduler 
+
+In hybrid attention, effectively balancing CPU and GPU work is critical for high utilization and low latency. As sequence length grows, more KV tokens are offloaded to the CPU, in-creasing CPU-side computation and CPU–GPU data transfer costs and potentially making the CPU the bottleneck. To address this challenge, HybridGen introduces a Feedback Scheduler that dynamically adjusts the CPU-side workload based on runtime latency feedback while enforcing offline accuracy constraints. As shown in Figure 2, HybridGen adopts a pipelined exe-cution model where GPU-side attention and FFN for layer 𝑖 
+
+(the GPU stage ) overlap with CPU-side logit computation and data transfer for layer 𝑖 +1 (the CPU stage ). The scheduler monitors the execution time of both stages and keeps the CPU stage hidden behind the GPU stage. At runtime, it con-trols two parameters: the number of tokens ( 𝐾 ) processed on the CPU, and the corresponding token selection strategy. 
+
+4.3.1 Adaptive Selection of Token Count ( 𝐾 ). Hybrid-Gen initially applies Post-QK T selection (Figure 13), where the 10 −2    
+
+> 10 −1
+> 10 0
+> KV Cache Ratio (Log Scale)
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> Accuracy
+> PIQA
+> OpenBookQA
+> (a) OPT-6.7B. 10 −2
+> 10 −1
+> 10 0
+> KV Cache Ratio (Log Scale)
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> Accuracy
+> PIQA
+> OpenBookQA (b) OPT-13B.
+
+Figure 14. Accuracy of OPT-6.7B and OPT-13B on PIQA and OpenBookQA datasets when retaining different percentages of historical token. CPU computes attention logits for all offloaded KV tokens and selects the top-𝐾 most important ones. This is accuracy-friendly as importance is derived from the full context. The feedback scheduler increases 𝐾 as long as the combined CPU computation and transfer latency remains below the GPU-stage latency, thereby maximizing accuracy without stalling the pipeline; otherwise, it decreases 𝐾 to reduce overhead. To preserve output quality, the scheduler enforces a lower bound 𝐾 min determined offline through accuracy profiling. As illustrated in Figure 14, representative models exhibit stable accuracy inflection points across datasets, enabling identification of a robust, model-specific 𝐾 min . Unlike prior KV cache pruning methods [ 12 , 21 , 40 , 47 ] that rely on a fixed 𝐾 , HybridGen dynamically adjusts 𝐾 at runtime while respecting this lower bound, to maximize performance while preserving accuracy . A single 𝐾 value is used across layers, while the selected tokens may vary per layer according to the selection algorithm. 
+
+4.3.2 Dynamic Switching Between Post- and Pre-QK T
+
+Selection. As sequence length increases, Post-QK T selection can become CPU-bound even when 𝐾 reaches 𝐾 min . When the scheduler detects that CPU computation becomes the bottleneck, it switches to Pre-QK T selection (Figure 13), where logits are computed only for the selected 𝐾 tokens. This sig-nificantly reduces CPU overhead and allows HybridGen to sustain pipelined execution under large KV cache sizes. In this mode, important tokens are identified using lightweight prediction mechanisms (e.g., position-based heuristics), de-scribed in Section 4.5. Algorithm 1 summarizes the feedback scheduler policy, which dynamically adjusts 𝐾 and switches between Post-and Pre-QK T selection based on runtime latencies while enforcing accuracy constraints. 
+
+4.4 Semantic-Aware KV Mapping on Tiered Memory 
+
+HybridGen is designed to scale beyond GPU memory and host DRAM capacity by leveraging tiered memory such as CXL. However, naively placing KV caches in CXL mem-ory can significantly degrade performance due to its higher 
+
+> 7Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon
+
+access latency. To address this, HybridGen introduces a 
+
+semantic-aware KV cache mapping strategy that exploits the distinct roles of key ( K) and value ( V) vectors in attention computation. A key observation is that K and V exhibit different ac-cess characteristics in hybrid attention. As described in Sec-tion 4.2, CPU-side computation in HybridGen is restricted to attention logit (query–key dot products), accessing only 
+
+K vectors, while V vectors are not used on the CPU and are later transferred to the GPU for aggregation. Exploiting this semantic distinction, HybridGen places K
+
+vectors in CPU DRAM to provide faster accesses during CPU logit computation, while storing V vectors in CXL memory once the KV cache exceeds DRAM capacity. This ensures that CPU execution avoids CXL access latency on the critical path. V vectors are transferred to GPU via DMA, allowing CXL to act as a capacity extension without incurring NUMA penalties for CPU execution. When DRAM is exhausted, K
+
+vectors are evicted using an LRG policy, consistent with Section 4.2.3. Unlike prior methods relying on runtime access profiling or hotness tracking, HybridGen ’s semantic-aware mapping is determined by attention semantics and requires no online monitoring, providing stable and predictable performance. Note that the existing access hotness-based mapping is inef-fective for KV caches, as no tokens are consistently accessed more frequently across queries, which explains the needs for diverse token selection strategies, as discussed in Section 4.5. 
+
+4.5 Important Token Selection for Scalable CPU Performance 
+
+To balance CPU and GPU performance, the feedback sched-uler limits CPU-side attention computation by selecting which offloaded KV tokens participate in attention. Hybrid-Gen supports this via a unified Token Selector module (Fig-ure 10), enabling integration with diverse token selection algorithms. Existing token selection methods fall into three categories: (1) position-based heuristics that exploit position patterns of important tokens [ 12 , 26 , 40 ], (2) score-based methods that rank tokens using attention scores [ 21 , 23 , 47 ], and (3) predictors that identify important attention heads [ 9 , 27 ]. All these approaches produce a ranked list of candidate tokens or heads according to estimated importance. The token selector determines which tokens to process based on this ranked list, along with the token count 𝐾 and the selection strategy provided by the feedback scheduler. Under Post-QK T selection, it applies score-based methods to select the top-𝐾 tokens for the logit calculator. Under Pre-QK T selection, it uses lightweight predictors (e.g., position-or head-based) to identify the top-𝐾 tokens. In Section 5, we evaluate HybridGen with multiple token selection algo-rithms, demonstrating its general applicability across diverse selection strategies. 
+
+4.6 Workflow 
+
+Figure 12 illustrates the execution workflow of HybridGen 
+
+during the generation (or decode) phase. 1 While the GPU executes the attention and FFN of transformer layer 𝑖 , the CPU simultaneously prepares computation for layer 𝑖 + 1
+
+by selecting important tokens based on feedback scheduler decisions. If pre-QK T selection is chosen, the token selector picks the top-𝐾 tokens, and the CPU speculatively computes their attention logits using the query vector 𝑄 from the previous layer. If post-QK T selection is chosen, logits are computed for all offloaded tokens and then filtered based on scheduler and selector inputs. 2 – 3 After logit compu-tation, the attention logits of selected tokens, along with their corresponding value vectors, are prefetched into GPU memory. Since value vectors are not accessed on the CPU, they are transferred directly from their backing storage (e.g., CXL-expanded memory) to the GPU. 4 In parallel, the GPU computes attention logits for tokens already cached in GPU memory, typically recent tokens. 5 The GPU then concate-nates CPU- and GPU-computed logits and value vectors, restoring the original token order via the token mapper to form a unified attention logit vector equivalent to mono-lithic execution. Then, the GPU applies softmax over the concatenated logits, performs value aggregation, and com-pletes the remaining computations of the transformer block (e.g., FFN). The resulting hidden states are passed to the next layer, and the pipeline repeats. 6 Finally, the GPU sends the transformer block output to the CPU for the next layer computation. 
+
+4.7 Implementation 
+
+We developed HybridGen on top of FlexGen [ 33 ], a widely used KV-cache offloading inference framework, leveraging its KV cache management and data movement utilities. In its Python frontend, we decouple attention-logit computation from the rest of the attention pipeline, implement the feed-back scheduler, and extend the prefetching logic to support CPU–GPU pipelined execution. To support semantic-aware mapping on tiered memory, we modified PyTorch’s CPU allocator [ 35 ] in its C++ backend using the Linux mbind 
+
+API [24]. 
+
+4.8 Generalization to Other Frameworks 
+
+HybridGen is designed to be framework-agnostic and com-patible with existing LLM serving systems. It relies on three capabilities commonly available in modern frameworks: (1) a decode-time attention path exposing the current hidden state or query vector, (2) a KV-cache manager that tracks logical token order across GPU and host memory, and (3) a runtime scheduler that overlaps CPU and GPU execution. These abstractions are already supported in systems such as vLLM and SGLang. Integration primarily replaces mono-lithic decode-time attention with a split execution path. The        
+
+> 8HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing opt-1.3b
+> opt-2.7b
+> opt-6.7b
+> opt-13b
+> llama-1b
+> llama-3b
+> llama-8b
+> qwen-1.5b
+> qwen-3b
+> qwen-7b
+> qwen-14B
+> Geo.
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Normalized time  FlexGen(Baseline) MoE-Lightning Keyformer H2O StreamingLLM InfiniGen HybridGen
+> 2.06 2.63
+
+Figure 15. End-to-end latency of different models. (Normalized to Baseline) CPU computes attention logits for offloaded tokens and gath-ers corresponding value vectors, while the GPU computes logits for GPU-resident tokens, merges results in logical to-ken order, applies softmax, and completes value aggregation and remaining transformer operations. Other components (e.g., model loading, batching, sampling, prefix caching) re-main unchanged. In paged KV-cache systems, integration requires extending KV metadata to track device residency and adding a lightweight feedback controller to adapt the number of CPU-processed tokens. If tiered memory is avail-able, HybridGen further applies semantic-aware placement by keeping key vectors in host memory and placing value vectors in lower tiers. 
+
+5 Evaluation 
+
+5.1 Experimental Setup 5.1.1 Workloads and Platforms. We evaluate a diverse set of LLMs, including OPT[ 46 ] (1.3B–13B), Llama-3.2 [ 13 ](1B and 3B), Llama-3.1 [ 13 ] (7B), and Qwen2.5 [ 36 ] (1.5B–14B). Experiments are conducted on three platforms with differ-ent CPU–GPU configurations and memory hierarchies, as summarized in Table 1. Machine A is used as the primary evaluation platform, Machine B for sensitivity analysis across GPU generations, and Machine C to evaluate HybridGen 
+
+on a CXL-enabled system. We use OPT models for most evaluations to enable comparison with prior KV-cache opti-mization work. For long-context experiments, we use Llama and Qwen models, since OPT supports sequences only up to 2K. Unless otherwise specified, the default sequence length is 2K and the batch size is 1. 
+
+5.1.2 Baseline & SOTA Solutions. We compare Hybrid-Gen against six SOTA KV cache management methods, cate-gorized by attention computation affinity and token selection strategy. We distinguish full-attention methods (AoG and AoC) from selective attentions that perform token selection before (Pre-QK T) or after (Post-QK T) attention logit compu-tation. Selective attention methods run attention on GPU. 
+
+Table 1. Hardware and Software Environment.                     
+
+> Machine CPU GPU System DRAM CXL Memory GPU Driver CUDA Toolkit AIntel Xeon Gold 5320 A100 (80GB) Linux 5.14 128 GB –570.86.10 12.1 BIntel Xeon Gold 6530 H100 NVL (94GB) Linux 6.8 512 GB –580.95.05 12.5 CIntel Xeon 6960P GeForce RTX 5090 (32GB) Linux 6.2.6 128GB 128 GB (DDR4-3200 PCIe 5.0) 570.86.10 12.8
+
+• FlexGen (AoG, Baseline) [ 33 ] offloads KV cache to lower-tier memory with zig-zag scheduling while keeping atten-tion on the GPU. We offload 100% of the KV cache and use it as the primary baseline. 
+
+• MoE-Lightning (AoC) [ 5], originally designed for MoE models, offloads KV cache and attention to the CPU when GPU memory is exhausted, while the GPU executes FFN layers, reducing KV transfer but becoming CPU-bound at long sequences. 
+
+• Keyformer (Post-QK T) [ 2] selects top-𝐾 tokens based on accumulated attention scores after attention computation and serves as our default Post-QK T method. 
+
+• H2O (Post-QK T) [ 47 ] keeps heavy-hitter and recent to-kens in a fixed-size KV cache, evicting less important entries, but still materializes attention logits over the re-tained cache on the GPU. 
+
+• StreamingLLM (Pre-QK T) [ 40 ] uses attention sinks and a sliding window for static KV retention, enabling Pre-QK T
+
+execution but potentially degrading long-range accuracy. We retain 4 sink tokens and a 1024-token window. 
+
+• InfiniGen (Pre-QK T) [ 21 ] predicts important tokens using lightweight GPU-side approximations, but selection lies on the critical path, limiting efficiency when KV caches are largely offloaded. 
+
+5.2 Performance 5.2.1 Overall Performance. Figure 15 shows end-to-end generation performance across all tested models. Hybrid-Gen consistently achieves the best performance across all model scales. On average, it delivers up to 1.41 × speedup over the state-of-the-art Pre-QK T method (InfiniGen) and 1.86 × over the Post-QK T method (Keyformer), and up to 3.2 × over full-attention and offloading baselines (FlexGen, MoE-Lightning). These gains stem from HybridGen ’s hy-brid execution design, which overlaps CPU-side attention logit computation with GPU execution while dynamically adjusting the number of selected tokens to avoid pipeline stalls. Compared to Post-QK T approaches that run atten-tion only on the GPU, HybridGen reduces both attention computation and CPU–GPU data movement. Compared to Pre-QK T methods with static selection, it adapts token se-lection at runtime, improving accuracy while maintaining balanced and high attention throughput. Accuracy results are in Section 5.3. 
+
+> 9
+
+Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon 2k 4k 8k 16k 32k Geo.    
+
+> Sequence length
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Normalized time  FlexGen(Base)
+> MoE-Lightning
+> Keyformer
+> H2O
+> StreamingLLM
+> InfiniGen
+> HybridGen
+> 2.48 3.12 3.91 2.53
+
+(a) Qwen2.5-7B 2k 4k 8k 16k 32k Geo. 
+
+> Sequence length
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Normalized time  FlexGen(Base)
+> MoE-Lightning
+> Keyformer
+> H2O
+> StreamingLLM
+> InfiniGen
+> HybridGen
+> 2.10
+
+(b) Llama-3.1-8B 
+
+Figure 16. Performance under different sequence length. 
+
+5.2.2 Performance with Different Sequence Length. 
+
+Figure 16 reports the end-to-end generation latency as se-quence length increases from 2K to 32K for Qwen2.5-7B and Llama-3.1-8B. HybridGen consistently achieves the best performance across all sequence lengths and shows even better speedup than baseline for longer sequences. On aver-age, HybridGen reduces latency by up to 1.82 × and 2.34 ×
+
+over pre-QK T methods, and by up to 2.66 × and 3.18 × over post-QK T methods for Qwen2.5-7B and Llama-3.1-8B, re-spectively. This benefit stems from HybridGen ’s runtime load balancing, which bounds GPU attention cost by offload-ing attention logit computation to the CPU and dynamically adjusts the amount of CPU computations to avoid pipeline stalls. Note that the accuracy is preserved by processing at least 𝐾 min tokens. In contrast, pre-QK T baselines incur increasing GPU-side prediction or attention overhead as se-quence length grows, while post-QK T methods continue to perform attention over a large token set. 
+
+5.2.3 Performance with Different Batch Size. Figure 17 shows end-to-end generation latency across different batch sizes for OPT-13B. HybridGen consistently achieves the best speedup across all batch sizes, and its performance advan-tage grows with larger batches. On average, HybridGen 
+
+provides up to 1.5 × speedup over the pre-QK T methods and up to 1.87 × speedup over post-QK T approaches. This im-provement is attributed to HybridGen ’s ability to overlap CPU-side attention logit computation with GPU execution and dynamically adjust the number of selected tokens to bal-ance CPU–GPU performance. In contrast, post-QK T methods suffer from increased GPU attention cost as batch size grows, while pre-QK T baselines with static token retention exhibit limited scalability due to fixed attention windows or GPU-side prediction overhead. 1 2 4 8 16 Geo. 
+
+> Batch size
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Normalized time
+> FlexGen(Base)
+> MoE-Lightning
+> Keyformer
+> H2O
+> StreamingLLM
+> InfiniGen
+> HybridGen
+
+Figure 17. Performance under different batch size. opt-1.3b opt-2.7b opt-6.7b opt-13b Avg.  
+
+> 0.8
+> 0.9
+> 1.0
+> 1.1
+> Speedup
+> Interleaving Mapping Semantic-aware Mapping
+
+Figure 18. Speedup of semantic-aware mapping. opt-1.3b opt-2.7b opt-6.7b opt-13b Avg. 
+
+> 1.0
+> 1.5
+> 2.0
+> Speedup(x)  A100
+> H100
+
+Figure 19. Speedup of HybridGen on different GPUs. PIQA OpenBookQA COPA RTE Avg 
+
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Accuracy
+> Keyformer
+> H2O
+> StreamingLLM
+> InfiniGen
+> HybridGen
+> Full Attention
+
+Figure 20. Accuracy under different KV cache pruning. 
+
+5.2.4 Impact of Semantic-Aware KV Cache Mapping. 
+
+Figure 18 evaluates the impact of HybridGen ’s semantic-aware KV mapping. We compare it with a widely used page mapping, which interleaves pages across local DRAM and CXL memory [ 34 , 38 , 48 ]. Semantic-aware mapping consis-tently outperforms, achieving increasing speedups for larger models. This trend reflects the growing significance of data placement for larger KV caches. The speedup stems from 
+
+HybridGen ’s faster K vector accesses for the attention logit computations, while V vectors can be transferred directly from the CXL memory to the GPU via DMA. In contrast, the interleaving mapping incurs frequent accesses to CXL memory during CPU-side logit computation, causing longer latency on the critical path. These results show that semantic-aware KV mapping is essential for scalable hybrid attention on tiered memory. 
+
+5.2.5 Impact of GPU Architectures. We evaluate Hy-bridGen on two GPU platforms (machines A and B in Ta-ble 1) to understand HybridGen ’s general effectiveness across GPU generations. As shown in Figure 19, across all model sizes, HybridGen consistently outperforms the baseline on both platforms, with higher throughput on H100 due to in-creased GPU compute capability and faster CPU–GPU inter-connect. The speedup trends remain stable across architec-tures, which proves the general effectiveness of HybridGen .
+
+10 HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing 1024 1280 1536 1792 2048 Avg 
+
+> Sequence length
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> Norm. time(FlexGen=1.0)
+> Fixed-K Post-QK T
+> Fixed-K Pre-QK T
+> Fixed-K Adaptive
+> Adaptive-K Post-QK T
+> Adaptive-K Pre-QK T
+> Full Scheduler
+
+Figure 21. Performance under different feedback scheduler configurations across varying sequence lengths. 
+
+5.3 Accuracy 
+
+We evaluate accuracy using the LM Evaluation Harness [ 10 ]with a 3-shot prompting setup. Following prior work [ 3 , 8 ,10 ], we report task-specific accuracy as the primary metric, measured by exact match or multiple-choice accuracy de-pending on the dataset. All methods use identical prompts and decoding configurations, and results are averaged over all evaluation samples to ensure fair comparison. We evaluate on four benchmarks: PIQA [ 4], OpenBookQA [ 28 ], COPA [ 32 ], and RTE [ 37 ]. Figure 20 shows the results. Compared to the full attention, which derives the best accuracy by preserving the complete context, HybridGen closely matches the accu-racy across all datasets, with only an average accuracy gap of 0.02 across datasets. This small gap proves the effective-ness of HybridGen ’s feedback-driven token selection with 
+
+𝐾 min threshold. In contrast, baselines with static or aggres-sive token selection (StreamingLLM and InfiniGen) exhibit significant accuracy loss, particularly on tasks that require long-range reasoning (e.g., COPA and RTE). Post-QK T ap-proaches retain more accuracy than static pre-QK T methods but still degrade due to limited retained context. 
+
+5.4 Effectiveness of the Feedback Scheduler 
+
+To understand the impact of feedback scheduler, we mea-sured performance and accuracy impact under different feed-back scheduler configurations by varying the token selection timing (Pre- vs. Post-QK T) and token count control ( 𝐾 ). Fig-ure 21 and Figure 22 show the results. When a fixed 𝐾 is used (e.g., 128, which is 𝐾 𝑚𝑖𝑛 of OPT-13B), as shown in the first three bars, Pre-QK T and Post-QK T respectively show the best and the worst performance, as Pre-QK T does not compute at-tention scores for token selection, while it is required by Post-QK T. When the selection timing is dynamically controlled based on performance ( Fixed-K Adaptive ), the performance is almost close to the Pre-QK T with marginal slowdown due to the added computations when Post-QK T is chosen. However, as Post-QK T can select important tokens more accurately, the adaptive approach derives better accuracy than Pre-QK T,as shown in Figure 22. When 𝐾 is selected adaptively (the last three bars), the speedup is almost similar to fixed 𝐾 configurations. A slight slowdown is observed due to the longer execution time when a larger 𝐾 is used. Note that we used the minimum 𝐾 (𝐾 𝑚𝑖𝑛 )for fixed 𝐾 configurations; the scheduler increases 𝐾 when PIQA OpenBookQA COPA RTE Avg 
+
+> 0.0
+> 0.5
+> 1.0
+> Norm. accuracy
+> (Full attention=1.0)  Fixed-K Post-QK T
+> Fixed-K Pre-QK T
+> Fixed-K Adaptive
+> Adaptive-K Post-QK T
+> Adaptive-K Pre-QK T
+> Full Scheduler
+
+Figure 22. Accuracy under different feedback scheduler con-figurations across varying datasets. CPU has room to process more tokens. However, as a longer context can be considered when a bigger 𝐾 is chosen, the adaptive 𝐾 selection shows superior accuracy than fixed 
+
+𝐾 configurations. When 𝐾 and selection timing are both chosen at runtime ( Full Scheduler ), the accuracy becomes significantly higher than the other methods while the per-formance is maintained similarly to the Pre-QK T.Together, these results demonstrate that the feedback scheduler enables HybridGen to achieve an effective balance between performance and accuracy. 
+
+6 Related Work 
+
+KV Cache Memory Management: A range of systemic and algorithmic techniques have been proposed to manage the growing KV cache footprint in LLM inference. vLLM [ 20 ]partitions the KV cache into fixed-size blocks, enabling non-contiguous storage. vAttention [ 30 ] decouples virtual and physical KV cache allocation using CUDA virtual memory APIs.Tetris [ 45 ] addresses non-uniform memory pressure across layers using an attention-aware allocator to improve GPU memory utilization. LMPrefill [ 7 ] targets prefill-only inference by storing only the final layer’s KV cache. 
+
+Multi-Tier KV Cache: To alleviate the memory pressure, prior work explores KV cache offloading across memory tiers. FlexGen [ 33 ] offloads tensors (e.g., KV cache) across GPU, CPU, and disk with optimized placement and scheduling. FlashGen [ 15 ] proposes a multi-level KV cache spanning GPU, CPU, and SSD with request reordering to improve utilization. Pensieve [ 44 ] introduces a multi-tier KV cache for multi-turn conversations across GPU and CPU memory. 
+
+KV Cache Pruning/Compression: To reduce data move-ment, KV cache pruning and compression techniques have been proposed. InfiniGen [ 21 ] uses rehearsal-based token selection and prefetching to reduce KV transfer overhead. MorphKV [ 12 ] maintains a fixed-size KV cache by selecting important tokens based on attention scores. 
+
+Unlike these solutions, HybridGen provides a uni-fied framework for hybrid attention execution in long-context LLM inference. It enables CPU and GPU to collab-oratively compute attention over locally resident KV tokens, dynamically balances workloads, and introduces semantic-aware KV mapping for efficient use of CXL-expanded mem-ory. 
+
+> 11
+
+Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon 
+
+7 Conclusion 
+
+This paper presents HybridGen a new hybrid attention framework for long-context LLM inference. HybridGen 
+
+aims at maximizing the utilization of underlying hardware resources, which not only improves performance but also reduces data transfers by allowing both CPU and GPU to compute attention with locally stored data. Our proposed intra- and inter-layer attention dependency resolutions, feed-back scheduler, and semantic-aware data mapping enforce scalable LLM inference by dynamically balancing the perfor-mance of CPU and GPU and leveraging larger CXL-expanded memory without NUMA overhead. The experiments show that HybridGen outperforms state-of-the-art solutions by 1.41 ×–3.2 × on average. 
+
+References 
+
+[1] Hamdy Abdelkhalik, Yehia Arafa, Nandakishore Santhi, and Abdel-Hameed A Badawy. 2022. Demystifying the nvidia ampere archi-tecture through microbenchmarking and instruction-level analysis. In 2022 IEEE High Performance Extreme Computing Conference (HPEC). Ieee, 1–8. [2] Muhammad Adnan, Akhil Arunkumar, Gaurav Jain, Prashant J Nair, Ilya Soloveychik, and Purushotham Kamath. 2024. Keyformer: Kv cache reduction through key tokens selection for efficient generative inference. Proceedings of Machine Learning and Systems 6 (2024), 114–127. [3] Stella Biderman, Hailey Schoelkopf, Lintang Sutawika, Leo Gao, Jonathan Tow, Baber Abbasi, Alham Fikri Aji, Pawan Sasanka Am-manamanchi, Sidney Black, Jordan Clive, et al . 2024. Lessons from the trenches on reproducible evaluation of language models. arXiv preprint arXiv:2405.14782 (2024). [4] Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al . 2020. Piqa: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI conference on artificial intelligence , Vol. 34. 7432–7439. [5] Shiyi Cao, Shu Liu, Tyler Griggs, Peter Schafhalter, Xiaoxuan Liu, Ying Sheng, Joseph E. Gonzalez, Matei Zaharia, and Ion Stoica. 2025. MoE-Lightning: High-Throughput MoE Inference on Memory-constrained GPUs. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 (Rotterdam, Netherlands) (ASPLOS ’25). Asso-ciation for Computing Machinery, New York, NY, USA, 715–730. doi: 10.1145/3669940.3707267 
+
+[6] NVIDIA Corporation. Accessed November 2025. NVIDIA Hopper Architecture In-Depth. https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/ .[7] Kuntai Du, Bowen Wang, Chen Zhang, Yiming Cheng, Qing Lan, Hejian Sang, Yihua Cheng, Jiayi Yao, Xiaoxuan Liu, Yifan Qiao, et al .2025. PrefillOnly: An Inference Engine for Prefill-only Workloads in Large Language Model Applications. arXiv preprint arXiv:2505.07203 (2025). [8] Abhinav Dutta, Sanjeev Krishnan, Nipun Kwatra, and Ramachandran Ramjee. 2024. Accuracy is not all you need. Advances in Neural Information Processing Systems 37 (2024), 124347–124390. [9] Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S Kevin Zhou. 2024. Ada-kv: Optimizing kv cache eviction by adaptive budget allocation for efficient llm inference. arXiv preprint arXiv:2407.11550 (2024). [10] Leo Gao, Jonathan Tow, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Kyle McDonell, Niklas Muennighoff, et al . 2021. A framework for few-shot language model evaluation. Zenodo (2021). [11] Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang, Jiawei Han, and Jianfeng Gao. 2023. Model tells you what to discard: Adaptive kv cache compression for llms. arXiv preprint arXiv:2310.01801 (2023). [12] Ravi Ghadia, Avinash Kumar, Gaurav Jain, Prashant Nair, and Poulami Das. 2025. Dialogue Without Limits: Constant-Sized KV Caches for Extended Responses in LLMs. arXiv:2503.00979 [cs.CL] https://arxiv. org/abs/2503.00979 
+
+[13] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al . 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 (2024). [14] Intel. Accessed November 2025. Intel Instruction Throughput and Latency. https://www.intel.com/content/www/us/en/content-details/ 679103/instruction-throughput-and-latency.html .[15] Jinwoo Jeong and Jeongseob Ahn. 2025. Accelerating LLM Serv-ing for Multi-turn Dialogues with Efficient Resource Manage-ment. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 (Rotterdam, Netherlands) (ASPLOS ’25). Associ-ation for Computing Machinery, New York, NY, USA, 1–15. doi: 10. 1145/3676641.3716245 
+
+[16] Chaoyi Jiang, Lei Gao, Hossein Entezari Zarch, and Murali Annavaram. 2025. KVPR: Efficient LLM inference with i/o-aware KV cache par-tial recomputation. In Findings of the Association for Computational Linguistics: ACL 2025. 19474–19488. [17] Dowon Kim, MinJae Lee, Janghyeon Kim, HyuckSung Kwon, Hyeong-gyu Jeong, Sang-Soo Park, Minyong Yoon, Si-Dong Roh, Yongsuk Kwon, Jinin So, et al . 2025. Scalable Processing-Near-Memory for 1M-Token LLM Inference: CXL-Enabled KV-Cache Management Be-yond GPU Limits. In 2025 34th International Conference on Parallel Architectures and Compilation Techniques (PACT). IEEE, 1–13. [18] Hyungyo Kim, Nachuan Wang, Qirong Xia, Jinghan Huang, Amir Yazdanbakhsh, and Nam Sung Kim. 2025. LIA: A Single-GPU LLM Inference Acceleration with Cooperative AMX-Enabled CPU-GPU Computation and CXL Offloading. In Proceedings of the 52nd Annual International Symposium on Computer Architecture (ISCA ’25) . As-sociation for Computing Machinery, New York, NY, USA, 544–558. doi: 10.1145/3695053.3731092 
+
+[19] Sehoon Kim, Sheng Shen, David Thorsley, Amir Gholami, Woosuk Kwon, Joseph Hassoun, and Kurt Keutzer. 2022. Learned token pruning for transformers. In Proceedings of the 28th ACM SIGKDD conference on knowledge discovery and data mining. 784–794. [20] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (Koblenz, Germany) (SOSP ’23). As-sociation for Computing Machinery, New York, NY, USA, 611–626. doi: 10.1145/3600006.3613165 
+
+[21] Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024. InfiniGen: efficient generative inference of large language models with dynamic KV cache management. In Proceedings of the 18th USENIX Conference on Operating Systems Design and Implementation (Santa Clara, CA, USA) (OSDI’24). USENIX Association, USA, Article 9, 18 pages. [22] Steven Leibson. 2025. A CXL progress report: The elephant is learning to dance . https://www.eejournal.com/article/a-cxl-progress-report-the-elephant-is-learning-to-dance/ 
+
+[23] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. Snapkv: Llm knows what you are looking for before generation. Advances in Neural Information Processing Systems 37 (2024), 22947– 22970. 12 HybridGen : Efficient LLM Generative Inference via CPU-GPU Hybrid Computing 
+
+[24] Linux man-pages project. 2024. mbind(2) — set memory policy for a memory range . man7.org. https://man7.org/linux/man-pages/man2/ mbind.2.html .[25] Akide Liu, Jing Liu, Zizheng Pan, Yefei He, Gholamreza Haffari, and Bohan Zhuang. 2024. Minicache: Kv cache compression in depth dimension for large language models. Advances in Neural Information Processing Systems 37 (2024), 139997–140031. [26] Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyrillidis, and Anshumali Shrivastava. 2023. Scissorhands: Exploiting the persistence of importance hypoth-esis for llm kv cache compression at test time. Advances in Neural Information Processing Systems 36 (2023), 52342–52364. [27] Zichang Liu, Jue Wang, Tri Dao, Tianyi Zhou, Binhang Yuan, Zhao Song, Anshumali Shrivastava, Ce Zhang, Yuandong Tian, Christopher Re, et al . 2023. Deja vu: Contextual sparsity for efficient llms at infer-ence time. In International Conference on Machine Learning. PMLR, 22137–22176. [28] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018. Can a suit of armor conduct electricity? a new dataset for open book question answering. arXiv preprint arXiv:1809.02789 (2018). [29] NVIDIA. 2025. NVIDIA GB200 NVL72. https://www.nvidia.com/en-us/data-center/gb200-nvl72/ .[30] Ramya Prabhu, Ajay Nayak, Jayashree Mohan, Ramachandran Ramjee, and Ashish Panwar. 2025. vAttention: Dynamic Memory Manage-ment for Serving LLMs without PagedAttention. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 (Rotter-dam, Netherlands) (ASPLOS ’25). Association for Computing Machin-ery, New York, NY, USA, 1133–1150. doi: 10.1145/3669940.3707256 
+
+[31] Derrick Quinn, E. Ezgi Yücel, Jinkwon Kim, José F. Martínez, and Mohammad Alian. 2025. LongSight: Compute-Enabled Memory to Ac-celerate Large-Context LLMs via Sparse Attention. In Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO ’25) . Association for Computing Machinery, New York, NY, USA, 34–48. doi: 10.1145/3725843.3756062 
+
+[32] Melissa Roemmele, Cosmin Adrian Bejan, and Andrew S Gordon. 2011. Choice of Plausible Alternatives: An Evaluation of Commonsense Causal Reasoning.. In AAAI spring symposium: logical formalizations of commonsense reasoning. 90–95. [33] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. 2023. FlexGen: high-throughput generative inference of large language models with a single GPU. In Proceedings of the 40th International Conference on Machine Learning (Honolulu, Hawaii, USA) (ICML’23). JMLR.org, Article 1288, 23 pages. [34] Yan Sun, Yifan Yuan, Zeduo Yu, Reese Kuper, Chihun Song, Jinghan Huang, Houxiang Ji, Siddharth Agarwal, Jiaqi Lou, Ipoom Jeong, Ren Wang, Jung Ho Ahn, Tianyin Xu, and Nam Sung Kim. 2023. Demysti-fying CXL Memory with Genuine CXL-Ready Systems and Devices. In Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture (Toronto, ON, Canada) (MICRO ’23). Associa-tion for Computing Machinery, New York, NY, USA, 105–121. doi: 10. 1145/3613424.3614256 
+
+[35] PyTorch Team. Accessed April 2026. PyTorch CPU Alloca-tor. https://github.com/pytorch/pytorch/blob/main/c10/core/impl/ alloc_cpu.cpp .[36] Qwen Team. 2024. Qwen2.5: A Party of Foundation Models. https: //qwenlm.github.io/blog/qwen2.5/ 
+
+[37] Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel Bowman. 2018. GLUE: A multi-task benchmark and analy-sis platform for natural language understanding. In Proceedings of the 2018 EMNLP workshop BlackboxNLP: Analyzing and interpreting neural networks for NLP. 353–355. [38] Xi (Sherry) Wang, Jie Liu, Jianbo Wu, Shuangyan Yang, Jie Ren, Bhanu Shankar, and Dong Li. 2025. Performance Characterization of CXL Memory and Its Use Cases. In International Parallel and Distributed Processing Symposium. [39] Marcel Weisgut, Daniel Ritter, Pınar Tözün, Lawrence Benson, and Tilmann Rabl. 2025. CXLMemoryPerformance for In-Memory Data Processing. In Proceedings of the VLDB Endowment (VLDB). [40] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. arXiv:2309.17453 [cs.CL] https://arxiv.org/abs/2309.17453 
+
+[41] Dong Xu, Yuan Feng, Kwangsik Shin, Daewoo Kim, Hyeran Jeon, and Dong Li. 2024. Efficient Tensor Offloading for Large Deep-Learning Model Training based on Compute Express Link. In 36th ACM/IEEE International Conference for High Performance Computing, Performance Measurement, Modeling and Tools (SC). [42] Chengxuan Ying, Guolin Ke, Di He, and Tie-Yan Liu. 2021. LazyFormer: Self Attention with Lazy Update. arXiv:2102.12702 [cs.CL] https: //arxiv.org/abs/2102.12702 
+
+[43] Dongha Yoon, Younghoon Min, Hoshik Kim, Sam H Noh, and Jongry-ool Kim. 2025. TraCT: Disaggregated LLM Serving with CXL Shared Memory KV Cache at Rack-Scale. arXiv preprint arXiv:2512.18194 (2025). [44] Lingfan Yu, Jinkun Lin, and Jinyang Li. 2025. Stateful Large Lan-guage Model Serving with Pensieve. In Proceedings of the Twentieth European Conference on Computer Systems (Rotterdam, Nether-lands) (EuroSys ’25). Association for Computing Machinery, New York, NY, USA, 144–158. doi: 10.1145/3689031.3696086 
+
+[45] Chen Zhang, Kuntai Du, Shu Liu, Woosuk Kwon, Xiangxi Mo, Yufeng Wang, Xiaoxuan Liu, Kaichao You, Zhuohan Li, Mingsheng Long, et al .2025. Jenga: Effective Memory Management for Serving LLM with Heterogeneity. arXiv preprint arXiv:2503.18292 (2025). [46] Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Vic-toria Lin, Todor Mihaylov, Myle Ott, Sam Shleifer, Kurt Shuster, Daniel Simig, Punit Singh Koura, Anjali Sridhar, Tianlu Wang, and Luke Zettlemoyer. 2022. OPT: Open Pre-trained Transformer Language Models. arXiv:2205.01068 [cs.CL] [47] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, et al . 2023. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Advances in Neural Information Processing Systems 36 (2023), 34661–34710. [48] Haoru Zhao, Mingkai Dong, Fangnuo Wu, and Haibo Chen. 2025. Opti-mizing Tree-structure Indexes for CXL-based Heterogeneous Memory with SINLK. arXiv preprint arXiv:2507.18559 (2025). 
+
+Received 20 February 2024; revised 12 March 2024; accepted 5 June 2024 
+
+13
