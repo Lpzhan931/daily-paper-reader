@@ -6,32 +6,35 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-28
-- 运行时间：2026-04-28 20:39:21 UTC
+- 最新运行日期：2026-04-29
+- 运行时间：2026-04-29 20:43:39 UTC
 - 运行状态：成功
-- 本次总论文数：3
+- 本次总论文数：4
 - 精读区：3
-- 速读区：0
+- 速读区：1
 
 ### 今日简报（AI）
-- 今日共生成 3 篇推荐（精读 3 篇，速读 0 篇）
-- 精读：《Network Edge Inference for Large Language Models: Principles, Techniques, and Opportunities》（10.0/10）, 《Hybrid JIT-CUDA Graph Optimization for Low-Latency Large Language Model Inference》（10.0/10）
+- 今日共生成 4 篇推荐（精读 3 篇，速读 1 篇）
+- 精读：《Doing More With Less: Revisiting the Effectiveness of LLM Pruning for Test-Time Scaling》（9.0/10）, 《FusionCIM: Accelerating LLM Inference with Fusion-Driven Computing-in-Memory Architecture》（9.0/10）
+- 速读：《Compute Aligned Training: Optimizing for Test Time Inference》（7.0/10）
 - 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
-- 详情：[/202604/28/README](/202604/28/README)
+- 详情：[/202604/29/README](/202604/29/README)
 
 ### 精读区论文标签
-1. [Network Edge Inference for Large Language Models: Principles, Techniques, and Opportunities](/202604/28/2604.22906v1-network-edge-inference-for-large-language-models-principles-techniques-and-opportunities)  
-   标签：评分：10.0/10、query:llm-ef
-   evidence：大语言模型边缘推理原理与模型优化技术综述
-2. [Hybrid JIT-CUDA Graph Optimization for Low-Latency Large Language Model Inference](/202604/28/2604.23467v1-hybrid-jit-cuda-graph-optimization-for-low-latency-large-language-model-inference)  
-   标签：评分：10.0/10、query:llm
-   evidence：混合 JIT-CUDA 图优化用于低延迟大语言模型推理
-3. [DepthKV: Layer-Dependent KV Cache Pruning for Long-Context LLM Inference](/202604/28/2604.24647v1-depthkv-layer-dependent-kv-cache-pruning-for-long-context-llm-inference)  
+1. [Doing More With Less: Revisiting the Effectiveness of LLM Pruning for Test-Time Scaling](/202604/29/2604.25098v1-doing-more-with-less-revisiting-the-effectiveness-of-llm-pruning-for-test-time-scaling)  
    标签：评分：9.0/10、query:llm
-   evidence：长文本推理中的层相关KV缓存剪枝
+   evidence：非结构化剪枝提升推理效率
+2. [FusionCIM: Accelerating LLM Inference with Fusion-Driven Computing-in-Memory Architecture](/202604/29/2604.25317v1-fusioncim-accelerating-llm-inference-with-fusion-driven-computing-in-memory-architecture)  
+   标签：评分：9.0/10、query:llm
+   evidence：存内计算架构加速大模型推理
+3. [SpecFed: Accelerating Federated LLM Inference with Speculative Decoding and Compressed Transmission](/202604/29/2604.25777v1-specfed-accelerating-federated-llm-inference-with-speculative-decoding-and-compressed-transmission)  
+   标签：评分：9.0/10、query:llm
+   evidence：利用投机解码和通信优化加速大语言模型推理
 
 ### 速读区论文标签
-- 本次无速读推荐。
+1. [Compute Aligned Training: Optimizing for Test Time Inference](/202604/29/2604.24957v1-compute-aligned-training-optimizing-for-test-time-inference)  
+   标签：评分：7.0/10、query:llm
+   evidence：针对推理阶段策略优化训练目标
 
 
 <div class="dpr-home-promo-card">
