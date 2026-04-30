@@ -1,0 +1,852 @@
+Title: DAK: Direct-Access-Enabled GPU Memory Offloading with Optimal Efficiency for LLM Inference
+
+URL Source: https://arxiv.org/pdf/2604.26074v1
+
+Published Time: Thu, 30 Apr 2026 00:07:26 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# DAK: Direct-Access-Enabled GPU Memory Offloading with Optimal Efficiency for LLM Inference 
+
+## Shouxu Lin Cornell University Zhiyuan Guo Cornell University Jiaxin Lin Cornell University 
+
+## Abstract 
+
+LLM inference is constrained by GPU memory capacity and bandwidth. Tiered memory architectures mitigate this by al-lowing the GPU to offload memory to the remote tier. How-ever, existing memory offloading frameworks rely on prefetch-ing data into local GPU HBM. This approach underutilizes system resources by introducing HBM contention, squander-ing memory capacity, and creating pipeline bubbles. We show that enabling direct GPU access to remote memory signifi-cantly outperforms prefetching, achieving optimal aggregate system bandwidth. We propose DAK, an end-to-end direct-access memory offloading framework that repurposes the Tensor Memory Accelerator (TMA) to asynchronously fetch offloaded weights and KV caches directly from remote mem-ory into GPU shared memory (SMEM). To maximize remote access performance, DAK introduces a greedy algorithm to determine optimal per-operation offloading ratios, alongside active congestion control and TMA multicast to eliminate interconnect bottlenecks and read amplification. Evaluations across diverse architectures show that DAK achieves near-optimal bandwidth aggregation, with up to 3 × performance gains on NVLink-C2C and 1.8 × on PCIe systems compared to state-of-the-art memory offloading baselines. 
+
+## 1 Introduction 
+
+Large Language Models (LLMs) are increasingly starved for memory capacity and bandwidth due to massive parameter scaling, ultra-long contexts, and large inference batch sizes. Scaling the GPU’s local High Bandwidth Memory (HBM) to meet this demand is prohibitively expensive and fundamen-tally constrained by die area and thermal limits [12]. To breach this "memory wall," recent architectures adopt tiered memory designs . By connecting the GPU to remote memory (e.g., host CPU memory via NVLink-C2C or CXL) [8, 11, 20, 26], these systems decouple compute and memory scaling. For instance, the NVIDIA Grace Hopper (GH200) [26] utilizes NVLink-C2C to connect the GPU with the CPU memory, which increases the effective memory capacity by 500% and bandwidth by 12.5%. The central challenge in tiered memory is exploiting re-mote capacity and bandwidth without suffering interconnect Aggregate system 
+
+> memory bandwidth
+
+Figure 1: Comparison of a prefetch-based system and our direct-access-based system, measured on GH200 with OPT-30b. 
+
+latency penalties. To overcome the challenge of utilizing re-mote capacity without suffering interconnect latency penal-ties, prefetching-based frameworks have been proposed. In the context of LLM inference, these frameworks offload a subset of weights and KV caches in remote memory and hide the remote data fetching latencies, with aid of computation-aware prefetching [5, 15, 16, 18, 33, 35, 37], by analyzing the execution graph and preloading required inputs (weights, and KV caches) from remote memory into GPU HBM before a specific computation block begins. However, we observe that prefetching fundamentally un-derutilizes both the bandwidth and capacity of tiered memory systems. This bandwidth and capacity underutilization oc-curs for two reasons. First, prefetching fails to exploit remote bandwidth and leads to degraded local GPU memory band-width, as the incoming prefetch traffic (moving data from remote memory to HBM) competes directly with active com-pute kernels for HBM bandwidth. Second, prefetching limits maximum system memory capacity by forcing data to be staged in local GPU HBM before computation, consuming extra bounce buffers that reduce GPU HBM capacity. Third, prefetching-based approaches are usually coarse-grained (e.g., layer-based [18, 33, 37]), which seldom achieve perfect over-lap between data transfer and computation, leading to pipeline bubbles and low efficiency. Consequently, as shown in Fig. 1, the theoretical performance bound of prefetching falls signif-icantly short of the ideal aggregate system bandwidth (i.e., local GPU HBM plus the host-GPU interconnect). Further-more, real-world prefetching systems suffer an additional 20% 
+
+> arXiv:2604.26074v1 [cs.DC] 28 Apr 2026
+
+performance degradation due to pipeline bubbles caused by imperfect compute-communication overlap. We argue that enabling the GPU to directly access re-mote memory can yield significantly better performance than prefetching data through HBM, by allowing GPU Streaming Multi-processors (SMs) to fetch offloaded data directly into shared memory (SMEM). Directly allowing GPU SM’s to access remote memory, we can bypass HBM staging entirely and fully utilize aggregate system bandwidth and capacity, thus reducing both memory and memory bandwidth wastage. In Fig. 1, we show that this direct access mechanism can pro-vide a strictly superior theoretical and empirical performance compared to prefetching. To enable direct access to remote memory, we propose DAK (Direct Access Kernel). Traditionally, a direct data path required GPU threads to explicitly issue load/store instruc-tions over the interconnect, consuming valuable SM register space and instruction cycles. DAK overcomes this by utilizing the Tensor Memory Accelerator (TMA) [25], a specialized hardware engine introduced in the Hopper architecture. We observe that, TMA, which was originally designed to man-age asynchronous transfers between local HBM and SMEM, can be repurposed to execute asynchronous, direct accesses from remote host memory straight into SMEM. To the best of our knowledge, we are the first to utilize the TMA for remote access and memory offload. 
+
+However, identifying this hardware capability is only the first step, and we found that a naive implementation of TMA-based remote access is insufficient and can yield non-optimal performance. To make direct remote access achieve near-theoretical maximum performance, we must solve three crit-ical system-level challenges: 1) Determine Offload Ratio: 
+
+Ignoring the characteristics of memory- and compute-bound kernels in the inference pipeline and blindly offloading mem-ory can underutilize the system. An analytical algorithm is required to determine the optimal offloading ratio for each specific kernel. 2) Interconnect Congestion: We observe that unconstrained in-flight TMA accesses to host memory can trigger severe intra-GPU interconnect congestion and stall the GPU’s local HBM accesses. 3) Uncacheable Host Mem-ory: CPU memory always bypasses the GPU L2 cache (even on coherent architectures like GH200), and uncacheable host memory can cause huge read amplification over interconnects. To solve these challenges, we propose DAK, an end-to-end direct-access memory offloading framework. DAK optimally partitions weights and KV caches across host/GPU memory tiers and employs TMA-enabled warp-specialized kernels to decouple memory fetching from matrix math and efficiently hides heterogeneous memory latencies. DAK overcomes chal-lenges and achieves performance near the theoretical maxi-mum (Fig. 1) with contributions: 1. Direct Memory Offload Architecture: We develop warp-specialized SplitK_GEMM and SplitK_FlashAttn kernels that compute directly over tiered memory and leverage TMA to fetch offloaded data from remote memory to SMEM. This achieves true bandwidth aggregation, ex-pands memory capacity, and hides remote memory laten-cies through in-kernel compute-communication overlap. 2. Optimal Per-operation Offload Ratio: We formulate the memory offloading ratio as a performance optimization problem. We design an efficient greedy algorithm that analytically determines the optimal partitioning ratios for individual compute-bound and memory-bound operations, with provable optimality. 3. Efficient TMA Access to Host Memory: We identify and mitigate the congestion and read-amplification bottle-necks of naive TMA remote access. We implement active congestion control to prevent host memory requests from stalling local HBM, and we utilize a TMA multicast and host-locality-first tile scheduling to eliminate read amplifi-cation for uncacheable host data. 4. Cross-Architecture Generality: Our direct-access ker-nels can be adapted across varying interconnect band-widths (e.g., NVLink-C2C vs. PCIe), distinct GPU archi-tectures, and diverse model configurations, while also en-suring robust performance. We provide a comprehensive evaluation of DAK’s end-to-end effectiveness. DAK is implemented with an accessible Py-Torch interface and evaluated across two distinct hardware en-vironments: an NVLink-C2C-based GH200 and a PCIe-based RTX 6000 Blackwell system. We test across multiple models (OPT and Llama) under various batch sizes and sequence length configurations. Compared to multiple state-of-the-art, prefetching-based memory offloading systems, our results show that DAK consistently improves performance across all tested configurations and architectures, delivering up to a 3 ×
+
+higher throughput on the GH200 and a 1.8 × gain on the RTX 6000 Pro Blackwell. DAK is fully open-sourced at https: //github.com/shouxulin/DirectAccessKernel.git .
+
+## 2 Background and Motivation 2.1 Scaling Memory with Tiered Architecture 
+
+The rapid evolution of LLM places unprecedented pressure on memory capacity and bandwidth in inference [2, 17, 36]. 
+
+Memory Capacity bottleneck: Modern LLMs require mas-sive memory capacity for both model weights and KV-Cache. For example, a 671B-parameter model in FP16 requires 1.34 TB of memory for weights alone. At the same time, the KV cache scales linearly with both batch size and sequence length, and can easily exceed 100 GB for a 70B model serving a 100K context at a batch size of 16, rapidly exhausting the GPU’s local HBM capacity. 
+
+Memory Bandwidth bottleneck: LLM inference requires ultra-high memory bandwidth. For example, during decoding, the entire model weights and the accumulated KV-Cache must be loaded into the computational units for every generated Existing                
+
+> Method
+> (Flexgen)
+> Weight copy from host
+> (CPU mem -> HBM) 13
+> GPU Compute
+> (HBM -> SM shared mem) 0123
+> X
+> Layer X Weight Load from CPU Mem:
+> Layer X's Compute: XCommunitaion
+> Bubbles:
+> Compute
+> Bubbles:
+> Our
+> Method
+> Weight direct access
+> (CPU mem -> SM shared mem)
+> GPU Compute
+> (HBM -> SM shared mem) 0123
+> 0123
+> Time
+> Time
+
+Figure 2: Comparing the copy-based method with our method. In FlexGen, layer 1 and 3 weights are offloaded to the CPU. 
+
+token. This results in low arithmetic intensity, where inference performance is bounded by memory bandwidth [1, 18]. 
+
+Scaling Memory with Tiered Architecture: An effective strategy to breach this "memory wall" is to allow accelerators access to external memory. This is enabled by the tiered mem-ory, where the GPU is connected to a remote memory tier such as host CPU memory and CXL memory pool [13, 19]. This enables memory resources to scale independently of GPU compute, providing large capacity expansions. This tiered paradigm is also driven by rapid advancements in high-speed compute-memory interconnects like NVLink-C2C [11, 31], die-to-die interconnects [10], and AMD Infinity Fabric [28]. For example, in the Grace Hopper (GH200) ar-chitecture, the NVLink-C2C connects CPU and GPU with a bandwidth of 450 GB/s per direction, which is close to the host CPU memory bandwidth (500 GB/s). NVLink-C2C in-creases the GPU’s effective capacity by 500% and expands the total available system memory bandwidth by 12.5% 1.
+
+## 2.2 Memory Offloading 
+
+The central research question in tiered memory architectures is how to use remote memory capacity and bandwidth with-out falling victim to interconnect latency and throughput con-straints. Prior work focuses exclusively on using remote mem-ory merely as a capacity pool, managing the data by explicitly copying it between remote memory and GPU local HBM. 
+
+Paging with Prefetching: Existing works propose general-purpose GPU memory management systems that access re-mote memory using paging abstractions [16, 18, 33, 37]. These systems rely on prefetching to bring remote pages into the GPU’s local memory before they are needed. Frame-works such as CUDA Managed Memory [21, 31] implement prefetching algorithms that copy memory pages from the remote tier into local GPU HBM prior to kernel execution. These prefetching decisions can be triggered either explic-itly through programmer-controlled APIs (e.g., cudaMem-PrefetchAsync) or implicitly via software- [3] or hardware-managed prefetchers [31].             
+
+> 1Total available system memory bandwidth is defined by
+> GPU _HBM _BW +MIN (NV Link _C2C_BW ,HOST _DRAM _BW )HBM
+> Shared
+> Mem
+> SM
+> Tensor /
+> Cuda Core
+
+Host 
+
+> Host DRAM
+
+GPU  
+
+> Direct Of fl oad Datapath
+> Copy Of fl oad Datapath
+> SM
+> SM
+> SM
+> SM
+> SM SM
+> TMA
+
+Figure 3: Direct memory offload vs. copy data paths. 
+
+LLM Pipeline Orchestration: Another line of work builds customized GPU kernels or inference pipelines that explic-itly control when data is moved from remote memory into local GPU HBM. These systems frame memory offloading as a scheduling optimization problem to maximize the over-lap between remote memory communication and active GPU computation. For example, FlexGen [33] formulates a linear programming solver to orchestrate model weights and KV cache placement across the GPU, CPU, and disk. To over-lap communication with computation, it uses layer-by-layer prefetching. As shown in Fig. 2 (1), while the GPU executes computation for layer X, it concurrently fetches the weights for layer X + 1 from CPU memory to GPU HBM. Systems like Neo [15] and Lia [18] jointly perform mem-ory and computation offloading. Computation offloading is typically beneficial when: (1) operations are strictly memory-bound, making the slower CPU a reasonable alternative, and (2) interconnect bandwidth ( e.g., PCIe) is significantly lower than host DRAM bandwidth, and by offloading computation to host can reduce costly data movement across interconnect. However, as next-generation interconnects ( e.g., NVLink-C2C in Grace Hopper and Blackwell) achieve bandwidths matching CPU DRAM, the benefits of host-side computation offloading diminish [16, 18]. 
+
+## 2.3 Limitation of Copy-Based Offloading 
+
+We observe that all existing copy-based memory offloading solutions are fundamentally suboptimal in utilizing both the bandwidth and capacity of remote memory. 
+
+Underutilized System Memory Bandwidth. Existing copy-based solutions degrade local GPU memory bandwidth rather than aggregating total system bandwidth. As shown in Fig. 3, the standard datapath requires copying data from the host to HBM ( 1⃝), and then reading it from HBM to SM shared memory ( 2⃝). Because HBM is not fully bidirectional, the incoming host writes ( 1⃝) contend directly with active SM reads ( 2⃝). In memory-bound kernels, this contention de-grades throughput; for example, prefetching layer 1 weights directly interferes with layer 0 computation (Fig. 2). This degradation scales with the interconnect-to-local bandwidth ratio. Background copies can degrade local memory perfor-mance by up to 10% on a GH200, and by roughly 4-7% on PCIe-based consumer-grade GPU (64 GB/s PCIe Gen4 vs. 960 GB/s GDDR7) [23, 24]. 
+
+Communication Bubbles and Wasted HBM Capacity. 
+
+Copy-based prefetching trade-off between capacity and inter-connect utilization. To overlap communication with compu-tation, systems must allocate static HBM staging buffers. As shown in Fig. 2 (1), a naive double-buffered prefetcher will encounters communication bubbles: the interconnect idles while waiting for layer 1’s computation to finish so its buffer can be reused for layer 3. While systems can mask these bub-bles by increasing the prefetch depth (e.g., fetching N layers ahead), doing so requires proportionally larger staging buffers, reducing HBM capacity for saving KV cache and weights. 
+
+Computation Bubbles and Latency Trade-offs. Layer-based coarse-grained prefetching often causes computation bubbles because executing a layer is much faster than fetching its weights (Fig. 2 (1)). To mask these stalls, systems like Flex-Gen process multiple micro-batches sequentially on the same layer to maximize weight reuse. However, this throughput op-timization severely penalizes latency; forcing micro-batches to synchronize at each layer dramatically increases both time-to-first-token and per-token latencies. 
+
+## 2.4 Memory Offload with Direct Access 
+
+To achieve optimal performance, we need for a direct remote-memory-to-SM data path (Fig. 3). Direct access streams data directly from remote memory into the Streaming Multiproces-sor’s shared memory (SMEM), bypassing GPU HBM entirely. Traditionally, direct access required GPU threads to explicitly issue load/store instructions over the interconnect, consum-ing valuable register space and instruction cycles. We over-come this challenge by using the Tensor Memory Accelerator (TMA), a hardware engine introduced after the NVIDIA Hop-per architecture. While originally designed for asynchronous transfers between local HBM and SMEM, we novelly prove (§6) that TMA can execute asynchronous, direct accesses to remote memory with high-performance. As shown in Fig. 2, this direct-access scheme overcomes the limitations of copy-based methods through three critical benefits: (1) By streaming remote data directly into SMEM, SMs concurrently access host memory and local HBM to achieve the theoretical peak aggregated bandwidth. (2) Elim-inating static HBM staging buffers preserves GPU mem-ory for larger models or KV caches. (3) Instead of coarse-grained prefetching, direct access could use asynchronous TMA copies to seamlessly overlap fine-grained kernel com-putation with remote memory fetches, removing bubbles. 
+
+## 3 Overview 
+
+We build DAK to achieve highly efficient, direct-access mem-ory offloading. The high-level idea of DAK is simple: to fully utilize both local and remote memory, the GPU’s SM should Lama 70B    
+
+> + GH200
+> Of fl oad
+> Ratio (OR)
+> = 36%
+> qkv_weights kvcahe outproj_weights
+> SplitK_GEMM
+> (OR = 75%)
+> SplitK_FlashAttn
+> (OR = 25%)
+> SplitK_GEMM
+> (OR = 33%)
+> Weights on host mem
+> Weights on GPU mem
+> ~150GB Mem HBM: 96GB
+
+Figure 4: DAK overview. 
+
+concurrently direct access HBM and host DRAM. This con-current access is achieved through fine-grained weight par-titioning and optimized GPU kernel running on partitioned memory. 
+
+Fig. 4 shows a high-level overview of DAK. When a user attempts to run a model on a given architecture, memory of-floading is required if the available GPU HBM is smaller than the total memory footprint of the model’s weights and KV cache. For example, running a 140 GB model like LLaMA-70B with batch size 32 and sequence length 1024 on a Grace Hopper (GH200) node with 96 GB of HBM requires a global memory offload ratio of 40%. Given this global offload ra-tio, DAK will calculate the optimal offloading ratio for each individual operation inside the inference pipeline 2. Based on these calculated ratios, each operation is partitioned and stored across both the GPU and host memory tiers. After parti-tioning the operations, DAK invokes optimized, direct-access kernels ( e.g., SplitK_GEMM, SplitK_FlashAttn) to execute over the split matrices. These kernels concurrently access lo-cal and remote memory. DAK implements a warp-specialized producer-consumer architecture utilizing TMA accelerator for each kernel. This design decouples local/remote memory fetching from matrix math, allowing the GPU SMs to overlap computation with memory latency. Realizing this direct-access architecture introduces many system-level challenges: 
+
+C1: Optimal Per-Operation Offloading Ratio. How should the system determine the size of data offloaded to host mem-ory for each individual operation, given a global offloading constraint? Different operations exhibit distinct bottlenecks (compute-bound vs. memory-bound), meaning each opera-tion’s performance has a different sensitivity to memory of-floading. In 4.2, we formulate this as an optimization problem and design an efficient greedy algorithm that determines per-operation offloading ratios with provable optimality. 
+
+C2: Managing TMA-based Remote Memory Access. In DAK, GPU SMs concurrently access local and remote mem-ory using the TMA. However, we observe that uncoordi-nated concurrent accesses can interfere with one another, causing severe intra-GPU interconnect congestion and lim-iting aggregate bandwidth. Furthermore, CPU memory is non-cacheable by the GPU’s L2 cache (even under the recent       
+
+> 2In this paper, we refer to operations involving KV cache matrices as
+> attention (e.g., attention scoring and value aggregation in the attention layer), and operations involving model weights as linear (e.g., the q/k/v/o projections and the gate/up/down projection in MLPs). When we refer to partitioning an operation, we mean partitioning the input matrices of that operation. X
+> N
+> M
+> t_0
+> t_2
+> t_4
+> t_6
+> K
+> M
+> m
+> k
+> Host memory
+> Of fl oad Ratio = 25%
+> Partition
+> Matrix A
+> (Weights): MxK
+> tile
+> chunk
+> GPU memory
+> =
+> N
+> k
+> K
+> Matrix B
+> (Hidden): KxN
+> Matrix C
+> (Hidden): MxN
+> t_1
+> t_3
+> t_5
+> t_7
+> GPU mem GPU mem
+
+(a) Matrices partitioned between host and GPU memory. Warps    
+
+> producer consumer
+> slot 0 slot 1
+> Shared Memory
+> TMA
+> Host Memory GPU Memory
+> SM 4  (execute t_4)
+> SM 2  (execute t_2)
+> SM 0  (execute t_0)
+> SM 1  (execute t_1)
+> SM 3  (execute t_3)
+> SM 5  (execute t_5)
+> SM 6  (execute t_6)
+> SM 7  (execute t_7)
+
+(b) Kernel on partitioned memories; tile rows executed by different SMs. 
+
+Figure 5: DAK partitions and executes a matrix multiplication. 
+
+cache-coherent Grace Hopper Architecture), requiring the ker-nel to handle disparate data paths and memory characteristics. In 4.3, we present a congestion control and TMA multicast mechanism that mitigates intra-GPU congestion and handles non-cacheable host memory access. 
+
+## 4 Design 4.1 DAK Design 
+
+LLM inference is dominated by matrix multiplication opera-tions, primarily involving the multiplication of hidden states by either model weights or KV cache matrices, in terms of both latency and memory footprint. DAK partitions these operations across both GPU and host memory. Next, we in-troduce this partitioning scheme and the specialized kernels that compute directly over these partitioned matrices. 
+
+Data Partition: Figure 5 illustrates how DAK partitions a matrix multiplication operation, defined as C = A × B, where 
+
+C and B represent hidden states, and A represents the model weights or KV cache. As shown in Fig. 5a, A is partitioned along the M dimension into multiple tile rows, each of shape 
+
+m × K. These tile rows are then distributed across host mem-ory and GPU memory. In the example shown, tile row 0resides in host memory, while tile rows 1 through 3 reside in GPU memory. The optimal number of tiles to be placed in host memory is determined by the offloading algorithm (detailed in §4.2). 
+
+Kernel over Partitioned Memory: DAK performs matrix computation directly over this partitioned memory. Fig. 5b shows this kernel design. Each tile chunk in the output matrix is calculated by a different GPU SM. If the total number of tiles exceeds the available SM count, each SM processes multiple tile chunks. In this example, SMs 0 and 1 handle the computation for output tiles t0 and t1 respectively by reading weights from CPU host memory, while SMs 2 through 7 compute output tiles t2 through t7 by reading weights from local GPU memory. This design strictly isolates the data path, guaranteeing that each individual SM reads exclusively from either host or GPU memory. The number SMs assigned to handle host versus GPU tiles is determined by three factors: (1) the target offloading ratio ,which dictates the total size of data that must be processed from each memory tier; (2) execution wave alignment , which ensures the number of assigned tiles evenly divides across the allocated SMs to prevent tail latencies caused by partial, un-balanced execution waves; and (3) interconnect congestion control , which caps the number of host-assigned SMs when necessary to avoid memory contention (detailed in §4.3). 
+
+Asynchronous TMA Access: The primary challenge of this approach is efficiently hiding the data load latencies that arise when SMs fetch matrices from HBM or remote host memory. To overlap data movement with computation, DAK adopts a warp-specialized producer-consumer design within each SM, leveraging the Tensor Memory Accelerator (TMA). Since TMA load and store execute asynchronously, data movement happens in the background while Tensor Cores and CUDA cores perform mathematical operations. As shown in Fig. 5b, thread blocks in each SM utilize this warp specialization to mask memory latencies. The execu-tion pipeline proceeds as follows: First, the producer warp leverages the TMA to asynchronously fetch a tile chunk of 
+
+A from host memory and its corresponding chunk of B from GPU memory into a shared memory (SMEM) slot (Steps 1⃝
+
+and 2⃝). Once the slot is filled, the consumer warp performs the matrix multiplication (Step 3⃝). Concurrently, the pro-ducer issues the next TMA requests to fetch the subsequent chunks into an alternate SMEM slot. The maximum number of in-flight TMA requests is determined by the available slot number and the congestion control algorithm introduced in §4.3. By maintaining multiple in-flight TMA requests, the kernel effectively overlaps memory loads with computation. With this design, DAK achieves two critical benefits. First, it enables true parallel execution across memory tiers; by having distinct SMs read from host and GPU memory in parallel, the system fully achieve the aggregate bandwidth of both the local HBM and the host-GPU interconnect. Second, it efficiently absorbs the severe latency penalties of remote data loads through its asynchronous, warp-specialized nature. 
+
+## 4.2 Offloading Algorithm 
+
+This section introduces our offloading algorithm, which opti-mally distributes a global offloading budget across operations in LLM inference pipeline. We first demonstrate that applying a uniform offloading ratio across operations is suboptimal. To address this, we design a greedy offloading algorithm with 
+
+provable optimality .Bh      
+
+> Bh+Bg
+> Bh
+> Bi
+> Offloading Ratio
+> Bh
+> Bi=Ci
+> Tcomp
+> Bg
+> Bg+Bh
+> Effective Bandwidth (EB)  Memory-bound
+> Compute-bound
+> Region 1
+> Region 2
+
+Figure 6: Effective bandwidth of memory/compute-bound operations. 
+
+4.2.1 The Suboptimality of Uniform Offloading 
+
+Given a global offloading ratio OR (determined by total mem-ory footprint and available GPU memory), the system must distribute this budget across individual operations. A naive ap-proach is to apply a uniform offloading ratio , where every op-eration offloads exactly OR fraction of its involving matrices to the host. But this strategy is suboptimal because inference consists of a mixture of memory-bound and compute-bound operations, with different sensitivities to offloading. 
+
+Diverse Performance Bottlenecks: An operation is memory-bound if its arithmetic intensity (AI) falls below the hard-ware’s peak machine balance, and compute-bound otherwise. In LLM inference, the performance bottleneck—whether memory- or compute-bound—varies across operations and de-pends on workload characteristics such as batch size ( B) and sequence length ( L). Both prefilling and decoding consist of a mixture of memory-bound and compute-bound operations: • Decoding: The attention operation is strictly memory-bound, as both its computation and memory traffic scale as O(B · L · Dh) ( D_h is the head dimension), yielding a constant Arithmetic Intensity (AI) of O(1). In contrast, lin-ear operations can be either memory- or compute-bound; it transitions from memory to compute-bound as B grows. • Prefilling: The attention operation can be either memory-or compute-bound: its computation scales quadratically with sequence length ( O(B·L2 ·Dh)) while memory scales linearly ( O(B · L · Dh)), yielding an AI of O(L) that shifts to compute-bound for long sequences. Linear operations achieve an AI of O(B · L) and remain inherently compute-bound since B · L is large in typical prefilling workloads. 
+
+Different Sensitivities to Offloading: Memory/compute-bound operations react differently to the offloading ratio. To quantify this, we use the Effective Bandwidth ( EB ) as the performance metric, which is defined as the total fetched data from memory ( C) 3 divided by the overall operation execution latency: EB = C 
+
+> max (Tcomp ,Tmem )
+
+, where Tcomp is the computation time and Tmem is the memory access time. Fig. 6 shows how 
+
+EB of both compute- and memory-bound kernels changes as the offloading ratio increases. We use EB as the primary  
+
+> 3Cis the size of model weights or KV cache for linear or attention.
+
+performance metric because it provides a unified standard to easily identify whether an operation is memory- or compute-bound. 1. Memory-bound operations ( Tcomp < Tmem ): The oper-ation performance is bounded by Tmem . Because DAK concurrently reads from both host and GPU memory, the overall memory latency is bounded by the slower of the two transfers: Tmem = max (Th, Tg), where Th and Tg are the host and GPU data transfer times, respectively. As shown in the figure, EB initially increases with the offloading ratio, reaches a peak, and then decreases. This peak EB occurs at an optimal ratio of Bh 
+
+> Bh+Bg
+
+, where Bh and Bg de-note the host interconnect bandwidth and GPU memory bandwidth. At this threshold, the data transfer times are perfectly balanced ( Th = Tg). Consequently, the operation fully utilizes both memory bandwidths simultaneously. However, if the offloading ratio is beyond this point, read-ing from the slower host interconnect ( Th) becomes the bottleneck, and performance degrades. 2. Compute-bound operations ( Tcomp > Tmem ): For these operations, EB remains flat initially, since at lower of-floading ratios, the operation latency is strictly dominated by the mathematical computation time ( Tcomp ) rather than memory time. Because the computation effectively hides the memory transfer latency, offloading weights to the host does not impact the overall EB. However, this flat trend only holds up to a critical threshold (which we re-fer to as the “threshold” of compute-bound operations). Beyond this point, data movement from host memory be-comes the bottleneck ( i.e., when Tmem = Th ≥ Tcomp ). Once this threshold is crossed, the operation transitions into a memory-bound regime dictated by the host interconnect, and EB begins to decrease following the same behavior as the memory-bound case. 
+
+Suboptimality of Uniform Offloading: A uniform method that assigns the same ratio r to all operations will be sub-optimal. As shown in Fig. 6, the suboptimal show up in two regions. Region 1 ( r ≤ Bh 
+
+> Bh+Bg
+
+): the memory-bound op-eration is starved and actively benefits from increasing its offloading ratio toward its optimal peak, thus the offload-ing ratio for compute-bound operations should be allocated to memory-bound operations. Region 2 ( Bh 
+
+> Bh+Bg
+
+< r < Bh 
+
+> Bi
+
+): 
+
+memory-bound operations suffer from effective bandwidth loss due to offloading. While compute-bound operations are still insensitive, the offloading budget should be shifted from memory-bound operations to compute-bound operations. 
+
+4.2.2 Optimal Greedy Offload 
+
+Because varying operations yield different performance curves, we formulate this ratio offloading allocation as an optimization problem. 
+
+Problem Formulation: Say the global offload ratio is OR .Given a set of operations F , we assign an offloading ratio 12 4 8 16 24 32 
+
+> NSM _Host
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> Memory Access Bandwidth (GB/s)
+> SM-to-host Bandwidth
+> SM-to-HBM Bandwidth
+> Aggregate Bandwidth
+
+(a) N_in f light = 3 , NSM _HBM = 100        
+
+> and we vary NSM _Host .123456
+> Ninflight
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> Memory Access Bandwidth (GB/s)
+> SM-to-host Bandwidth
+> SM-to-HBM Bandwidth
+> Aggregate Bandwidth
+
+(b) NSM _HOST = 8, NSM _HBM = 100  
+
+> and we vary N_in f light .
+
+Figure 7: Local/remote memory access congestion on GH200. Increased    
+
+> NSM _Host or Nin f light reduces SM-to-HBM bandwidth.
+
+xi ∈ [0, 1] to each operation Fi. The sum of offloaded data from all operations should match the global ratio constraint. Our objective is to minimize the end-to-end execution time, which is the sum of individual operation latencies. Using the effective bandwidth model, the latency of operation Fi can be written as Ci
+
+EB (xi) under offloading ratio xi.
+
+Greedy Offload Algorithm: We prove that the optimal allo-cation strictly follows a multi-stage greedy algorithm based on each operator’s turning point shown in Fig. 6. We allocate the offloading ratio to operations in three distinct phases: 1. Allocate to Memory-Bound Operations. It first allocates the offloading budget all to memory-bound operations, since it directly improves EB . The exact distribution of the budget between the memory-bound operations does not matter if no memory operation’s ratio is beyond its turning point. 2. Saturate Compute-Bound Operations. Once all memory-bound operations reach their peak EB , the remaining offloading budget should be distributed to the compute-bound operations. Similar to the first phase, the exact dis-tribution among compute-bound operations does not affect optimality, as long as no compute-bound operation’s ratio is beyond its turning point. 3. Arbitrary Allocation. If the global offloading ratio is large enough that all operations (both memory- and compute-bound) have reached their turning points, the remaining budget can be assigned arbitrarily across any operations without affecting the end-to-end latency. 
+
+Proof of Optimality: We prove via contradiction (Ap-pendix A) that our greedy algorithm is optimal. 
+
+## 4.3 Efficient Host Memory Access with TMA 
+
+In DAK, SMs utilize the TMA to concurrently access both host and GPU memory. To our knowledge, DAK is the first system to leverage TMA for host memory accesses . However, relying on TMA for cross-interconnect data movement re-quires careful orchestration to achieve optimal performance and avoid severe resource contention. 
+
+4.3.1 Congestion Control over Local/Remote Access 
+
+We observe that issuing an unconstrained number of inflight TMA requests to host memory triggers interconnect conges-tion, which degrades the GPU’s local HBM performance. The total volume of SM-to-host inflight TMA memory re-quests can be estimated as NSM _host ×Nin f light , where NSM _host 
+
+is the number of SMs reading from host memory, and Nin f light 
+
+is the number of inflight TMA requests issued per SM. Fig. 7 illustrates how unconstrained NSM or Nin f light causes con-tention that degrades local HBM throughput on the Grace Hopper Superchip. In the first experiment (Fig. 7a), we dedicate 100 SMs to read from local GPU HBM while varying NSM reading from remote host memory via NVLink-C2C. As shown in the figure, when NSM exceeds 8, the SM-to-HBM bandwidth drops significantly, dragging down the system’s total aggre-gate bandwidth. In the second experiment (Fig. 7b), we fixes the number of SMs reading from both host and GPU, but varies Nin f light issued per SM. The results show that excessive in-flight requests from individual SMs to the host also cause a severe slowdown in aggregate bandwidth. 
+
+Root Cause Analysis: We observe that this bandwidth degra-dation does not occur when SMs only access HBM, indicating there is contention between the local and remote data paths. While proprietary GPU interconnect details are undisclosed, we hypothesize this stems from poor resource isolation within the memory hierarchy. Specifically, once the host-GPU in-terconnect saturates, excess in-flight remote requests cannot drain. These stalled requests accumulate and exhaust shared internal resources (such as L2 cache MSHRs or interconnect routing buffers) which starves the local SM-to-HBM traffic and severely degrades overall performance. 
+
+Congestion Control Strategy: DAK applies congestion con-trol to remote memory accesses by limiting the ( Nin f light ) and (NSM ). To limit Nin f light , DAK uses the concept of a conges-tion window from traditional computer networking. Each SM fetching from the host is assigned a maximum allowance of in-flight requests that is sized to saturate the SM-to-host memory bandwidth without exceeding it. A given SM’s TMA engine will strictly cap its asynchronous memory requests to this window. Unlike traditional networking protocols that dy-namically adjust this window at runtime (which would incur significant runtime overhead for GPU kernels), DAK assigns the congestion window statically. This optimal static win-dow size is calculated via a lightweight parameter-sweeping profiler executed prior to kernel launch. DAK limits NSM by ensuring we do not over-assign SMs beyond what is necessary. The optimal host NSM is determined by two factors: 1) interconnect congestion, and 2) how many SMs are needed to process the offloaded data on the host. To find the optimal NSM , DAK performs an offline parameter Size ( N) Host-GPU Traffic Read Amplification           
+
+> 256 102.76 MB 1.05 ×
+> 512 205.52 MB 2.10 ×
+> 1024 411.04 MB 4.19 ×
+> 2048 822.08 MB 8.39 ×
+> 4096 1.64 GB 16.78 ×
+
+Table 1: Host-GPU memory traffic across varying sizes ( N). The size of the matrix offloaded to the host is 98 MB. 
+
+sweep—fixing the required local GPU SMs while varying the host SMs—to identify the exact SM allocation to the host that maximizes end-to-end throughput. This ensures the system provisions exactly enough SMs to saturate the computation needs and avoid congestion. 
+
+4.3.2 TMA Multicast for Uncacheable Host Access 
+
+A critical challenge in direct-access offloading is that host-homed memory is uncacheable by the GPU, completely by-passing the L2 cache. Our experiment shows that this archi-tectural limitation applies to both traditional PCIe-connected systems and even coherent CPU-GPU platforms 4.Consequently, direct host access suffers from severe read amplification : if multiple SMs request the same remote tile, the identical data chunk must be transmitted across the host-GPU interconnect multiple times as it cannot cached by GPU L2. For instance, in the scenario depicted in Fig. 5a, output tiles t0 and t1 both require tile row 1 of matrix A, that row is fetched twice over the long-latency interconnect by SM0 and SM1. As shown in Tab. 1, we measured the read amplification effect with different size N in Fig. 5a and the total host-to-GPU memory transfer scales linearly, reaching 16x more data transfer over CPU-GPU interconnect at N = 4096. To eliminate this interconnect bottleneck, DAK uses TMA Multicast and host-aware tile scheduling: • TMA Multicast: DAK leverages the advanced TMA Mul-ticast capabilities [27]. Instead of each SM issuing inde-pendent remote fetches, TMA fetches the host tile across the host-GPU interconnect exactly once. Upon host data arriving at the GPU, the GPU leverages the high-speed intra-cluster Network-on-Chip (NoC) to spatially broad-cast the data using Distributed Shared Memory (DSMEM). Physically, the NoC routes the single data payload and simultaneously writes it directly into the SRAM banks of the SMEM for all targeted SMs. • Host-Locality-First Tile Scheduling: Unlike traditional scheduling that optimizes for HBM locality or L2 cache hit rates, DAK implements host-locality-first SM schedul-ing to enable efficient multicast. Specifically, the producer warps of SMs accessing the same host tile chunk are grouped into the same thread block cluster, which are 
+
+> 4Even on the Grace Hopper Superchip, while the NVLink-C2C supports coherent unified memory, direct host-homed memory accesses bypass the GPU’s L2 cache to maintain hardware coherence without triggering a page migration.
+
+guaranteed to be co-scheduled simultaneously. Only the producer warp of one SM in the cluster initiates multicast, which reads the tile chunk from host memory once and then stores it to the SMEM slot of all SMs in the cluster. 
+
+## 5 Implementation 
+
+We implemented DAK in approximately 1,300 lines of Python and 2,700 lines of CUDA C++, leveraging CUTLASS to construct our direct-access kernels. The code is open-sourced at https://github.com/shouxulin/ DirectAccessKernel.git . Our system is designed for seamless integration into existing deep learning ecosystems and easy portability, with four key aspects: 
+
+PyTorch Interface: We expose two custom PyTorch mod-ules, SplitK_GEMM and SplitK_FlashAttn , which serve as drop-in replacements for the native nn.Linear and attention layers. This API design allows users to adopt DAK by sim-ply swapping the corresponding layers during initialization, without modifying the model architecture code. 
+
+Supporting FlashAttention: SplitK_FlashAttn follows the same interface as Pytorch’s Scaled Dot-Product Attention (SDPA) [29], while extending it with support for partitioned KV cache access via TMA. It partitions the KV cache along the batch dimension—storing the cache for a subset of requests in local GPU memory and the remainder in re-mote host memory. Similar to our linear operation kernels, 
+
+SplitK_FlashAttn supports placing the KV cache into either host memory or HBM based on a given offload ratio. 
+
+CUDA Graph Optimization: To eliminate CPU-side kernel launch overheads during the latency-sensitive decoding phase, DAK fully supports CUDA Graphs. We pre-allocate the KV cache using PyTorch’s StaticCache , to capture the execution graph using standard APIs, and seamlessly replay it across all subsequent decoding steps. 
+
+Cross-Architecture Adaptation: To adapt to different GPU generations, we swap the underlying CUTE compute atoms to perform matrix multiplication for that specific architecture (e.g., adapting to different tensor core generations). Further-more, we expose tunable parameters for the TMA chunk size and maximum in-flight requests. This allows the system to easily calibrate to different SMEM size and interconnect band-width limits on different architectures. 
+
+## 6 Evaluation 
+
+We evaluate DAK by answering the following questions: (1) How does DAK compare to baselines across various offload-ing ratios, hardware architectures, and models? (2) Can DAK enable large models to run efficiently when their memory footprints exceed GPU capacity (§6.1)? (3) What is the per-formance gain of the greedy offloading algorithm? (4) How effective are the TMA optimizations (§6.2)? 0 50 100      
+
+> Offloading ratio (%)
+> 0
+> 1000
+> 2000
+> 3000
+> Effective Bandwidth (GB/s)
+> 050 100
+> Offloading ratio (%)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> TPOT (Relative to DAK)
+> DAK FlexGen vLLM_prefetch vLLM_uvm
+
+(a) OPT-30b on GH200 0 50 100    
+
+> Offloading ratio (%)
+> 0
+> 500
+> 1000
+> 1500
+> 2000
+> 2500
+> Effective Bandwidth (GB/s)
+> 050 100
+> Offloading ratio (%)
+> 0
+> 1
+> 2
+> 3
+> 4
+> TPOT (Relative to DAK)
+
+(b) OPT-6.7b on GH200 0 50 100   
+
+> Offloading ratio (%)
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> Effective Bandwidth (GB/s)
+> 050 100
+> Offloading ratio (%)
+> 0
+> 1
+> 2
+> 3
+> TPOT (Relative to DAK)
+
+(c) OPT-30b on RTX6000 Pro Blackwell 0 50 100    
+
+> Offloading ratio (%)
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> Effective Bandwidth (GB/s)
+> 050 100
+> Offloading ratio (%)
+> 0
+> 1
+> 2
+> 3
+> TPOT (Relative to DAK)
+
+(d) OPT-6.7b and on RTX6000 Pro Blackwell 
+
+Figure 8: Performance w/ batch size = 8 under vary offloading ratios. 
+
+Testbed & Workloads: We evaluate our system across two distinct NVIDIA GPU architectures to capture a range of interconnect technologies and GPU generations: • Grace Hopper (GH200): An NVLink-C2C-based system featuring a 900 GB/s host-GPU interconnect and 480 GB of host memory. The GPU includes 96 GB of local HBM3 with 4.0 TB/s of bandwidth. • RTX 6000 Pro Blackwell: A PCIe Gen5-based system with a unidirectional host-GPU bandwidth of 64 GB/s and 512 GB of host memory. The GPU features 96 GB of local GDDR7 with 1.8 TB/s of bandwidth. Our experiments are conducted under an offline, batched-inference setup. We evaluate a diverse set of LLMs across varying batch sizes and prompt lengths, decoding 32 tokens per request. Unless otherwise specified, the prompt length is set to 32. We test across multiple models (OPT-30b, OPT-6.7b, and Llama-2-7b). In our evaluation, we compare our system against three baselines: FlexGen [33], a state-of-the-art offloading framework that uses double-buffered, layer-by-layer prefetching to manage weights and KV caches across tiered memory; vLLM-prefetch [9], a config of vLLM that implements asynchronous prefetch of KV blocks and weights from host memory to GPU HBM; and vLLM-uvm , a vLLM variant that utilizes NVIDIA Unified Virtual Memory (UVM), which relies on hardware page faults and system managed paging migrations to access host memory. 
+
+## 6.1 DAK End-to-End Performance 
+
+In this experiment, we compare DAK’s performance against baseline systems by sweeping the offloading ratio from 0% to 100% for the OPT-30B and OPT-6.7B models. We evaluate using two primary metrics: (1) Time Per Output Token (TPOT) , representing the end-to-end decoding latency for a single token, and (2) Effective Bandwidth ( EB ) defined as the total model size divided by TPOT, which shows the achieved aggregated memory bandwidth. 
+
+Weights Offload: We first measure performance using a batch size of 8. In this experiment, because the batch size is small, the memory footprint of the KV cache is also small, meaning the offloaded memory is primarily model weights. With a small batch size, the decoding is mostly memory-bound. As shown in Fig. 8, DAK consistently achieves the high-est EB across all models and offload ratios. On the GH200 system, DAK’s direct-access approach provides massive ad-vantages across all offload ratios, yielding 1.5 × to 5 × perfor-mance gains. DAK also achieves optimal aggregate system memory bandwidth through offloading. For instance, with OPT-30B at a 10% offload ratio, DAK sustains 3,300 GB/s, achieving a near-optimal aggregate memory bandwidth that approaches the theoretical peak of NVLink-C2C + HBM. In contrast, prefetching baselines suffer bandwidth degradation across all offload ratios. DAK’s high memory bandwidth also translates directly into a lower TPOT. As a note, in Fig. 11b, FlexGen exhibits low performance on OPT-6.7B because ker-nel launch overhead dominates for smaller models, whereas vLLM and DAK utilize CUDA Graphs to mitigate this over-head entirely. 25 50 75 100 
+
+> Offloading ratio (%)
+> 0
+> 200
+> 400
+> 600
+> Effective Bandwidth (GB/s)  DAK
+> vLLM(prefetch)
+> FlexGen
+
+(a) OPT-30b on GH200 25 50 75 100  
+
+> Offloading ratio (%)
+> 0
+> 100
+> 200
+> 300
+> Effective Bandwidth (GB/s)  DAK
+> vLLM(prefetch)
+> FlexGen
+
+(b) Llama-2-7b on GH200 
+
+Figure 9: Performance w/ batch size = 512 under vary offloading ratios 
+
+As shown in Fig. 8c and Fig. 8d, on the PCIe-based RTX 6000 Blackwell system, DAK remains strictly better to all prefetching schemes. It achieves near-ideal aggregate sys-tem memory bandwidth, demonstrating a 4% improvement through offloading that closely approaches the theoretical limits of the PCIe Gen5 interconnect. At low-to-medium of-fload ratios (0%–40%), DAK delivers a 1.3 × to 3 × improve-ment in both EB and TPOT compared to vLLM-prefetch and FlexGen. Beyond a 40% offload ratio, the performance of DAK, vLLM-prefetch, and FlexGen converges, as opera-tion latency becomes entirely bottlenecked by the physical limits of transferring weights over the low-bandwidth PCIe link. The vLLM-UVM baseline performs significantly worse than all other systems due to the severe latency penalties of page-fault and paging migration overheads over PCIe. 
+
+KV Cache Offload: We next evaluate performance using a larger batch size of 512. At this scale, the KV cache foot-print increases to 45 GB, requiring the system to concurrently manage the offloading of both weights and KV caches. Fur-thermore, the decoding phase becomes a heterogeneous mix of compute-bound operations (linear layers) and memory-bound operations (attention). Fig. 9 shows that DAK im-proves up to 2.1x performance compared to baselines on the GH200 system under OPT, and Llama model. DAK achieves this performance for two key reasons: (1) its direct-access paradigm fully utilizes aggregate system bandwidth to ac-celerate memory-bound attention operations, (2) its offload-ing algorithm analytically determines the optimal, operation-specific offloading ratios for both weights and KV caches. In contrast, baseline systems apply a naive, uniform offloading strategy that ignores these distinct operation characteristics, and (3) DAK can efficiently handle the read amplification problem with TMA-multicast under large batch sizes. Note that vLLM data points are omitted for offload ratios exceeding 50%, as this is the threshold where vLLM begins offloading the KV cache to CPU memory. In these cases, vLLM falls back to splitting the workload into multiple sub-batches and interleaving the prefill and decode phases, which prevents a clean, isolated measurement of the decode latency for the entire batch. Additionally, FlexGen results for Llama are miss-ing because it is not supported by FlexGen. 
+
+Optimal Model Offloading: Now, rather than manually (8, 32) (32, 1024) (128, 256) (128, 512) (128, 1024) 
+
+> (Batch size, Prompt length)
+> 0
+> 1000
+> 2000
+> 3000
+> Effective bandwidth (GB/s)
+> 1.16x
+> 1.53x
+> 1.86x
+> 3.88x
+> 1.83x
+> 3.30x
+> 1.12x
+> 2.30x
+> 1.06x
+> 21.72x
+> DAK
+> vLLM (prefetch)
+> FlexGen
+
+bsz prompt_len model KV cache global offload ratio 8 32 55.6 GB 0.7 GB 0% 32 1024 55.6 GB 46.51 GB 6% 128 256 55.6 GB 50.73 GB 10% 128 512 55.6 GB 95.83 GB 37% 128 1024 55.6 GB 186.03 GB 60% 
+
+Figure 10: Figure shows the performance for GH200 under different configurations. The table shows the memory footprint for different con-figurations and the corresponding global memory offload ratio. 25 50 75 100  
+
+> Offloading ratio (%)
+> 0
+> 200
+> 400
+> 600
+> Effective Bandwidth (GB/s)  Greedy Uniform
+
+(a) OPT-30b on GH200 25 50 75 100   
+
+> Offloading ratio (%)
+> 0
+> 100
+> 200
+> 300
+> Effective Bandwidth (GB/s)  Greedy Uniform
+
+(b) Llama-2-7b on GH200 
+
+Figure 11: Compare greedy with uniform offloading. Batch size is 512. 
+
+sweeping offload ratios, we evaluate DAK’s capability to efficiently run large models on GPUs with limited memory capacity, with the global offloading ratio determined by the real available GPU memory. As shown in Fig. 10, we vary the batch size and prompt length for OPT-30B. Large batch sizes and extended prompt lengths increase the total mem-ory footprint well beyond the available GPU HBM, which dynamically dictates the required global offload ratio. We compare the maximum achievable performance across these configurations against vLLM and FlexGen. DAK con-sistently outperforms all baselines across every configuration, achieving 1.06 × to 1.83 × speedups over vLLM, and 1.53 ×
+
+to 21 × speedups over FlexGen. These significant gains high-light the combined effectiveness of DAK’s optimal offloading algorithm and highly efficient direct-access. In Appendix B, we show additional results on OPT-6.7B. 
+
+## 6.2 Effectiveness of DAK Optimizations 
+
+Next, we run benchmarks on the GH200 system and evaluate DAK’s key design decisions. 
+
+Greedy Offload Performance: We show that our greedy of-fload algorithm successfully incorporates the compute- and memory-bound characteristics of individual operations to se-lect the optimal offloading ratio for each. We compare the 7168 x 7168     
+
+> 7168 x 28672
+> 28672 x 7168
+> 4096 x 4096
+> 4096 x 16384
+> 16384 x 4096
+> Matrix Size
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> Effective bandwidth (GB/s)
+> 1.13x 1.08x 1.06x
+> 1.22x
+> 1.11x 1.09x
+> w/o CC w/ CC
+
+(a) Congestion Control Effect 7168 x 7168      
+
+> 7168 x 28672
+> 28672 x 7168
+> 4096 x 4096
+> 4096 x 16384
+> 16384 x 4096
+> Matrix Size
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> Effective bandwidth (GB/s)
+> 1.00x 1.00x 1.18x
+> 1.22x
+> 1.13x 1.07x
+> w/o alignment w/ alignment
+
+(b) Kernel Alignment Effect 
+
+Figure 12: Effectiveness of congestion control and kernel alignment on different matrix sizes. 0 50 100   
+
+> Offloading Ratio (%)
+> 0
+> 500
+> 1000
+> Effective Bandwidth (GB/s)  N = 512
+> 050 100
+> Offloading Ratio (%)
+> 0
+> 200
+> 400
+> 600
+> Effective Bandwidth (GB/s)  N = 1024
+
+DAK w/o Multicast DAK 
+
+Figure 13: GEMM of weights (7168,7168) and hidden states (7168, N). 
+
+greedy strategy against a uniform offloading baseline using a batch size of 512, which is a workload that has a mix of compute- and memory-bound operations. As shown in Fig. 11, the greedy algorithm outperforms uniform offloading by 1.5 ×
+
+when the offloading ratio is below 60%. This is because the greedy approach identifies the turning point of each kernel’s 
+
+EB and prioritizes offloading compute-bound kernels, which are significantly less sensitive to remote memory access la-tencies. When the offloading ratio exceeds 60%, the uniform and greedy algorithms converge in performance. At such high ratios, all operations become bottlenecked by the interconnect bandwidth; consequently, assigning the offloading budget to any specific kernel yields the same overall performance. This result aligns perfectly with our theoretical proof in §4.2. 
+
+Congestion Control Efficacy: Fig. 12a evaluates the GEMM performance across various matrix sizes, with and without our congestion control mechanism. By carefully regulating in-flight TMA credits, our algorithm successfully prevents unconstrained memory requests from overwhelming the intra-GPU interconnect. Consequently, across all evaluated matrix sizes, this controlled dispatch mitigates interconnect conges-tion and improves performance by up to 1.22 ×.
+
+TMA Multicast Efficiency: Fig. 13 shows the performance benefits of TMA multicast. We measure the performance of GEMM over a (7168 , 7168 ) weight matrix with a (7168 , N)
+
+hidden state matrix. In this setup, we scale the batch dimen-sion N (which is determined by the LLM inference batch size) from 512 to 1024. At N = 512 , enabling TMA multicast im-proves performance by 1.3 × compared to the non-multicast baseline. Crucially, this performance gap widens significantly to 2.5 × as N increases to 1024. This scaling behavior per-fectly aligns with our earlier analysis (Tab. 1): as N grows, independent requests to uncacheable host memory suffer from severe read amplification. By broadcasting a single fetched tile to multiple SMs on-chip, TMA multicast eliminates these redundant host-to-GPU transfers and improves performance. 
+
+Kernel Alignment Efficacy: As shown in Fig. 12b, DAK ensures that the number of assigned tiles is evenly divisible across the allocated SMs to prevent tail latencies caused by partial or unbalanced execution waves. Fig. 12b shows that this optimization improves throughput by up to 1.2 ×.
+
+## 7 Related Work 
+
+Memory Offloading for LLM Inference. Existing memory offloading systems [4, 5, 9, 14, 20, 30, 33] rely on a copy-based prefetching , which, as we have shown, underperforms compared to a direct-access approach. Prefetching is only ad-vantageous if a compute-bound kernel’s bandwidth demand is lower than the interconnect capacity, leaving idle bandwidth to prestage data for subsequent memory-bound operations .However, this scenario is rare in high-throughput LLM de-coding, where kernels typically saturate the interconnect or exhibit uniform compute-intensity across stages, leaving no idle bandwidth to hide later stage fetch latencies. 
+
+Direct Access with Managed Memory. Previous GPU di-rect host access often relies on Unified Virtual Memory (UVM) [7, 21], which provides on-demand access via 4KB hardware page faults. However, for large-scale tensor opera-tions, demand-paging incurs severe fault-handling latency and serialization overheads. Even on recent tightly-coupled archi-tectures like GH200 Superchip, evaluations [11,31] show that managed memory imposes significant migration and fault-handling bottlenecks for memory-intensive workloads. DAK uses TMA to avoid paging overhead. 
+
+Tensor Memory Accelerator (TMA) and Async Kernels. 
+
+Libraries like CUTLASS 3 [22], ThunderKittens [34], Mi-rage [6], and FlashAttention-3 [32] use TMA for warp-specialized pipelining. However, prior work restricts TMA to intra-GPU (HBM-to-SMEM) movement. DAK repurpose TMA for inter-tier data movement, orchestrating direct, asyn-chronous accesses over the host-GPU interconnect while ac-tively mitigating remote congestion and read amplification. 
+
+## 8 Conclusion 
+
+We show that direct access is better than prefetching for LLM inference offloading. We present DAK, a framework that lever-ages the TMA to fetch weights and KV caches directly from host memory to GPU shared memory. DAK incorporates a greedy algorithm for per-operation offloading, congestion control to prevent interconnect saturation, and TMA multi-casting to eliminate read amplification. Our evaluations show that DAK strictly outperforms prefetching, achieving near-optimal system bandwidth with performance gains of up to 3× on NVLink-C2C and 1.8 × on PCIe systems. 
+
+## 9 Acknowledgements 
+
+This work is supported by gifts from Google, as well as re-sources provided by Lambda and the NAIRR Pilot. 
+
+## References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. Taming 
+
+{Throughput-Latency } tradeoff in {LLM } inference with {Sarathi-Serve }. In 18th USENIX symposium on operating systems design and implementation (OSDI 24) , pages 117–134, 2024. [2] Keivan Alizadeh, Seyed Iman Mirzadeh, Dmitry Be-lenko, S Khatamifard, Minsik Cho, Carlo C Del Mundo, Mohammad Rastegari, and Mehrdad Farajtabar. Llm in a flash: Efficient large language model inference with lim-ited memory. In Proceedings of the 62nd Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12562–12584, 2024. [3] Tyler Allen and Rong Ge. In-depth analyses of unified virtual memory system for gpu accelerated computing. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Anal-ysis , pages 1–15, 2021. [4] Reza Yazdani Aminabadi, Samyam Rajbhandari, Am-mar Ahmad Awan, Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Minjia Zhang, Jeff Rasley, et al. Deepspeed-inference: enabling efficient in-ference of transformer models at unprecedented scale. In 
+
+SC22: International Conference for High Performance Computing, Networking, Storage and Analysis , pages 1–15. IEEE, 2022. [5] Shiyi Cao, Shu Liu, Tyler Griggs, Peter Schafhalter, Xi-aoxuan Liu, Ying Sheng, Joseph E Gonzalez, Matei Za-haria, and Ion Stoica. Moe-lightning: High-throughput moe inference on memory-constrained gpus. In Pro-ceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 , pages 715–730, 2025. [6] Xinhao Cheng, Zhihao Zhang, Yu Zhou, Jianan Ji, Jinchen Jiang, Zepeng Zhao, Ziruo Xiao, Zihao Ye, Yingyi Huang, Ruihang Lai, et al. Mirage persistent ker-nel: A compiler and runtime for mega-kernelizing tensor programs. arXiv preprint arXiv:2512.22219 , 2025. [7] Steven Chien, Ivy Peng, and Stefano Markidis. Perfor-mance evaluation of advanced features in cuda unified memory. In 2019 IEEE/ACM Workshop on Memory Centric High Performance Computing (MCHPC) , pages 50–57. IEEE, 2019. [8] CXL Consortium. Compute express link (cxl) specifica-tion, revision 3.1. Technical report, Compute Express Link Consortium, November 2023. The foundational spec enabling peer-to-peer accelerator memory pooling and fabric routing. [9] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact attention with io-awareness. Advances in neural information processing systems , 35:16344– 16359, 2022. [10] Yinxiao Feng, Dong Xiang, and Kaisheng Ma. Hetero-geneous die-to-die interfaces: Enabling more flexible chiplet interconnection systems. In Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture , pages 930–943, 2023. [11] Luigi Fusco, Mikhail Khalilov, Marcin Chrapek, Girid-har Chukkapalli, Thomas Schulthess, and Torsten Hoe-fler. Understanding data movement in tightly coupled heterogeneous systems: A case study with the grace hopper superchip. arXiv preprint arXiv:2408.11556 ,2024. [12] Amir Gholami, Zhewei Yao, Sehoon Kim, Michael W Mahoney, and Kurt Keutzer. AI and memory wall. IEEE Micro , 44(1):14–24, 2024. [13] Donghyun Gouk, Miryeong Kwon, Hanyeoreum Bae, Sangwon Lee, and Myoungsoo Jung. Memory pooling with cxl. IEEE Micro , 43(2):48–57, 2023. [14] Chien-Chin Huang, Gu Jin, and Jinyang Li. Swapad-visor: Pushing deep learning beyond the gpu memory limit via smart swapping. In Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems ,pages 1341–1355, 2020. [15] Xuanlin Jiang, Yang Zhou, Shiyi Cao, Ion Stoica, and Minlan Yu. Neo: Saving gpu memory crisis with cpu offloading for online llm inference. Proceedings of Machine Learning and Systems , 7, 2025. [16] Keisuke Kamahori, Tian Tang, Yile Gu, Kan Zhu, and Baris Kasikci. Fiddler: Cpu-gpu orchestration for fast inference of mixture-of-experts models. arXiv preprint arXiv:2402.07033 , 2024. [17] Byeongho Kim, Sanghoon Cha, Sangsoo Park, Jieun Lee, Sukhan Lee, Shin-haeng Kang, Jinin So, Kyungsoo Kim, Jin Jung, Jong-Geon Lee, et al. The breakthrough memory solutions for improved performance on llm inference. IEEE Micro , 44(3):40–48, 2024. [18] Hyungyo Kim, Nachuan Wang, Qirong Xia, Jinghan Huang, Amir Yazdanbakhsh, and Nam Sung Kim. Lia: A single-gpu llm inference acceleration with coopera-tive amx-enabled cpu-gpu computation and cxl offload-ing. In Proceedings of the 52nd Annual International Symposium on Computer Architecture , pages 544–558, 2025. [19] Huaicheng Li, Daniel S Berger, Lisa Hsu, Daniel Ernst, Pantea Zardoshti, Stanko Novakovic, Monish Shah, Samir Rajadnya, Scott Lee, Ishwar Agarwal, et al. Pond: Cxl-based memory pooling systems for cloud platforms. In Proceedings of the 28th ACM International Confer-ence on Architectural Support for Programming Lan-guages and Operating Systems, Volume 2 , pages 574– 587, 2023. [20] Jiamin Li, Lei Qu, Tao Zhang, Grigory Chirkov, Shuo-tao Xu, Peng Cheng, and Lidong Zhou. Fenghuang: Next-generation memory orchestration for ai inferenc-ing. arXiv preprint arXiv:2511.10753 , 2025. [21] Wenqiang Li, Guanghao Jin, Xuewen Cui, and Simon See. An evaluation of unified memory technology on nvidia gpus. In 2015 15th IEEE/ACM international symposium on cluster, cloud and grid computing , pages 1092–1098. IEEE, 2015. [22] NVIDIA. Cutlass 3.0: Fast linear algebra in cuda c++. 
+
+https://github.com/NVIDIA/cutlass , 2023. [23] NVIDIA. NVIDIA Blackwell GeForce RTX 50 Series Opens New World of AI Computer Graphics. NVIDIA Newsroom, January 2025. [24] NVIDIA. NVIDIA RTX PRO Blackwell GPU Archi-tecture. Technical report, NVIDIA Corporation, 2025. [25] NVIDIA Corporation. NVIDIA H100 Tensor Core GPU Architecture. Whitepaper, NVIDIA, 2022. [26] NVIDIA Corporation. NVIDIA GH200 Grace Hopper Superchip Architecture. Technical whitepaper, NVIDIA, 2023. [27] NVIDIA Corporation. Cuda c programming guide: Us-ing the tensor memory accelerator (tma), 2024. Ac-cessed: 2026-04-15. [28] Carl Pearson. Interconnect bandwidth heterogeneity on amd mi250x and infinity fabric. arXiv preprint arXiv:2302.14827 , 2023. [29] PyTorch Contributors. Pytorch documentation: Scaled dot product attention. https://docs.pytorch.org/ docs/stable/generated/torch.nn.functional. scaled_dot_product_attention.html , 2024. Accessed: 2026-04-15. [30] Jie Ren, Samyam Rajbhandari, Reza Yazdani Am-inabadi, Olatunji Ruwase, Shuangyan Yang, Minjia Zhang, Dong Li, and Yuxiong He. {Zero-offload }: De-mocratizing {billion-scale } model training. In 2021 USENIX Annual Technical Conference (USENIX ATC 21) , pages 551–564, 2021. [31] Gabin Schieffer, Jacob Wahlgren, Jie Ren, Jennifer Faj, and Ivy Peng. Harnessing integrated cpu-gpu system memory for hpc: a first look into grace hopper. In Pro-ceedings of the 53rd International Conference on Paral-lel Processing , pages 199–209, 2024. [32] Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. Flashattention-3: Fast and accurate attention with asynchrony and low-precision. Advances in Neural Information Processing Systems , 37:68658–68685, 2024. [33] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. Flexgen: High-throughput generative inference of large language models with a single gpu. In International Conference on Machine Learning , pages 31094–31116. PMLR, 2023. [34] Benjamin F Spector, Simran Arora, Aaryan Singhal, Daniel Y Fu, and Christopher Ré. Thunderkittens: Simple, fast, and adorable ai kernels. arXiv preprint arXiv:2410.20399 , 2024. [35] Abhishek Vijaya Kumar, Gianni Antichi, and Rachee Singh. Aqua: Network-accelerated memory offloading for llms in scale-up gpu domains. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , pages 48–62, 2025. [36] Christopher Wolters, Xiaoxuan Yang, Ulf Schlichtmann, and Toyotaro Suzumura. Memory is all you need: An overview of compute-in-memory architectures for accel-erating large language model inference. arXiv preprint arXiv:2406.08413 , 2024. [37] Yi Xu, Ziming Mao, Xiangxi Mo, Shu Liu, and Ion Sto-ica. Pie: Pooling cpu memory for llm inference. arXiv preprint arXiv:2411.09317 , 2024. A Formal Proof of Optimal Greedy Offload 
+
+The optimization problem can be written as: min  
+
+> {xi}
+
+# ∑
+
+> i
+
+Ci
+
+EB (xi) (1) s.t. ∑
+
+> i
+
+Cixi = R ∑
+
+> i
+
+Ci, (2) 0 ≤ xi ≤ 1, ∀i, (3) Next, we explain why the greedy algorithm proposed in §4.2 is an optimal solution to this problem. 
+
+Theorem 1. When R ≤ ∑i∈Fmem Ci·x∗  
+
+> i
+> ∑iCi
+
+, the optimal solution al-locates all offloading budget to memory-bound operations, and how the offloading budget is distributed among memory-bound operations does not affect optimality. Proof. We prove this by contradiction. Suppose there exists an optimal solution in which some compute-bound operation 
+
+Fj ∈ Fcomp has x j > 0 . Since R ≤ ∑i∈Fmem Cix∗  
+
+> i
+> ∑iCi
+
+, there must exist at least one memory-bound operation Fk ∈ Fmem such that xk < x∗ 
+
+> k
+
+; otherwise, if every memory-bound operation had already reached its threshold, then the total offloaded size assigned to memory-bound operations alone would be at least 
+
+∑i∈Fmem Cix∗ 
+
+> i
+
+, contradicting the above bound. Now move an infinitesimal amount of offloading budget from Fj to Fk, while keeping the total offloaded size un-changed. Let us use T (xi) = Ci 
+
+> EB (xi)
+
+to denote the latency contribution of operation Fi.For the compute-bound operation Fj, T (xi) is strictly non-decreasing in x j; thus we have T ( ˆx j) ≤ T (x j). For the memory-bound operation T (xi) is strictly decreasing when 
+
+xi < x∗ 
+
+> i
+
+; thus we have T ( ˆxk) < T (xk). Therefore, decreasing 
+
+x j and increasing xk strictly decreases the objective value, contradicting the optimality of the original solution. Hence, any optimal solution satisfies the following constraint: 
+
+(
+
+xi ≤ x∗ 
+
+> i
+
+∀i ∈ Fmem 
+
+xi = 0 ∀i ∈ Fcomp 
+
+(4) When the constraint in 4 holds, the objective in 1 only depends on memory-bound operations. Rewriting the objec-tive, we have min {xi} ∑i Ci(1−xi) 
+
+> Bg
+
+. Since Bg is a constant, this is equivalent to minimizing ∑i Ci(1 − xi), or equivalently max-imizing ∑i Cixi. Under the global offloading constraint in 2, 
+
+∑i Cixi is fixed. Therefore, the objective reduces to a constant, and any feasible solution satisfying the constraints is optimal. How the offloading budget is distributed among memory-bound operations does not affect optimality in this regime. 
+
+Theorem 2. When ∑i∈Fmem Ci·x∗  
+
+> i
+> ∑iCi
+
+< R ≤ ∑i Ci·x∗  
+
+> i
+> ∑iCi
+
+, the optimal so-lution allocates offloading budget to all memory-bound opera-tions so that they reach their peak effective bandwidth. It then allocates the remaining budget to compute-bound operations; the exact distribution among compute-bound operations does not affect optimality, as long as none of them is pushed beyond its compute-bound threshold. Proof. Since Ci 
+
+> EB (xi)
+
+is decreasing and then increasing with 
+
+xi for memory-bound operations, and strictly non-decreasing with xi for compute-bound operations. The optimal solution would assign xi = x∗ 
+
+> i
+
+for all memory-bound operations, min-imizing their operation latency. In addition, due to the con-straint on R ≤ ∑i Ci·x∗  
+
+> i
+> ∑iCi
+
+, we can make sure no compute-bound operations go beyond their threshold. In this case, we can minimize Ci 
+
+> EB (xi)
+
+for both memory-bound and compute-bound operations, and thus minimize the E2E latency. Thus, an opti-mal solution would satisfy the following constraint: 
+
+(
+
+xi = x∗ 
+
+> i
+
+∀i ∈ Fmem 
+
+xi ≤ x∗ 
+
+> i
+
+∀i ∈ Fcomp 
+
+(5) Under this constraint, we can rewrite the objective 1 as 
+
+∑i∈Fmem  
+
+> Ci
+> Bh+Bg
+
++ ∑i∈Fcomp  
+
+> Ci
+> Bi
+
+, which is a constant. Hence, any feasible solution which satisfies Constraint 5 would be opti-mal. How the offloading budget is distributed among compute-bound operations does not affect optimality in this regime. 
+
+Theorem 3. When R > ∑i Ci·x∗  
+
+> i
+> ∑iCi
+
+, Any feasible solution is opti-mal, and how the offloading budget is distributed among all operations does not affect optimality. Proof. We first show show that for any optimal solution, it must satisfy xi ≥ x∗ 
+
+> i
+
+, ∀ ∈ F . We prove this by contradiction. Suppose there exists an optimal solution S in which some operation has x j < x∗ 
+
+> j
+
+. Due to the constraint on offloading budget R, there must exist some xk with xk > x∗ 
+
+> k
+
+. Then consider another solution ˆS with ˆx j = x∗ 
+
+> j
+
+> x j. Since we increase the offloading size of operation j, we can reduce the offloading size of operation k while satisfying the overall offloading budget constraint for ˆS. Thus, we have ˆxk < xk. Note that the effective bandwidth EB (xi) is non-decreasing with xi ≤
+
+x∗ 
+
+> i
+
+and strictly decreasing with xi > x∗ 
+
+> i
+
+. Thus, the latency of operation j in solution ˆS would be no greater than its latency in solution S, and the latency of operation k in solution ˆS
+
+would be smaller than its latency in solution S, contradicting the assumption that S is optimal. Thus, we can rewrite the objective 1 as ∑i∈Fmem  
+
+> Ci
+> Bh
+
+· xi +
+
+∑i∈Fcomp  
+
+> Ci
+> Bi
+
+· xi = ∑i∈Fmem Ci · xi + ∑i∈Fcomp Ci · xi = ∑i∈F Ci · xi,which is a constant, i.e., the total offloading budget (due to constraint 2). (8, 32) (256, 1024) (512, 512) (512, 1024) 
+
+> (Batch size, Sequence length)
+> 10 1
+> 10 2
+> 10 3
+> Effective bandwidth (GB/s)
+> 4.82x
+> 4.73x
+> 1.90x
+> DAK
+> FlexGen
+
+bsz prompt_len model KV cache global offload ratio 8 32 13.3 GB 0.27 GB 0% 256 1024 13.3 GB 141.73 GB 37% 512 512 13.3 GB 146.03 GB 39% 512 1024 13.3 GB 283.47 GB 67% 
+
+Figure 14: Figure shows the performance for GH200 under different configurations. The table shows the memory footprint for different con-figurations and the corresponding global memory offload ratio. 
+
+Putting everything together, our offloading algorithm satis-fies constraint 4 in Phase 1 and constraint 5 in Phase 2 respec-tively, making it optimal. In Phase 3, any feasible allocation is optimal. Therefore, the proposed offloading algorithm is optimal. 
+
+## B Additional Results 
+
+Fig. 14 shows the OPT 6.7B’s performance for GH200 under different configurations. We vary the batch size and prompt length for OPT-6.7B. Large batch sizes and extended prompt lengths increase the total memory footprint well beyond the available GPU HBM, which dynamically dictates the required global offload ratio. DAK achieves 1.9x to 4x performance improvement compared to FlexGen.

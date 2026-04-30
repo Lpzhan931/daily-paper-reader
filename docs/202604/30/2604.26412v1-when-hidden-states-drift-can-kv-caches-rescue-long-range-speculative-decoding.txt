@@ -1,0 +1,657 @@
+Title: When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+URL Source: https://arxiv.org/pdf/2604.26412v1
+
+Published Time: Thu, 30 Apr 2026 00:36:04 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding? 
+
+Tianyu Liu 1,2 , Yuhao Shen 1,3 , Xinyi Hu 1, Baolin Zhang 1, Hengxin Zhang 1, Jun Dai 1, Jun Zhang 1,3* , Shuang Ge 1* , Lei Chen 1, Yue Li 1 and Mingcheng Wan 1  
+
+> 1Qwen Applications Business Group of Alibaba, 2University of Science and Technology of China, 3Zhejiang University
+> *Corresponding authors.
+
+tianyu_liu@mail.ustc.edu.cn , {zj534580, geshuang.zj}@alibaba-inc.com 
+
+Speculative decoding accelerates large language model inference, but state-of-the-art hidden-state-based drafters (e.g., EAGLE3 and MTP) suffer from long-range decay : draft accuracy degrades progressively as the speculative step increases. Existing work attributes this decay to train-inference mismatch and proposes autoregressive test-time training (TTT) as a remedy, yet we observe that long-range decay persists even in TTT-trained drafters. We revisit long-range decay from the perspective of context information preservation. In hidden-state reuse, we argue the target hidden state acts as a biased context compression :it aggregates historical token information according to the attention query at the current decoding position, yielding a compact representation optimized for immediate next-token prediction. This compression can suppress information that is less relevant to the current query but becomes important for later speculative steps. In contrast, the target model’s KV cache serves as an explicit context , retaining the complete set of token-wise KV representations rather than collapsing the history into a single hidden representation. We therefore posit the KV-Reuse Hypothesis : allowing the draft model to reuse the target KV cache can provide richer conditioning signals for long-horizon drafting. To test this hypothesis, we introduce KVShot , a diagnostic framework that compares three reuse paradigms: hidden-only , KV-only , and hybrid . Extensive evaluations on Qwen3-8B show that KV-Reuse improves long-range acceptance, although end-to-end speedups remain marginal under current training pipelines. Our analysis identifies two key structural bottlenecks: shallow drafters struggle to estimate target queries accurately, and draft-side KV projections receive sparse gradient signals. These findings suggest that realizing the full potential of KV-aware decoding requires moving beyond autoregressive TTT toward block-wise training paradigms. By exposing these bottlenecks, KVShot provides a foundational diagnostic testbed and a clear roadmap for designing next-generation inference architectures. 
+
+# 1. Introduction 
+
+Autoregressive decoding in large language models (LLMs) is inherently sequential, making inference latency a persistent bottleneck even with highly optimized kernels. Speculative decoding alleviates this by letting a lightweight draft model propose multiple candidate tokens that a larger target model verifies in a single forward pass, amortizing the cost of sequential generation over several tokens at once (Leviathan et al., 2023; Chen et al., 2023; Miao et al., 2024; Chen et al., 2025; Xia et al., 2024). Among the various drafter designs, hidden-state reuse has become the dominant paradigm. EAGLE-style drafters (Li et al., 2025b, 2024, 2025c) feed the target model’s internal hidden states into a single-layer drafter to predict multiple future tokens at low cost. Multi-token prediction (MTP) drafters follow a similar reuse strategy and have been adopted in production systems (Cai et al., 2024; Gloeckle et al., 2024; DeepSeek-AI, 2024). Despite their practical success, these hidden-state-based drafters share a common weakness: long-range decay . Draft accuracy drops progressively as the speculative step 𝑘 increases ( Figure 1), directly capping the viable depth of the draft tree and the maximum end-to-end speedup that speculative decoding can deliver. The standard explanation for long-range decay is train-inference mismatch . During training the draft model 
+
+> arXiv:2604.26412v1 [cs.CL] 29 Apr 2026 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Target 
+
+Draft 
+
+𝑥 1 𝑥 2 𝑥 3
+
+ℎ1 ℎ2 ℎ3
+
+ℎ4 ℎ5
+
+ℎ4 ℎ5
+
+ℎ6
+
+(a) Hidden-state recursion. 0 1 2 3 4 5 6                 
+
+> Speculative step k
+> 0.55
+> 0.60
+> 0.65
+> 0.70
+> 0.75
+> 0.80
+> 0.85
+> 0.90
+> Draft acceptance rate  ®k
+> 0.858
+> 0.789
+> 0.753 0.740 0.726 0.711 0.698 0.741
+> 0.686
+> 0.654
+> 0.634 0.619 0.607 0.594
+> MTP ( ¢ = ¡0:160 ;¡18 :6% )
+> EAGLE-3 ( ¢ = ¡0:147 ;¡19 :8% )
+
+(b) Step-wise acceptance decay. 
+
+Figure 1 | Long-range decay in hidden-state-based drafting. (a) Later draft steps condition on recursively generated draft hidden states, while the corresponding target hidden states are unavailable during drafting (dashed gray arrows). This train-inference mismatch accumulates with the speculative step. (b) The effect appears empirically as decreasing draft acceptance rates for both a Qwen3.5-4B MTP drafter and EAGLE-3 as the speculative step 𝑘 increases. conditions on target hidden states, but at inference it must rely on its own recursively generated hidden states, which drift further from the target distribution at each successive step. Autoregressive test-time training (TTT), first proposed by HASS (Zhang et al., 2025) and later integrated into EAGLE-3 (Li et al., 2025c), addresses this gap by exposing the drafter to its own drifting trajectories during training. While TTT measurably improves draft acceptance, Figure 1b illustrates that long-range decay persists even in TTT-trained drafters, indicating that train-inference mismatch alone cannot fully account for this phenomenon. In this work, we approach the remaining decay from the perspective of context information preservation . We argue that hidden states act as a form of biased context compression . During hidden-state computation, the target model’s attention mechanism aggregates value vectors according to the query at the current decoding position, which is optimized for immediate next-token prediction. Tokens that are weakly relevant to this prediction receive small attention weights, causing their information to be largely suppressed in the resulting hidden state. This compression is well suited to short-range prediction, but can weaken the signal needed for later speculative steps. A draft model that receives only this compressed representation therefore faces an increasingly difficult information-recovery problem as the prediction horizon grows. In contrast, the target model’s KV cache serves as an explicit context memory by retaining the complete set of per-position key/value pairs before they are aggregated by attention. Given these pairs, a draft model can re-attend to the prefix with its own estimated future queries, making each prefix position explicitly accessible. The challenge then shifts from recovering suppressed information to accurately estimating future queries, framing the task as a function-approximation problem rather than an information-recovery one. This contrast motivates the KV-Reuse Hypothesis : reusing the target model’s KV cache can better preserve context information for long-range drafting, and therefore KV-only reuse should degrade more gracefully than hidden-only reuse at longer speculative steps. Testing this hypothesis requires isolating the effect of the reused representation itself. Although cross-attention-style KV reuse has appeared in prior speculative decoding systems (Du et al., 2024; Yang et al., 2026), it has not been systematically compared against hidden-state reuse as a mechanism for explaining long-range decay. To fill this gap, we build KVShot , a diagnostic framework that evaluates KV-Reuse drafting under the same autoregressive TTT pipeline used by EAGLE-3. We organize the comparison around three reuse settings: 
+
+hidden-only reuse , represented by EAGLE-3 and MTP, where target hidden states are concatenated to the drafter input; KV-only reuse , where the target KV cache is injected into drafter attention; and hybrid reuse , where hidden states provide the main anchor and KV reuse contributes through a gated delta correction. We compare KV-only and hybrid drafters against a matched hidden-only EAGLE-3 baseline on Qwen3-8B (Qwen Team et al., 2025), thereby isolating the effect of representation choice from other confounds. Our experiments show that KV reuse degrades more gracefully than hidden-state reuse at longer draft steps. 
+
+> 2When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+However, these gains remain too small to produce a significant end-to-end speedup. We conduct a detailed analysis of this gap and identify structural limitations of the autoregressive TTT pipeline that prevent it from effectively learning to exploit the KV cache. Our findings suggest that realizing the potential of KV reuse likely requires alternative training paradigms, such as block-wise training (Chen et al., 2026), that are better aligned with KV learning. In summary, this paper makes the following contributions: (1) Novel information-preservation view of long-range decay. We show that long-range decay is not solely a train-inference mismatch effect, but also depends on which target-model representation is reused. By analyzing hidden states as query-dependent compressed summaries, we explain why hidden-only reuse can suppress context needed at later draft steps. This leads to a KV-reuse hypothesis: because KV caches preserve token-level prefix information before attention aggregation, KV-only reuse should degrade more gracefully than hidden-only reuse at longer draft horizons (Section 2). (2) Unified diagnostic framework for representation reuse. We introduce KVShot , a controlled framework that systematically compares hidden-only reuse, KV-only reuse, and gated hybrid reuse under the same autoregressive TTT pipeline. This design isolates the effect of representation choice from other confounds in speculative decoding (Section 3). (3) Structural bottleneck analysis of KV-Reuse drafting. We show that KV reuse improves long-range acceptance but remains limited under current autoregressive TTT. Our analysis identifies query-estimation difficulty and sparse KV-projection gradients as two key bottlenecks, motivating training paradigms better aligned with block-level KV learning (Section 4). The paper is structured as follows: Section 2 presents our information-preservation analysis. Section 3 introduces the KVShot framework and evaluates its empirical performance. Section 4 provides a deeper examination of the bottlenecks associated with autoregressive TTT for KV reuse. We then discuss related work in Section 5, before concluding in Section 6. 
+
+# 2. Context Information Preservation View of Long-Range Decay 
+
+In this section, we formalize this intuition by comparing hidden-state reuse and KV reuse in terms of context-information preservation, and derive a KV-reuse hypothesis together with three testable predictions for the experiments that follow. 
+
+2.1. Hidden States as Biased Context Compression 
+
+To isolate the key mechanism, we focus on the attention aggregation component of the Transformer block. A full hidden state additionally includes output projection, residual connections, layer normalization, and the feed-forward sub-layer; we omit these for clarity, as the compression argument applies specifically to the attention step. Consider a single attention head at layer ℓ of the target model. Given the prefix 𝑥 1, . . . , 𝑥 𝑡 , the attention output at position 𝑡 is a weighted aggregation over value vectors:  
+
+> ℎℓ𝑡
+
+=
+
+> 𝑡
+
+∑︁     
+
+> 𝑖 =1
+> 𝛼 𝑖 𝑣 ℓ𝑖 ,𝛼 𝑖
+
+= exp (𝑞 ℓ⊤  
+
+> 𝑡 𝑘 ℓ𝑖
+
+)
+
+Í𝑡 𝑗 =1 exp (𝑞 ℓ⊤  
+
+> 𝑡 𝑘 ℓ𝑗
+
+) . (1) The weights {𝛼 𝑖 } are determined by the current query 𝑞 ℓ𝑡 , which is optimized for predicting 𝑥 𝑡 +1. If a historical token 𝑥 𝑘 is weakly relevant to this prediction, the corresponding weight 𝛼 𝑘 is near zero and the feature 𝑣 ℓ𝑘 is effectively discarded from ℎℓ𝑡 .This means ℎℓ𝑡 is a query-dependent compression: it retains information useful for the immediate next-token prediction but weakens information that may be critical for predicting tokens further ahead ( 𝑥 𝑡 +2, 𝑥 𝑡 +3, . . . ). When a draft model receives ℎℓ𝑡 as its input and attempts to predict multiple future tokens, it faces a difficult recovery problem: the suppressed 𝑣 ℓ𝑘 must be disentangled from a mixture in which they have been weighted to near zero. In general, this recovery is inherently ill-conditioned: as attention concentrates more aggressively 
+
+> 3When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+𝑞 3
+
+0.2  0.01  0.79 
+
+ℎ3
+
+0.09 0.25  0.65  0.01 
+
+𝑞 4Draft 
+
+Hidden 
+
+states 
+
+𝑞 3
+
+0.2  0.01  0.79 
+
+ℎ3
+
+ℎ4
+
+0.09 0.25  0.65  0.01 
+
+𝑞 4
+
+ℎ4
+
+KV 
+
+Cache 
+
+(a) Hidden States Reuse Paradigm  (b) KV Cache Reuse Paradigm 
+
+𝑘 1 𝑣 1 𝑘 2 𝑣 2 𝑘 3 𝑣 3 𝑘 1 𝑣 1 𝑘 2 𝑣 2 𝑘 3 𝑣 3
+
+𝑘 1 𝑣 1 𝑘 2 𝑣 2 𝑘 3 𝑣 3 𝑘 4 𝑣 4 𝑘 1 𝑣 1 𝑘 2 𝑣 2 𝑘 3 𝑣 3 𝑘 4 𝑣 4
+
+𝛼 2 is largely lost!  Full KV is attended.   
+
+> Draft -Target (k2,v2) Mismatch!
+
+Target 
+
+Draft 
+
+Target 
+
+> Draft can access all positions.
+
+𝛼 𝑖 
+
+𝛼 𝑖 
+
+𝛼 𝑖 
+
+𝛼 𝑖 
+
+𝛼 𝑖  Attention weights  𝑘 𝑖  𝑣 𝑖  Key -Value pairs  ℎ𝑖  Hidden states 𝑞 𝑖  Query 
+
+Figure 2 | Hidden-state reuse vs. KV reuse (illustrative; the attention weights shown are schematic, not measured). (a) The target model compresses its KV cache into ℎ3 via attention; the draft model receives only this aggregated hidden state and must predict 𝑥 4 from it. Information about weakly-attended tokens (e.g. 
+
+𝛼 2=0.01 ) is largely discarded. (b) The target’s KV cache is passed directly to the draft model, which performs re-attention with its own query 𝑞 4. All positions remain accessible, and the approximation error reduces to the query estimation error. on a select few positions, it becomes increasingly difficult for a downstream model to reconstruct the weakened components. This analysis also explains why recent drafters such as EAGLE-3 (Li et al., 2025c) fuse hidden states from multiple layers rather than relying on the top layer alone. Different layers attend to different aspects of the input, so a token that is suppressed ( 𝛼 𝑘 ≈ 0) at one layer may receive substantial weight at another. Multi-layer fusion therefore partially recovers information lost by any single layer’s compression. However, this remains a partial remedy: the fused representation is still a fixed-dimensional aggregation, and information that is consistently unattended across all fused layers remains difficult to recover. Figure 2 contrasts the two reuse paradigms. In the hidden-state paradigm (a), token 𝑥 2 receives near-zero weight ( 𝛼 2 = 0.01 ) during the target’s aggregation and its information is largely lost in ℎ3. Yet the draft model’s future prediction assigns the highest weight to that same token ( 𝛼 2 = 0.65 ), illustrating the mismatch between what the target compressed away and what the draft needs . The KV-cache paradigm (b) avoids this loss: the draft model re-attends to the full set of target key/value pairs with its own query, so every position remains accessible. 
+
+2.2. KV Cache as Re-attention Without Prior Aggregation 
+
+KV cache preserves the full set of key/value pairs {( 𝑘 ℓ𝑖 , 𝑣 ℓ𝑖 )} 𝑡 𝑖 =1 without any lossy aggregation. If the draft model is given access to these pairs, it can produce its own query 𝑞 ′ and perform a fresh re-attention: 
+
+𝑎 ′ =
+
+> 𝑡
+
+∑︁ 
+
+> 𝑖 =1
+
+𝛼 𝑖 (𝑞 ′) 𝑣 ℓ𝑖 , 𝛼 𝑖 (𝑞 ′) = exp (𝑞 ′⊤ 𝑘 ℓ𝑖 )
+
+Í𝑡 𝑗 =1 exp (𝑞 ′⊤ 𝑘 ℓ𝑗 ) . (2) In the simplified case where the draft query 𝑞 ′ closely approximates the true target query 𝑞 ℓ𝑡 +𝑘 at some future position 𝑡 + 𝑘 , 𝑎 ′ approaches the target attention output. Unlike hidden-state reuse, no information is discarded 
+
+> 4When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+by a prior aggregation step. In this simplified setting, the approximation quality is governed primarily by the query estimation error, which we write roughly as 
+
+EKV ≈ E 𝑞 (query-error dominated case) . (3) Equation 3 is a conceptual breakdown rather than a formal bound: it isolates the dominant source of error in the simplified KV-reuse setting and is meant to motivate the experiments that follow, not to be taken as a tight inequality. At the same time, a natural objection is that hidden states and KV cache are still closely related signals rather than fundamentally separate ones. We address that objection in Section 2.3. 
+
+2.3. Are Hidden States and KV Cache Equivalent? 
+
+A natural objection is that hidden states and KV cache are not fundamentally different signals. In a standard Transformer block, the KV cache at layer ℓ+1 is derived from the hidden state at layer ℓ via normalization and linear projections:  
+
+> 𝑘 ℓ+1
+> 𝑡
+
+= 𝑊 ℓ+1 
+
+> 𝐾
+
+Norm (ℎℓ𝑡 ), 𝑣 ℓ+1 
+
+> 𝑡
+
+= 𝑊 ℓ+1 
+
+> 𝑉
+
+Norm (ℎℓ𝑡 ). (4) This suggests that KV ℓ+1 is a simple function of ℎℓ, seemingly undermining the claim that KV reuse provides meaningfully different information. Three observations clarify why the distinction can still matter in practice. 
+
+Last-layer information gap. Consider an 𝐿 -layer target model whose top hidden state ℎ𝐿 𝑡 is reused by the drafter. The KV cache at layer 𝐿 was already consumed by the attention mechanism at layer 𝐿 to produce ℎ𝐿 𝑡 , a process governed strictly by the biased compression of Equation 1. There is no layer 𝐿 +1 whose KV cache would correspond to ℎ𝐿 𝑡 . Since prior work has consistently found that the top layer carries the strongest predictive signal (Cai et al., 2024; Li et al., 2025b), the loss of top-layer KV information may therefore be especially important. 
+
+Projection gap. Even at intermediate layers, recovering KV from hidden states is not free. The projections  
+
+> 𝑊 𝐾
+
+and 𝑊 𝑉 are non-trivial transformations; in models with grouped-query attention, the hidden dimension is typically 4 ∼ 8× larger than the per-head KV dimension. A draft model that receives ℎℓ instead of the pre-computed (𝑘 ℓ+1, 𝑣 ℓ+1) must implicitly learn these projections, imposing an additional burden on a drafter with only one or two layers. 
+
+Capacity competition. Under KV reuse, the drafter’s main task is query estimation: producing 𝑞 ′ that approximates the target query. Under hidden-state reuse, the same shallow drafter must simultaneously perform query estimation and implicitly reconstruct the KV projections from the received hidden states. These two tasks compete for the drafter’s limited representational capacity. KV reuse removes one of these responsibilities by providing the pre-computed key/value pairs directly, concentrating all capacity on query estimation. Empirically, this projection gap is observable: directly reusing target KV substantially outperforms a variant in which the drafter must derive KV from hidden states via a learned projection (Section D, “Hidden →KV cross-projection”). 
+
+2.4. Comparing the Two Error Regimes 
+
+Under hidden-state reuse, we denote the draft model’s prediction error at step 𝑘 by E (𝑘 ) 
+
+> HS
+
+, which can be roughly decomposed into two coupled sources: 
+
+E (𝑘 ) 
+
+> HS
+
+≈ Ecomp 
+
+|{z} 
+
+> compression loss
+
++ E (𝑘 )
+
+> drift
+
+|{z}  
+
+> recursive drift
+> .
+
+(5) The first term Ecomp captures the information loss induced by the target model’s attention aggregation. It is already present at 𝑘 =1 and does not depend on the capacity or quality of the draft model. The second term E (𝑘 )
+
+> drift
+
+captures the accumulated mismatch between the target and draft hidden states as the draft model recursively conditions on its own predictions, and therefore increases with 𝑘 . These two sources are coupled because the compressed target hidden states provide the initial condition for draft recursion, so any information discarded by aggregation can propagate and be amplified through subsequent drift. Train-inference mismatch via TTT primarily targets E (𝑘 )
+
+> drift
+
+, but cannot reduce Ecomp , since this compression occurs inside the target model. 
+
+> 5When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Under KV reuse, the compression component is reduced in the simplified view behind Equation 3, because no prior aggregation discards information before the draft model sees it. The dominant challenge then becomes 
+
+E𝑞 , the draft model’s ability to produce an effective query. This shifts the difficulty from an information-recovery problem (disentangling a lossy compression) to a function-approximation problem (estimating future target queries), while keeping the underlying key/value pairs available. The practical takeaway is therefore simple: 
+
+KV reuse can preserve more of the relevant prefix information, but it helps only if the drafter can form useful future queries from a limited depth and training signal. 
+
+2.5. KV-Reuse Hypothesis 
+
+The preceding analysis suggests a simple hypothesis: because the KV cache preserves token-level prefix information before attention aggregation, KV reuse should provide a more robust signal than hidden-state reuse for long-range speculative drafting. At the same time, exploiting this signal requires the drafter to estimate useful future queries, which may introduce new bottlenecks. This hypothesis leads to three testable predictions that guide the experiments in Sections 3–4: 
+
+Prediction 1 Long-range advantage. KV reuse should degrade more gracefully than hidden-state reuse as the speculative step 𝑘 increases. As 𝑘 grows, the future query 𝑞 𝑡 +𝑘 diverges further from the current query 𝑞 𝑡 .Consequently, the hidden-state compression, which is specifically tailored to 𝑞 𝑡 , becomes increasingly prone to discarding information required by 𝑞 𝑡 +𝑘 . KV reuse sidesteps this mismatch, and its relative advantage should therefore be most visible at later steps ( 𝑘 ≥ 3). 
+
+Prediction 2 Query-estimation bottleneck. The benefit of KV reuse depends on how well the draft model can estimate 𝑞 ′. A very shallow drafter whose queries are linear projections of input embeddings will underperform because it lacks the depth to approximate target queries, which are produced by many layers of nonlinear transformation. 
+
+Prediction 3 Short-range disadvantage. At 𝑘 =0 or 𝑘 =1, hidden-state reuse may still be preferable: Ecomp 
+
+is small when the information relevant to the next token is also the most attended, and hidden states carry richer semantic content than raw input embeddings fed to a KV-based drafter. If all three predictions hold, the practical implication is that KV reuse is most valuable when combined with hidden-state reuse in a hybrid design, and that the training pipeline must provide enough capacity and a gradient signal for the draft model to learn effective queries. 
+
+# 3. KVShot: Testing the KV-Reuse Hypothesis 
+
+This section reports the experimental study built on the KVShot framework, as illustrated in Figure 3. Through-out this section, KVShot refers to the overall diagnostic setup rather than to a single model; we refer to the specific model families as KV-only drafters and hybrid drafters .
+
+3.1. Experimental Setup Target model and data. All experiments use Qwen3-8B (Qwen Team et al., 2025) as the target model. Initial ablations (Sections 3.2–3.4) train on ShareGPT (ShareGPT, 2023) ( ∼70k samples, 3 epochs) for fast iteration. The end-to-end evaluation in Section 3.5 scales up to 280k samples (ShareGPT + UltraChat) with target-model–regenerated responses. 
+
+Training. We implement the experiments on top of SpecForge (Li et al., 2025a) and train all drafters with the autoregressive test-time training (TTT) objective used by EAGLE-3 (Li et al., 2025c), which aligns training with inference-time hidden-state drift. 
+
+Metrics. We report step-wise draft acceptance rates 𝛼 𝑘 (𝑘 = 0, . . . , 6) and the expected mean accepted tokens 
+
+MAT = 1 + Í𝐾 −1
+
+> 𝑘 =0
+
+Î𝑘 𝑗 =0 𝛼 𝑗 . For the end-to-end evaluation, we additionally report the MAT measured with the HuggingFace speculative decoding pipeline using a draft tree configuration of (8, 10 , 60 ).
+
+Baseline. The primary baseline is a 1-layer EAGLE-3 drafter trained under the same setting as each KV-based variant. 
+
+> 6When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+(a) KV -Only Reuse  
+
+> outputs
+> Cross Attention
+> Add & Norm
+> Feed Forward
+> Add & Norm
+> input_emb
+> input_ids target_kv *4
+
+(b) Hybrid Reuse        
+
+> outputs
+> input_ids
+> input_emb
+> hidden
+> proj_hidden
+> kvcache
+> proj_kv
+> Self -Attention Cross -Attention
+> Gated -Fusion
+> Add & Norm
+> Feed Forward
+> Add & Norm
+> n
+> ᵢoᵢ
+> Gated Delta Rule
+> hᵢ= n ᵢ+ g ᵢ⊙WΔᵢ
+> n
+> ᵢ
+> Feed
+> Forward
+> g
+> ᵢ
+> o
+> ᵢ
+
+−
+
+> Δᵢ
+> W
+
+Figure 3 | KV Reuse architectures in KVShot . (a) KV-only reuse injects the target model’s KV cache into the drafter through cross-attention, allowing the drafter to directly attend to token-wise prefix representations. (b) Hybrid reuse combines hidden-state reuse with KV reuse: the hidden pathway provides the main draft representation, while the KV pathway supplies a gated delta correction through cross-attention. The gated delta rule adaptively controls how much KV-derived information is fused into the hidden representation. Table 1 | KV-only reuse ablations (1-layer drafter, ShareGPT training). All rows except the EAGLE-3 baseline receive no target hidden states. 𝛼 𝑘 denotes the draft acceptance rate at step 𝑘 . ‘Retention’ denotes the long-range retention ratio 𝛼 6/𝛼 0.
+
+Method 𝛼 0 𝛼 3 𝛼 6 Retention MAT No target info 0.237 0.237 0.236 99.6% 1.31 Head concat 0.489 0.332 0.305 62.4% 1.78 Linear projection 0.488 0.379 0.354 72.5% 1.83 Proj + RoPE fix 0.494 0.381 0.353 71.5% 1.84 EAGLE-3 (baseline) 0.638 0.511 0.469 73.5% 2.37 
+
+3.2. KV-Only Reuse: Does Re-attention Help? Design. As shown in Figure 3 (a), we replace the hidden-state input entirely and inject the target KV cache into the draft model’s attention. We compare two injection strategies for handling multi-layer target KV: ① head concatenation , which expands draft KV heads by a factor of 𝐿 𝑠 and concatenates the KV from 𝐿 𝑠 sampled target layers; and ② linear projection , which maps the concatenated multi-layer KV back to a single-layer representation via learned matrices 𝑊 proj  
+
+> 𝐾
+
+, 𝑊 proj  
+
+> 𝑉
+
+∈ ℝ𝑑 kv ×𝐿 𝑠 ·𝑑 kv . The linear projection destroys positional information already encoded via RoPE; ③ we test a variant that re-applies RoPE after projection. 
+
+Results. Table 1 shows the results. Three findings stand out. (1) Target KV provides a clear signal: removing it entirely (“No target info”) drops MAT from 1.84 to 1.31. (2) Linear projection substantially outperforms head concatenation (MAT 1.83 vs. 1.78), suggesting that forcing a single query to attend across 𝐿 𝑠 disjoint KV spaces is too difficult for a single-layer drafter. (3) Re-applying RoPE after projection yields only a marginal gain (1.84 vs. 1.83), suggesting that positional corruption is not the dominant performance bottleneck. Despite these improvements, all KV-only variants remain far below the EAGLE-3 baseline (MAT 2.37). In particular, 𝛼 0 never exceeds 0.50, versus 0.64 for EAGLE-3. This is consistent with Prediction 3 from Section 2.5: at short range, hidden states carry richer semantic content than the raw input embeddings that a KV-only drafter must rely on. At the same time, the gap between “No target info” and the KV-reuse variants show that target KV does matter, which motivates the next test of Prediction 2 : whether better query 
+
+> 7When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Table 2 | Effect of drafter depth on KV-only reuse (ShareGPT training). ‘Retention’ denotes the long-range retention ratio 𝛼 6/𝛼 0. The EAGLE-3 baseline uses 1 layer with hidden-state reuse.                                     
+
+> Drafter Layers 𝛼 0𝛼 3𝛼 6Retention MAT KV-only 10.494 0.381 0.353 71.5% 1.84 KV-only 20.594 0.497 0.463 77.9% 2.23 KV-only 30.609 0.518 0.487 80.0% 2.31 KV-only 40.614 0.527 0.495 80.6% 2.34 EAGLE-3 10.638 0.511 0.469 73.5% 2.37
+
+estimation can unlock more of that signal. The retention column should therefore be read together with the absolute acceptance rates: the nearly flat but uniformly low “No target info” curve yields a nominal 99.6% retention, yet still performs much worse overall. 
+
+3.3. Depth Scaling: Is Query Estimation the Bottleneck? Design. This subsection directly tests Prediction 2 from Section 2.5: KV reuse should help only if the draft model can estimate useful queries. A 1-layer drafter’s queries are linear projections of input embeddings and lack the depth to approximate target queries. We therefore progressively increase the drafter from 1 to 4 layers, all using the linear-projection injection with RoPE re-application. 
+
+Results. Table 2 supports query estimation as a major bottleneck. Moving from 1 to 2 layers produces the largest single gain ( ΔMAT = +0.39 ), because the second layer gives the drafter a context-aware query rather than a linear transform of the input embedding. Returns diminish rapidly: 3 and 4 layers add only +0.08 
+
+and +0.03 respectively. Even a 4-layer KV-only drafter (MAT 2.34) only approaches, but does not exceed, the 1-layer EAGLE-3 baseline (MAT 2.37)—at significantly higher drafting cost. This diminishing-return pattern could partly reflect optimization difficulty in deeper KV-only drafters rather than a pure capacity limit. Still, the sharp jump from 1 to 2 layers strongly suggests that giving the drafter enough depth to form a context-aware query is a major part of the bottleneck. The retention column makes the long-range pattern more explicit. As depth increases, the KV-only retention ratio 𝛼 6/𝛼 0 rises from 71.5% to 80.6%, eventually exceeding the EAGLE-3 baseline (73.5%). This is exactly the behavior anticipated by Prediction 1: once query estimation is strong enough, KV reuse degrades less severely across speculative steps even if its short-range accuracy still trails hidden-state reuse. Notably, at 𝑘 =6, the 4-layer KV-only drafter (0.495) does surpass EAGLE-3 (0.469), supporting the long-range advantage anticipated by Prediction 1, while at 𝑘 =0 it remains below EAGLE-3 (0.614 vs. 0.638), as anticipated by Prediction 3. These two effects roughly cancel in the aggregate MAT. In other words, the depth-scaling study supports all three predictions together: better query estimation helps, KV reuse becomes more competitive at long range, and hidden-state reuse still retains the short-range edge. 
+
+3.4. Hybrid Reuse: Can KV Complement Hidden States? 
+
+The KV-only experiments now resolve the prediction pattern from Section 2.5 more clearly. Prediction 1 
+
+appears at long range, where KV reuse becomes more competitive. Prediction 3 appears at short range, where hidden-state reuse remains stronger. If both effects are real, the natural next step is a hybrid drafter that keeps the hidden-state anchor for early steps and lets KV reuse provide a correction at a longer range. 
+
+3.4.1. Gated Delta Rule 
+
+As shown in Figure 3 (b), we augment the EAGLE-3 self-attention path with a parallel cross-attention path to target KV, merged via a gated delta rule. The design intuition is simple: the hidden-state path should preserve the strong short-range behavior of EAGLE-3, while the KV path should contribute a correction when 
+
+> 8When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Table 3 | Hybrid drafter results (1-layer drafter, ShareGPT training). “Cross-only” removes the self-attention output from the forward pass; the underlying projections are still inherited from the EAGLE-3 checkpoint when applicable. ‘Retention’ denotes the long-range retention ratio 𝛼 6/𝛼 0.                                    
+
+> Method Init 𝛼 0𝛼 3𝛼 6Retention MAT EAGLE-3 –0.638 0.511 0.469 73.5% 2.37 Hybrid random 0.650 0.527 0.490 75.4% 2.44 Hybrid EAGLE-3 ckpt 0.665 0.553 0.514 77.3% 2.54 Cross-only random 0.634 0.499 0.450 71.0% 2.34 Cross-only EAGLE-3 ckpt 0.637 0.495 0.442 69.4% 2.35
+
+longer-range re-attention becomes useful. Given the draft token representation 𝑥 𝑖 , we compute:  
+
+> 𝑛 𝑖
+
+= SelfAttn (𝑥 𝑖 ), (EAGLE-3 path) (6)  
+
+> 𝑜 𝑖
+
+= CrossAttn (𝑥 𝑖 , M𝑖 ), (KV path) (7) where M𝑖 contains the target KV cache for verified prefix tokens and draft-generated KV for subsequent positions. The cross-attention output is treated as a correction:  
+
+> Δ𝑖
+
+= 𝑜 𝑖 − 𝑛 𝑖 . (8) A shared gate controls how much of this correction is applied:  
+
+> 𝑔 𝑖
+
+= 𝜎 ©«
+
+> 𝑊 𝑔
+
+
+
+> 𝑛 𝑖
+> 𝑜 𝑖
+> Δ𝑖
+
+
+
++ 𝑏 𝑔 
+
+ª®¬  
+
+> ,ℎ𝑖
+
+= 𝑛 𝑖 + 𝑔 𝑖 ⊙ 𝑊 Δ Δ𝑖 , (9) where 𝜎 is the sigmoid function and 𝑊 𝑔 , 𝑏 𝑔 are shared across all draft steps. When 𝑔 𝑖 ≈ 0, the model reduces to standard EAGLE-3; when 𝑔 𝑖 is large, the cross-attention correction shifts the representation toward what re-attention to the target KV suggests. This design anchors short-range prediction on the self-attention branch while allowing the cross-attention branch to act as a long-range correction term. The model can be trained from random initialization or warm-started from an existing EAGLE-3 checkpoint. In the latter case, the self-attention branch and all shared modules (input projection, MLP, layer norms) inherit pre-trained weights, while the newly added cross-attention projections, the gate, and the delta projection are randomly initialized. The Cross-only variant follows the same initialization scheme but removes the self-attention output from the forward pass entirely; it still loads the EAGLE-3 query/key/value/output projections and the MLP, so the only architectural difference from the hybrid drafter is that 𝑛 𝑖 is omitted when forming ℎ𝑖 .
+
+3.4.2. Results 
+
+Table 3 provides the first clear positive step-wise result in this study. The hybrid drafter warm-started from an EAGLE-3 checkpoint reaches MAT 2.54, exceeding the EAGLE-3 baseline (2.37) by +0.17 . Improvements are visible across all steps: 𝛼 0 rises from 0.638 to 0.665 ( +4.2% ), and 𝛼 6 from 0.469 to 0.514 ( +9.6% ), suggesting that the KV correction is especially helpful at longer range. The retention ratio makes the same pattern explicit: it rises from 73.5% for EAGLE-3 to 77.3% for the checkpoint-initialized hybrid drafter. Two additional findings are notable. (1) Checkpoint initialization matters: warm-starting from an EAGLE-3 checkpoint (MAT 2.54) significantly outperforms random initialization (2.44), suggesting that a strong self-attention anchor accelerates the learning of the cross-attention correction. (2) The self-attention anchor is essential: removing it (“Cross-only”) drops MAT to 2.34–2.35, below the EAGLE-3 baseline, even though the underlying projections are still inherited from the EAGLE-3 checkpoint. This suggests that cross-attention alone cannot replace the hidden-state pathway, and supports the gated delta design in which KV information contributes as a correction rather than a replacement. This is exactly the hybrid implication suggested by the three predictions in Section 2.5: KV reuse helps most when it complements hidden-state reuse instead of trying to replace it. 
+
+> 9When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Table 4 | End-to-end evaluation (Qwen3-8B, 280k training samples, HF-measured MAT). The hybrid drafter uses the gated delta rule.      
+
+> Setting HF MAT EAGLE-3 existing ckpt 4.43 EAGLE-3 train from scratch 4.76 EAGLE-3 train from ckpt 5.01 Hybrid train from ckpt 5.04
+
+3.5. End-to-End Evaluation: Does the Gain Survive Overhead? 
+
+The step-wise acceptance improvements in Table 3 suggest that the predictions from Section 2.5 are broadly correct at the per-step level. The practical question, however, is whether those validated step-wise effects survive once training is scaled up and drafting overhead is included in an end-to-end proxy. We therefore scale up training in two ways. The dataset grows from ∼70k to 280k samples (ShareGPT + UltraChat), and target responses are regenerated by Qwen3-8B itself so that the training distribution matches the inference distribution. Evaluation uses the HuggingFace speculative decoding pipeline with a draft tree of shape (8, 10 , 60 ) (depth 8, top-𝑘 at each layer 10, total ≤ 60 candidate tokens). In this section, we treat HF-measured MAT as our primary end-to-end proxy rather than as a direct wall-clock throughput measurement. Table 4 gives the central negative result of this study. In the controlled comparison (both trained from the same checkpoint), the hybrid drafter increases HF-measured MAT only from 5.01 to 5.04 ( +0.6% ). Our profiling further indicates that the additional cross-attention path introduces roughly 5–10% extra drafting latency. Taken together, these numbers do not support a meaningful end-to-end speedup claim in the current pipeline, and suggest that any wall-clock gain would be marginal at best. The KV gain shrinks from +0.17 MAT in the step-wise evaluation to +0.03 HF MAT in the end-to-end proxy, likely because several factors compound in the end-to-end setting. First, the EAGLE-3 baseline itself benefits substantially from the larger, regenerated dataset (MAT rising from 4.43 on the existing checkpoint to 5.01 
+
+when retrained). This suggests that part of what the gated KV path was correcting at a small scale is also recoverable by giving the hidden-state baseline more and better-aligned training data. Second, HF MAT is computed under tree verification with (8, 10 , 60 ), which already exploits multiple candidate paths and tends to compress the visible difference between drafters whose step-wise curves differ mildly. We do not view either factor as fully explaining the shrinkage, but together they make a small end-to-end gap consistent with a non-trivial step-wise gap. This result does not invalidate the information-preservation analysis of Section 2: the step-wise improvements in Table 3 show that adding a KV correction path can help long-range prediction. Rather, it indicates that the current autoregressive TTT pipeline cannot exploit this signal efficiently enough to overcome the added cost. In other words, validating Predictions 1–3 are not yet sufficient for an end-to-end speedup claim. The next section analyzes the deeper pipeline-level causes of this shrinkage. 
+
+# 4. Why Does Current Autoregressive TTT Fit KV Reuse Poorly? 
+
+The experiments in Section 3 largely validate the step-wise predictions from Section 2.5. KV-only reuse becomes relatively more competitive at later draft steps ( Prediction 1 ), deeper KV-only drafters improve substantially (Prediction 2 ), and hidden-state reuse retains the short-range edge ( Prediction 3 ). The remaining question is why these step-wise effects still collapse into only a marginal end-to-end gain under the current pipeline. In this section, we analyze three pipeline-level bottlenecks that together account for that gap, and discuss what they imply for future work. 
+
+4.1. Query Estimation Is Harder Than It Appears 
+
+The information-preservation analysis in Section 2 isolates query estimation, denoted by E𝑞 , as the main remaining difficulty for KV reuse. In principle this is a pure function-approximation problem. In practice, however, the target model’s queries at position 𝑡 +𝑘 are the output of 𝐿 layers of nonlinear transformation over 
+
+> 10 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+the full prefix. A shallow draft model with one or two layers has fundamentally limited capacity to approximate these queries. The depth-scaling experiments in Section 3.3 provide direct evidence: moving from 1 to 2 layers produces a large MAT jump ( +0.39 ), but even 4 layers cannot match a 1-layer EAGLE-3 baseline. This means that accurate query estimation requires significantly more model capacity than accurate next-hidden-state prediction, because the drafter must replicate the multi-layer compositional structure that produces target queries, rather than predicting one layer’s output from the previous layer’s hidden state. 
+
+4.2. Sparse Optimization of Draft-Side KV Projections 
+
+A second, less obvious bottleneck lies in the training dynamics of the draft model’s own KV projections ( 𝑊 cross 
+
+> 𝐾
+
+and 𝑊 cross  
+
+> 𝑉
+
+in Equation 7). In plain terms, most of the KV cache seen during training is copied directly from the target model, so the draft-side KV pathway is updated by only a small number of draft tokens. Under autoregressive TTT, each training step processes a sequence of 𝐾 draft tokens. For the cross-attention branch, only the draft-generated portion of the KV cache exercises 𝑊 cross  
+
+> 𝐾
+
+and 𝑊 cross  
+
+> 𝑉
+
+. The prefix portion is copied from the target and does not backpropagate through these parameters. In practice, the number of draft tokens (𝐾 , typically ≤ 7) is tiny relative to the full prefix length. As a result, only a small fraction of the attention computation contributes gradient to the draft-side KV projections. The optimization is therefore sparse and unbalanced: the query projection 𝑊 𝑄 receives dense gradient from every position, whereas the KV projections are updated only by the few draft positions. We attempted to mitigate this by scaling the KV-projection gradient by 50 ×, but observed no meaningful improvement (MAT 2.21 vs. 2.18 for the same setting without scaling; see Appendix D for full results). This suggests that the problem is not the gradient magnitude per se but the diversity of training signal: the same few draft tokens patterns are repeatedly used to train the KV pathway, preventing it from generalizing. 
+
+4.3. Gate-Induced Gradient Starvation 
+
+A third, distinct bottleneck appears in the training dynamics of the hybrid drafter itself. Recall that the fusion output (Equation 9) adds a gated correction 𝑔 𝑖 ⊙ 𝑊 Δ Δ𝑖 to the self-attention output 𝑛 𝑖 . In the “EAGLE-3 ckpt” variant, the self-attention branch is warm-started with strong pretrained weights, while the cross-attention projections, the gate, and 𝑊 Δ are randomly initialized. In this configuration, we consistently observe a characteristic trajectory of the mean gate value ¯𝑔 = 𝔼 [ 𝟙 ⊤𝑔 𝑖 /𝑑 ] over training, shown in Figure 4. The trajectory is consistent with a gated-residual optimization failure mode. At initialization the cross-attention branch is random, so its output is near-noise relative to the pretrained 𝑛 𝑖 . The fastest local direction for reducing the loss is therefore to push ¯𝑔 toward zero, effectively silencing the cross-attention branch and recovering the EAGLE-3 baseline. Once the gate is closed, however, the gradient flowing through the cross-attention branch is itself scaled by 𝑔 𝑖 , so the randomly initialized projections receive only a weak training signal. This creates a self-reinforcing low-injection state. The gate does not reopen until cross-attention learns something useful, and cross-attention struggles to learn while the gate stays small. The slow, noisy recovery from 0.02 to 0.10 visible in Figure 4 is what this starvation looks like in practice. Two qualifications are worth stating explicitly. First, a small ¯𝑔 is not the same as “the cross-attention branch is ignored”: ¯𝑔 averages over element-wise gates, and the positive MAT gap of +0.17 over EAGLE-3 in Table 3 shows that even ¯𝑔 ≈ 0.1 is enough to inject a useful correction at the ShareGPT-70k scale. Second, gate starvation on its own does not fully explain the small end-to-end gap in Table 4, which is also shaped by the stronger EAGLE-3 baseline under regenerated 280k data and by tree verification compressing visible step-wise differences. Nevertheless, the trajectory identifies a third pipeline-level bottleneck specific to architectures that fuse a warm-started and a randomly initialized branch through a learned gate, a limitation that cannot be resolved by improving query estimation or densifying the KV-projection gradient. 
+
+4.4. Implications for Future Training Pipelines 
+
+All three bottlenecks ultimately trace back to the same root cause. The autoregressive TTT pipeline generates draft tokens one at a time. That sequential structure limits the depth of query computation and restricts the 
+
+> 11 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+0 10000 20000 30000 40000 50000 60000 70000 
+
+## Training step 
+
+0.0 
+
+0.1 
+
+0.2 
+
+0.3 
+
+0.4 
+
+0.5 
+
+0.6 
+
+> Mean gate value  g
+
+Per-step 
+
+EMA (smoothed) 
+
+Figure 4 | Gate-induced gradient starvation. Mean gate value ¯𝑔 of the warm-started hybrid drafter (EAGLE-3 ckpt, ShareGPT, 70k samples) over training. From the initial value ¯𝑔 ≈ 0.5 (sigmoid + random 𝑊 𝑔 , 𝑏 𝑔 ), the gate collapses to ¯𝑔 ≈ 0.02 within the first few thousand steps and then slowly recovers to ¯𝑔 ≈ 0.10 over the remaining 
+
+∼60k steps. The light line is per-step, the dark line is an EMA ( 𝛼 =0.02 ). number of tokens available to train the draft-side KV pathway. Moreover, in gated fusion architectures, it severely weakens the gradient received by the cross-attention branch during the critical early phase of training. Recent work on non-autoregressive drafting suggests a potential resolution. DFlash (Chen et al., 2026) replaces autoregressive drafting with a block diffusion adapter that predicts an entire block of tokens in parallel. These design choices are consistent with addressing at least the first two bottlenecks above, though we have not verified that hypothesis through a controlled comparison here: 
+
+• A deeper draft model (5 layers in DFlash) provides the capacity for more accurate query estimation, while mask-token parallelism amortizes the additional inference cost. 
+
+• Block-wise training generates many draft tokens per step, so the KV projections receive a dense gradient from a diverse set of positions rather than the sparse signal of autoregressive TTT. Our findings are consistent with this possibility. The diagnostic value of KVShot is precisely in pinpointing 
+
+where the current pipeline falls short. The problem is not that the predictions in Section 2.5 fails at the step-wise level; those predictions are mostly supported. The problem is that the training setup cannot turn that step-wise advantage into an efficient end-to-end system. We therefore view block-wise training pipelines as a promising next direction for making KV reuse a practical option in speculative decoding. 
+
+# 5. Related Work 
+
+Speculative decoding. Speculative decoding was introduced concurrently as a lossless acceleration strategy that uses a lightweight draft process to propose multiple future tokens for parallel verification by a target model (Leviathan et al., 2023; Chen et al., 2023). Subsequent systems work substantially expanded this design space. SpecInfer organizes draft candidates into token trees for parallel verification (Miao et al., 2024), and Sequoia improves scalability and hardware adaptation through tree optimization and hardware-aware scheduling (Chen et al., 2025). Draft & Verify studies self-speculative decoding, where the target model drafts and verifies using its own intermediate layers (Zhang et al., 2024). SWIFT extends this line to on-the-fly self-speculative decoding (Xia et al., 2025), and KNN-SSD further studies dynamic self-speculative decoding through nearest-neighbor layer set optimization (Song et al., 2026). PEARL studies adaptive draft-length control (Liu et al., 2025), TALON builds confidence-aware token trees (Liu et al., 2026b), and SpecBranch introduces rollback-aware branch parallelism for hybrid drafting (Shen et al., 2026b). Retrieval-based variants such as LogitSpec and Double 
+
+> 12 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+further broaden the design space by using retrieved candidates or double retrieval parallelism to accelerate speculation (Liu et al., 2026a; Shen et al., 2026a). HIPPO further extends parallel speculative decoding to video large language models through a holistic-aware design (Lv et al., 2026). Parallel exact alternatives such as Lookahead Decoding remove the auxiliary draft model altogether, trading additional computation per step for fewer sequential decoding steps (Fu et al., 2024). A recent survey summarizes this broader landscape (Xia et al., 2024). 
+
+Drafters that reuse target hidden states. A second line of work focuses on the drafter itself. Medusa augments the target model with multiple decoding heads to predict several future tokens in parallel (Cai et al., 2024), and multi-token prediction (MTP) adopts a similar objective at training time and is now widely deployed as an inference-time drafter in production LLMs (Gloeckle et al., 2024; DeepSeek-AI, 2024). EAGLE (Li et al., 2025b) shifts drafting from token prediction to hidden-state prediction, showing that reusing internal target-model features can substantially reduce drafting cost, and EAGLE-2 extends this line with dynamic draft trees (Li et al., 2024). HASS addresses the resulting train-decode inconsistency through harmonized objectives and context alignment (Zhang et al., 2025), and EAGLE-3 further integrates test-time training into the drafter and fuses multi-layer features (Li et al., 2025c). 
+
+Drafters that reuse target KV cache. A smaller line of work has the drafter consume the target’s KV cache directly through a cross-attention sub-layer. GLIDE+CAPE (Du et al., 2024) inserts cross-attention into a shallow drafter so that draft queries attend to the target’s top-layer KV from the previous verification block, and trains the drafter from scratch with standard teacher-forced cross-entropy. LongSpec (Yang et al., 2026) adopts a similar cross-attention-to-target-KV design, motivated by long-context inference: because the target’s KV is stored anyway, a draft that re-attends to it keeps drafter memory bounded as context grows, and is paired with anchor-offset position indices and flash noisy training to handle long prefixes. These works establish that cross-attention-style KV reuse is a practical drafter design. Our work differs from both in three ways: (i) the focus is on long-range decay and information preservation rather than low-overhead drafting (GLIDE) or long-context memory efficiency (LongSpec); (ii) we run a controlled head-to-head between KV reuse and hidden-state reuse under a single training setup, including hybrid designs that combine both signals, rather than taking KV reuse as a fixed design choice; and (iii) we evaluate KV-based drafters under the autoregressive TTT objective used by EAGLE-3, rather than standard teacher-forced training, which is what reveals the training-pipeline-level bottlenecks discussed in Section 4. 
+
+Beyond autoregressive drafting. Our analysis of why KV reuse struggles under autoregressive TTT is related to recent non-autoregressive and block-wise drafting directions. DFlash (Chen et al., 2026) replaces autoregressive drafting with a block diffusion adapter conditioned on target hidden features, and argues that parallel block drafting bypasses the gradient-sparsity problems of autoregressive TTT pipelines. Our empirical findings are consistent with this view: they indicate that the main bottleneck for KV reuse lies at least as much in the training setup as in the choice of reused representation. 
+
+# 6. Conclusion 
+
+This paper investigates whether reusing the target model’s KV cache can alleviate long-range decay in speculative decoding better than the prevailing hidden-state reuse paradigm. We approach the question from two directions: an context information preservation analysis that offers a conceptual breakdown of the two reuse approaches, and a systematic experimental study on Qwen3-8B using the KVShot framework. Our analysis suggests that hidden-state reuse can be viewed as introducing a compression loss—information weakened by the target model’s own attention is difficult for a downstream drafter to recover—whereas KV reuse can preserve access to the full set of key/value pairs through re-attention. In the simplified KV-reuse view, the dominant difficulty shifts toward query estimation, a function approximation problem rather than an information-recovery problem. The experiments support this picture in a nuanced way. KV-only drafters become relatively more competitive at longer draft steps, and a hybrid drafter that combines KV and hidden-state signals improves draft acceptance over an EAGLE-3 baseline (MAT 2.54 vs. 2.37). However, the end-to-end proxy remains small: HF-measured MAT rises only from 5.01 to 5.04, while drafting latency increases by 5–10%. 
+
+> 13 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+We trace this gap to three bottlenecks specific to autoregressive TTT: the difficulty of query estimation for shallow drafters, the sparse gradient signal available to draft-side KV projections, and a gate-induced gradient starvation effect in warm-started hybrid drafters, where the learned gate closes early to suppress the randomly-initialized branch and then struggles to reopen. All three stem from the sequential, token-by-token nature of autoregressive drafting. Block-wise training pipelines, which generate many draft tokens in parallel, may be a better fit for these limitations and deserve direct evaluation in future KV-aware drafters. The diagnostic value of this work lies in separating what information is available from whether the training pipeline can learn to use it. KV cache does carry a useful signal for long-range drafting; the challenge is building training setups that can exploit it efficiently. 
+
+> 14 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+# References 
+
+Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. Medusa: Simple llm inference acceleration framework with multiple decoding heads. In Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org, 2024. URL https://proceedings. mlr.press/v235/cai24b.html .Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. Accelerating large language model decoding with speculative sampling, 2023. URL https://arxiv.org/ abs/2302.01318 .Jian Chen, Yesheng Liang, and Zhijian Liu. Dflash: Block diffusion for flash speculative decoding. arXiv preprint arXiv:2602.06036 , 2026. URL https://arxiv.org/abs/2602.06036 .Zhuoming Chen, Avner May, Ruslan Svirschevski, Yuhsun Huang, Max Ryabinin, Zhihao Jia, and Beidi Chen. Sequoia: Scalable, robust, and hardware-aware speculative decoding, 2025. URL https://arxiv.org/ abs/2402.12374 .DeepSeek-AI. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 , 2024. URL https://arxiv. org/abs/2412.19437 .Cunxiao Du, Jing Jiang, Yuanchen Xu, Jiawei Wu, Sicheng Yu, Yongqi Li, Shenggui Li, Kai Xu, Liqiang Nie, Zhaopeng Tu, and Yang You. Glide with a cape: a low-hassle method to accelerate speculative decoding. In 
+
+Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org, 2024. Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. Break the sequential dependency of llm inference using lookahead decoding. In Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org, 2024. URL https://proceedings.mlr.press/v235/fu24a.html .Fabian Gloeckle, Badr Youbi Idrissi, Baptiste Rozière, David Lopez-Paz, and Gabriel Synnaeve. Better & faster large language models via multi-token prediction, 2024. URL https://arxiv.org/abs/2404.19737 .Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In Proceedings of the 40th International Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research , pp. 19274–19286. PMLR, 23–29 Jul 2023. URL https://proceedings.mlr.press/ v202/leviathan23a.html .Shenggui Li, Yikai Zhu, Chao Wang, Fan Yin, Shuai Shi, Yubo Wang, Yi Zhang, Yingyi Huang, Haoshuai Zheng, and Yineng Zhang. Specforge: Train speculative decoding models effortlessly. https://github.com/ sgl-project/specforge , 2025a. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. EAGLE-2: Faster inference of language models with dynamic draft trees. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing ,pp. 7421–7432, Miami, Florida, USA, November 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.emnlp-main.422. URL https://aclanthology.org/2024.emnlp-main.422/ .Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle: Speculative sampling requires rethinking feature uncertainty, 2025b. URL https://arxiv.org/abs/2401.15077 .Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle-3: Scaling up inference acceleration of large language models via training-time test, 2025c. URL https://arxiv.org/abs/2503.01840 .Tianyu Liu, Yun Li, Qitan Lv, Kai Liu, Jianchen Zhu, Winston Hu, and Xiao Sun. Pearl: Parallel speculative decoding with adaptive draft length, 2025. URL https://arxiv.org/abs/2408.11850 .Tianyu Liu, Qitan Lv, Hao Li, Xing Gao, Xiao Sun, and Xiaoyan Sun. Logitspec: Accelerating retrieval-based speculative decoding via next next token speculation, 2026a. URL https://arxiv.org/abs/2507. 01449 .Tianyu Liu, Qitan Lv, Yuhao Shen, Xiao Sun, and Xiaoyan Sun. Talon: Confidence-aware speculative decoding with adaptive token trees, 2026b. URL https://arxiv.org/abs/2601.07353 .
+
+> 15 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Qitan Lv, Tianyu Liu, Wen Wu, Xuenan Xu, Bowen Zhou, Feng Wu, and Chao Zhang. Hippo: Accelerating video large language models inference via holistic-aware parallel speculative decoding, 2026. URL https: //arxiv.org/abs/2601.08273 .Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, Chunan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna Abhyankar, and Zhihao Jia. Specinfer: Accelerating large language model serving with tree-based speculative inference and verification. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , ASPLOS ’24, pp. 932–949, New York, NY, USA, 2024. Association for Computing Machinery. ISBN 9798400703867. doi: 10.1145/3620666.3651335. URL 
+
+https://doi.org/10.1145/3620666.3651335 .Qwen Team, An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. Qwen3 technical report, 2025. URL https://arxiv.org/abs/2505.09388 .ShareGPT. ShareGPT. https://huggingface.co/datasets/Aeala/ShareGPT_Vicuna_unfiltered ,2023. Yuhao Shen, Tianyu Liu, Junyi Shen, Jinyang Wu, Quan Kong, Li Huan, and Cong Wang. Double: Breaking the acceleration limit via double retrieval speculative parallelism, 2026a. URL https://arxiv.org/abs/ 2601.05524 .Yuhao Shen, Junyi Shen, Quan Kong, Tianyu Liu, Yao Lu, and Cong Wang. Specbranch: Speculative decoding via hybrid drafting and rollback-aware branch parallelism, 2026b. URL https://arxiv.org/abs/2506. 01979 .Mingbo Song, Heming Xia, Jun Zhang, Chak Tou Leong, Qiancheng Xu, Wenjie Li, and Sujian Li. KNN-SSD: Enabling dynamic self-speculative decoding via nearest neighbor layer set optimization. In Vera Demberg, Kentaro Inui, and Lluís Marquez (eds.), Findings of the Association for Computational Linguistics: EACL 2026 , pp. 641–655, Rabat, Morocco, March 2026. Association for Computational Linguistics. ISBN 979-8-89176-386-9. doi: 10.18653/v1/2026.findings-eacl.31. URL https://aclanthology.org/2026. findings-eacl.31/ .Heming Xia, Zhe Yang, Qingxiu Dong, Peiyi Wang, Yongqi Li, Tao Ge, Tianyu Liu, Wenjie Li, and Zhifang Sui. Unlocking efficiency in large language model inference: A comprehensive survey of speculative decoding. 
+
+arXiv preprint arXiv:2401.07851 , 2024. URL https://arxiv.org/abs/2401.07851 .Heming Xia, Yongqi Li, Jun Zhang, Cunxiao Du, and Wenjie Li. Swift: On-the-fly self-speculative decoding for llm inference acceleration, 2025. URL https://arxiv.org/abs/2410.06916 .Penghui Yang, Cunxiao Du, Fengzhuo Zhang, Haonan Wang, Tianyu Pang, Chao Du, and Bo An. Longspec: Long-context lossless speculative decoding with efficient drafting and verification, 2026. URL https: //arxiv.org/abs/2502.17421 . Accepted to ACL 2026. Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen, Gang Chen, and Sharad Mehrotra. Draft& verify: Lossless large language model acceleration via self-speculative decoding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 11263–11282. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.acl-long.607. URL http://dx.doi.org/10. 18653/v1/2024.acl-long.607 .Lefan Zhang, Xiaodan Wang, Yanhua Huang, and Ruiwen Xu. Learning harmonized representations for speculative sampling. In The Thirteenth International Conference on Learning Representations , 2025. URL 
+
+https://openreview.net/forum?id=T9u56s7mbk .
+
+> 16 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+# A. Training Details 
+
+All drafter models are trained using the autoregressive test-time training (TTT) objective of EAGLE-3 (Li et al., 2025c). The target model is Qwen3-8B (Qwen Team et al., 2025) throughout. 
+
+Target KV layers. Unless otherwise noted, the KVShot testbed samples KV cache from 𝐿 𝑠 = 3 uniformly spaced target layers, matching the number of layers fused by EAGLE-3. Section D shows that varying this choice has negligible effect. 
+
+Data. Ablation experiments (Sections 3.2–3.4) train on ShareGPT ( ∼70k samples, 3 epochs). The end-to-end evaluation (Section 3.5) scales to 280k samples (ShareGPT + UltraChat) with responses regenerated by the target model to ensure distributional alignment. 
+
+Evaluation. We compute step-wise acceptance rates 𝛼 𝑘 on a held-out subset. We measure end-to-end MAT using the HuggingFace speculative decoding pipeline with a draft tree configuration of (8, 10 , 60 ).
+
+# B. Gated KV Fusion: Architecture Details 
+
+This section expands on the gated delta fusion design introduced in Section 3.4. 
+
+Input representation. Each draft token’s input 𝑥 𝑖 ∈ ℝ𝑑 follows the EAGLE-3 construction: the input embedding and target hidden states are concatenated and projected. We do not modify this input pathway; all changes are confined to the attention sub-module within the single draft layer. 
+
+Cross-attention memory. The cross-attention branch attends to a mixed memory M𝑖 that changes per draft step. For verified prefix tokens ( 𝑗 ≤ 𝑡 ), M𝑖 contains target KV pairs copied directly from the target model. For subsequent draft positions ( 𝑗 > 𝑡 ), the drafter generates its own KV via learned projections 𝑊 cross  
+
+> 𝐾
+
+and 𝑊 cross  
+
+> 𝑉
+
+.This design mirrors the standard autoregressive KV cache structure: the prefix portion is “free” (no estimation needed), while draft-generated keys and values must be learned. 
+
+Why a gated delta, not a direct sum. A naive residual combination ℎ𝑖 = 𝑛 𝑖 + 𝑜 𝑖 allows the cross-attention branch to override the self-attention output, potentially destroying the short-range accuracy that the EAGLE-3 path provides. The gated delta formulation (Equation 8–Equation 9) instead treats the cross-attention output as a correction : the difference Δ𝑖 = 𝑜 𝑖 − 𝑛 𝑖 is first projected by 𝑊 Δ, then scaled element-wise by a learned gate  
+
+> 𝑔 𝑖
+
+∈ [ 0, 1]𝑑 . When 𝑔 𝑖 ≈ 0, the output collapses to the self-attention path; the cross-attention branch contributes only where the gate deems the correction beneficial. 
+
+Shared gate. The gate parameters 𝑊 𝑔 ∈ ℝ𝑑 ×3𝑑 and 𝑏 𝑔 ∈ ℝ𝑑 are shared across all draft steps. We chose a shared gate over per-step gates for two reasons: (1) the primary question at this stage is whether the gated delta mechanism is effective at all, not whether step-specific gating improves it further; and (2) sharing reduces parameter count and stabilizes training, which matters when the cross-attention branch is randomly initialized. 
+
+Initialization from EAGLE-3 checkpoint. When warm-starting from a pre-trained EAGLE-3 checkpoint, the self-attention branch and all shared modules (input projection, MLP, layer norms) load existing weights directly. The cross-attention projections ( 𝑊 cross  
+
+> 𝑄
+
+, 𝑊 cross  
+
+> 𝐾
+
+, 𝑊 cross  
+
+> 𝑉
+
+, 𝑊 cross  
+
+> 𝑂
+
+), the gate ( 𝑊 𝑔 , 𝑏 𝑔 ), and the delta projection ( 𝑊 Δ)are randomly initialized. This allows the model to begin training from a strong self-attention anchor while gradually learning the cross-attention correction. For the Cross-only variant in Table 3, the EAGLE-3-checkpoint setting uses the same warm-start scheme: the inherited query/key/value/output projections and MLP are loaded from the EAGLE-3 checkpoint, but the self-attention output 𝑛 𝑖 is omitted from the forward pass so that ℎ𝑖 depends only on the cross-attention branch. This isolates the contribution of the hidden-state pathway from the choice of initialization. 
+
+> 17 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Table 5 | Complete step-wise acceptance rates for experiments reported in the main text. Group headings correspond to the main tables.                                                                                                                 
+
+> Method 𝛼 0𝛼 1𝛼 2𝛼 3𝛼 4𝛼 5𝛼 6MAT
+> Pure KV reuse (1-layer, Table 1)
+> No target info .237 .238 .237 .237 .237 .237 .236 1.31 Head concat .489 .393 .353 .332 .320 .311 .305 1.78 Linear projection .488 .425 .396 .379 .368 .360 .354 1.83 Proj + RoPE fix .494 .427 .397 .381 .369 .360 .353 1.84
+> Depth scaling (Table 2)
+> Pure KV 1-layer .494 .427 .397 .381 .369 .360 .353 1.84 Pure KV 2-layer .594 .540 .514 .497 .484 .473 .463 2.23 Pure KV 3-layer .609 .558 .534 .518 .506 .496 .487 2.31 Pure KV 4-layer .614 .565 .542 .527 .515 .505 .495 2.34
+> Gated KV fusion (1-layer, Table 3)
+> Gated KV (scratch) .650 .582 .548 .527 .512 .501 .490 2.44 Gated KV (ckpt) .665 .603 .573 .553 .537 .525 .514 2.54 Cross-only (scratch) .634 .561 .523 .499 .480 .464 .450 2.34 Cross-only (ckpt) .637 .563 .522 .495 .475 .458 .442 2.35
+> Baseline
+> EAGLE-3 (1-layer) .638 .566 .533 .511 .495 .481 .469 2.37
+
+# C. Full Step-wise Acceptance Rates 
+
+Tables 1–3 in the main text report representative checkpoints rather than the full 7-step curves. Table 5 provides the complete 7-step acceptance rates ( 𝛼 0 through 𝛼 6) for all experiments in the main tables. Two patterns become clearer with the full curves. First, the decay profile of the Gated KV (ckpt) model is uniformly above the EAGLE-3 baseline at every step, showing that the improvement is not concentrated at a single step. Second, the Head concat variant decays markedly faster than Linear projection at early steps ( 𝛼 1:0.393 vs. 0.425), indicating that the difficulty of attending across 𝐿 𝑠 disjoint KV spaces manifests immediately rather than only at long range. 
+
+# D. Additional Ablations 
+
+Table 6 collects ablations referenced in the main text but omitted from the main tables. All rows use the 2-layer pure KV drafter with linear projection and RoPE re-application as the baseline (Section 3.3). 
+
+Target KV configuration. Increasing the number of sampled target layers from 3 to 4 yields only a marginal gain (MAT 2.24 vs. 2.23), indicating that the drafter’s bottleneck lies in query estimation rather than in the richness of the KV input. 
+
+Projector architecture. Replacing the linear projector with a two-layer MLP (with or without LayerNorm) slightly hurts performance (MAT 2.20 and 2.19 vs. 2.23). The added expressiveness does not offset the optimization difficulty, consistent with the sparse-gradient analysis in Section 4.2. A more revealing variant— projecting target hidden states into KV space rather than directly reusing pre-computed KV pairs—yields a substantially lower MAT (2.04), suggesting that the pre-computed KV representation itself matters. 
+
+Training regime. Switching from online TTT to offline training—i.e., conditioning on target hidden states without autoregressive drift alignment—reduces MAT from 2.23 to 2.18, indicating that TTT’s drift alignment benefits even KV-based drafters. Scaling the KV-projection gradient by 50 × recovers only a small portion of the gap (MAT 2.21), reinforcing the conclusion from Section 4.2 that the core issue is training signal diversity, not gradient magnitude. QK-Norm produces no measurable change (MAT 2.23). 
+
+> 18 When Hidden States Drift: Can KV Caches Rescue Long-Range Speculative Decoding?
+
+Table 6 | Additional ablations on 2-layer pure KV reuse (ShareGPT training). The first row repeats the 2-layer baseline from Table 2 for reference. ‘Retention’ denotes the long-range retention ratio 𝛼 6/𝛼 0.
+
+Variant 𝛼 0 𝛼 3 𝛼 6 Retention MAT 
+
+Baseline 
+
+2-layer pure KV (online, linear proj) 0.594 0.497 0.463 77.9% 2.23 
+
+Target KV configuration 
+
+4 KV layers (vs. 3) 0.600 0.495 0.460 76.7% 2.24 
+
+Projector architecture 
+
+MLP projector 0.586 0.491 0.458 78.2% 2.20 MLP projector + LayerNorm 0.583 0.491 0.458 78.6% 2.19 Hidden →KV cross-projection 0.558 0.429 0.388 69.5% 2.04 
+
+Training regime 
+
+QK-Norm 0.596 0.498 0.466 78.2% 2.23 Offline TTT 0.582 0.488 0.454 78.0% 2.18 Offline TTT + KV grad scale ( 50 ×) 0.587 0.493 0.459 78.2% 2.21
