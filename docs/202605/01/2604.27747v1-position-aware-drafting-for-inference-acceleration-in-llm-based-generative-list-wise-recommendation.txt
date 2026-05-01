@@ -1,0 +1,836 @@
+Title: Position-Aware Drafting for Inference Acceleration in LLM-Based Generative List-Wise Recommendation
+
+URL Source: https://arxiv.org/pdf/2604.27747v1
+
+Published Time: Fri, 01 May 2026 00:51:50 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+> IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 1
+
+# Position-Aware Drafting for Inference Acceleration in LLM-Based Generative List-Wise Recommendation 
+
+Jiaju Chen ∗,†, Chongming Gao ∗,§, Chenxiao Fan ∗, Haoyan Liu ∗, Qingpeng Cai ‡, Peng Jiang ‡, and Xiangnan He ∗,§∗University of Science and Technology of China, Hefei, China 
+
+†Zhongguancun Academy, Beijing, China 
+
+‡Independent Researcher 
+
+§Corresponding author Email: cjj01@mail.ustc.edu.cn, chongming.gao@gmail.com, simonfan@mail.com, liuhaoyan@ustc.edu.cn, cqpcurry@gmail.com, jp2006@139.com, xiangnanhe@gmail.com 
+
+Abstract —Large language model (LLM)–based generative list-wise recommendation has advanced rapidly, but decoding re-mains sequential and thus latency-prone. To accelerate inference without changing the target distribution, speculative decoding 
+
+(SD) uses a small draft model to propose several next tokens at once and a target LLM to verify and accept the longest prefix, skipping multiple steps per round. In generative rec-ommendation, however, each item is represented by multiple semantic-ID tokens (often with separators), and current drafts typically treat these tokens uniformly. This overlooks two prac-tical facts: (i) a token’s semantics depend on its within-item slot ,and (ii) uncertainty tends to increase with speculation depth .Without modeling these effects, SD’s speedups can be limited. We introduce PAD-Rec (Position-Aware Drafting for generative Recommendation), a lightweight module that augments the draft model with two complementary signals. Item position embeddings 
+
+explicitly encode the within-item slot of each token, strengthening structural awareness. Step position embeddings encode the draft step, allowing the model to adapt to depth-dependent uncertainty and improve proposal quality. To harmonize these signals with base features, we add simple gates—a learnable coefficient for item slots and a context-driven gate for draft steps. The module is trainable, easy to integrate with standard draft models, and adds negligible inference overhead. Extensive experiments on four real-world datasets show up to 3.1 × wall-clock speedup and about 5% average wall-clock speedup gain over strong SD baselines, while largely preserving recommendation quality. Our code is available at https://github.com/Jiaju-Chen/PAD-Rec. 
+
+Index Terms —Generative Recommender Systems, Speculative Decoding, Large Language Models 
+
+I. I NTRODUCTION 
+
+With the rapid rise of large language models (LLMs), their application in generative list-wise recommendation systems has gained significant momentum, particularly in areas like end-to-end recommendation [1]–[3] and conversational recom-mendation [4]. These systems generate personalized item lists by con-structing user profiles and iteratively invoking LLMs in an auto-regressive manner. However, the auto-regressive nature of LLMs results in relatively slow generation speeds, leading to high latency and hindering their application in real-time (a) Schematic of HASS (b) Challenges in GR 
+
+> uncertainty
+
+𝑡 !
+
+𝑓 "
+
+𝑡 #
+
+𝑓 !
+
+𝑡 $
+
+𝑓 #
+
+𝑡 %
+
+𝑓 $
+
+𝑡 &
+
+𝑓 %
+
+Auto−regressive Head 
+
+𝑡 $
+
+𝑓 #
+
+𝑡 %
+
+𝑓 $
+
+𝑡 &
+
+𝑓 %
+
+𝑡 '
+
+𝑓 &
+
+Item 1 
+
+Item 2 
+
+Item 3 
+
+Fig. 1. (a) Schematic of a HASS-style draft when predicting the 4th to 7th tokens. Blue blocks ( t) denote tokens and orange blocks ( f ) denote intermediate features; subscripts index sequence positions. Red outlines in-dicate draft predictions. (b) Challenges in GR: item-structured tokenization and uncertainty that grows with generation depth. 
+
+recommendation scenarios [5]. Therefore, accelerating infer-ence in LLM-based generative recommendation systems has become an urgent issue to address [6], [7]. A prominent line of work for lossless acceleration of autore-gressive LLMs is speculative decoding (SD), which follows a 
+
+draft–then–verify scheme [8]–[11]. A small, compatible draft 
+
+model proposes several future tokens at once (as a candidate block or tree), and the target LLM verifies these candidates in a single batched call. Verification accepts the longest prefix that matches the target distribution; decoding then resumes from that prefix. By committing multiple tokens per target call, SD reduces the number of expensive target invocations while preserving the exact decoding distribution [12], [13]. Building on this paradigm, later studies focus on raising the acceptance rate, which directly improves end-to-end speed. EAGLE [14] enriches the draft input with token embeddings and features (hidden states before the target head), leading to more faithful proposals and higher acceptance; however, its training is single-step , whereas inference drafts multiple steps, creating a train–decode mismatch. HASS [15], as illustrated in Fig. 1 (a), addresses this gap by training the draft to roll  
+
+> arXiv:2604.27747v1 [cs.IR] 30 Apr 2026 IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 2
+
+forward multiple steps , so the training context mirrors the multi-step drafting used at inference. The common goal is clear: keep the draft fast and well-aligned with the target LLM, achieving larger speedups with SD. Yet, even with stronger inputs and multi-step training, directly applying SD to generative list-wise recommendation 
+
+exposes two task-specific gaps that prior SD works—including HASS—do not explicitly resolve. As highlighted in Fig. 1 (b), recommendation outputs are item-structured: each item is emitted as a fixed tuple of K semantic-ID tokens (typically 
+
+K=4 ) [16], [17], corresponding to different codebook levels in RQ-VAE-style representations [18]. We refer to these fixed positions as within-item slots, indexed by 1: K in the semantic-ID tuple. Meanwhile, the autoregressive nature of decoding— together with SD’s “stop at first mismatch” verification—tends to make later draft steps harder to be accepted. Concretely, two challenges arise for the draft model: 
+
+(i) Slot-conditioned semantics are underused. Because each item occupies fixed slots, a token’s semantics depend on its within-item slot; however, existing draft models treat tokens uniformly and do not encode slot identity, weakening intra-item modeling and alignment with the target head. 
+
+(ii) Depth-driven uncertainty is unmanaged. Indepen-dently of the fixed layout, uncertainty often increases with the draft depth: later tokens depend on longer histories (error accumulation) and are more likely to trigger early rejection under SD’s verification. Standard training remains largely step-agnostic, so the draft model does not adapt its proposal strategy or confidence by depth, leading to miscalibration and lower acceptance at deeper positions. To close these gaps, we introduce PAD-Rec—a position-aware acceleration module that plugs into standard draft models and directly targets the two gaps above. The draft model is equipped with two complementary positional signals: 
+
+item position embeddings (IPE) that encode a token’s slot within the item to strengthen item-structure awareness, and 
+
+step position embeddings (SPE) that index the current draft step so the draft can learn depth-conditioned behavior from data and adapt to step-wise uncertainty. To balance these signals with base features, we use simple gates: a learnable coefficient for IPE and a small, context-driven gate for SPE. The module is lightweight, trained jointly with the draft, easy to integrate, and adds negligible inference overhead—yielding higher verification acceptance and larger end-to-end speedups. Extensive experiments on four real-world datasets demon-strate that our method achieves up to 3.1 × speedup and an av-erage 5% wall-clock speedup gain over HASS in LLM-based generative list-wise recommendation, while largely preserving recommendation performance. Beyond the main comparison, we conduct further analyses to examine the contribution of individual components and to study the effects of key hyper-parameters and model scaling. The contributions of this paper are as follows:  
+
+> •
+
+To our knowledge, PAD-Rec is the first to explicitly ex-ploit within-item token positions and draft-step positions for speculative decoding in structured list-wise generative recommendation.  
+
+> •
+
+We propose a method for accelerating generative recom-mendation by incorporating item-position and step-position embeddings into the draft model.  
+
+> •
+
+We demonstrate the effectiveness of our method through extensive experiments, achieving up to 3.1 × acceleration for LLM-based generative recommendation tasks while largely preserving recommendation performance. II. R ELATED WORK 
+
+A. Speculative Decoding 
+
+Speculative decoding accelerates LLMs via a draft–then– verify loop: a small draft model proposes several future tokens, and the target LLM verifies them in one batched call, commit-ting the longest accepted prefix [8], [10], [11]. Early SD under 
+
+greedy decoding drafts a short block per round, preserving the target distribution but limiting acceptance and speedup [19]. Later works adopt nucleus sampling [8] and generalize to tree-based proposals that branch and verify in parallel, improving acceptance length at the cost of extra memory when trees widen or deepen [12], [20]–[22]. By drafting strategies, SD methods can be grouped into three broad categories. (i) 
+
+Prompt-lookup SD retrieves candidate continuations from the input prompt itself via suffix matching and submits them for batched verification, avoiding a separately trained draft model [23], [24]. (ii) Retrieval-based SD augments the prompt with contexts retrieved from external stores or prior outputs, leveraging cached knowledge to guide drafting [25], [26]. (iii) Lightweight-drafter SD attaches efficient predictors to generate candidates, including token-head [27], RNN-based models [28], or smaller models [6] for parallel or regressive proposals. Recently, the third group has given rise to feature-based SD. EAGLE [14] is a representative approach that autoregresses over hidden-state sequences to fuse candidate token embeddings. This line has inspired follow-ups such as HASS [15], GRIFFIN [29], FSPAD [30], and CORAL [31], which refine draft-model training and proposal construction. Other studies examine broader efficiency questions, includ-ing the trade-off between draft-model size, draft length, and latency [32], context-dependent uncertainty in SD [33], and systems optimizations such as KV-cache reduction [34]. How-ever, these methods are mainly designed for generic language generation and do not explicitly model the structured semantic-ID outputs in generative recommendation. This motivates studying structure-aware drafting for list-wise recommenda-tion generation. 
+
+B. Generative Recommendation 
+
+Motivated by the rise of generative modeling, recommen-dation has been reframed from scoring to generation [35]– [37]. A widely used blueprint comprises two stages: (i) a 
+
+tokenization stage that maps items to discrete symbols, and (ii) a sequence generation stage that predicts future items conditioned on user history. As a representative, TIGER [38] encodes each item as a short tuple of semantic-ID tokens, typically learned via RQ-VAE [18], and uses an encoder– decoder to generate recommendation lists. On the tokenization side, recent work trains more expressive and well-aligned IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 3
+
+codebooks [16], [39]–[41]; for instance, LETTER integrates both collaborative and contextual priors to guide semantic IDs [40]. On the generation side, methods enhance how user profiles and item signals are fused for list-wise decoding [17], [42]–[44], exemplified by EAGER’s two-stream fusion of semantic and collaborative cues [43] and LC-Rec’s instruction-driven generation over semantic IDs [17]. Recent studies further apply planning, reasoning, reinforcement learning, and alignment techniques to generative recommendation [36], [37], [45], [46]. Personalization is also emerging as a clear trend in generative recommendation and related LLM-based user mod-eling settings [47]–[50]. Some systems optimize both stages jointly [2], [51], [52], such as SEATER, which learns a hierar-chical tree-structured tokenizer together with an autoregressive encoder–decoder, and IDGenRec, which learns concise textual IDs within the LLM vocabulary for generation. Despite these advances, most methods primarily improve modeling, align-ment, or personalization, while the latency of autoregressively generating semantic-ID lists remains underexplored. 
+
+C. Inference Acceleration for LLM-based Generative Recom-mendation 
+
+LLM-based generative recommenders [16], [17] are increas-ingly competitive with strong traditional systems [53], [54], but real-time deployment remains constrained by the latency of autoregressive decoding over multi-token item representations. Beyond compression-based acceleration such as distillation, pruning, and quantization [55]–[57], recent work has begun to improve efficiency more directly in recommendation scenarios. DARE [7] accelerates LLM-generated user or item knowledge for downstream ranking rather than directly generating rec-ommendation lists. AtSpeed [6] studies SD for top-K item generation, where beam search produces multiple candidate semantic-ID sequences and strict N →K verification is re-quired. SpecGR [58] formulates speculation as retrieval-based candidate proposal and verification for inductive recommenda-tion. NEZHA [59] uses self-drafting and efficient verification for industrial candidate generation. EARN [60] reduces infer-ence overhead from a systems/cache perspective under item-identifier generation settings. These studies broaden the design space of efficient generative recommendation, but they mainly target ranking, top-K/candidate-generation-oriented settings, retrieval speculation, or cache management rather than full list-wise decoding. In such settings, the generated “list” is typically a set of alternative candidate items produced from the same user-history prefix, whereas our setting generates an ordered multi-item response in which previously generated items become part of the decoding context. This full-list setting introduces additional structure: tokens have fixed within-item roles, and later draft steps must account for both deeper spec-ulation and previously generated list tokens. This motivates our focus on structure-aware lossless speculative decoding for full recommendation-list generation. III. P RELIMINARY 
+
+A. LLM-based Generative Recommendation 
+
+We focus on the setup for LLM-based generative recom-mendation, where a user’s interaction history is split into a his-tory and a future . The history, denoted as a1: n = ( a1, . . . , a n),consists of items ai that the user has interacted with, and the future, denoted as b1: m = ( b1, . . . , b m), is the target list of items to generate. In addition to item history, the LLM input includes an 
+
+instruction describing the task [17], [35] (e.g., “Given the user’s past interactions, predict the list of items the user is most likely to interact with in the future.”). Following prior work [17], [38], [40], we encode items with an RQ-VAE [18] so they can be handled by a token-based generator. Concretely, each item is mapped to a short tuple of semantic ID tokens . With K codebooks (we use K=4 ), item ai is represented as (a(1)  
+
+> i
+
+, . . . , a (K) 
+
+> i
+
+) and item bj as 
+
+(b(1)  
+
+> j
+
+, . . . , b (K) 
+
+> j
+
+), where the superscript indexes the codebook level. To separate adjacent items, we insert special separator tokens (commas/spaces). 
+
+a) Flattened token stream.: Let X = ( x1, . . . , x T ) be the textual token stream that concatenates (i) the instruction and context tokens, (ii) the history items encoded as their 
+
+K semantic-ID tokens with separators, and (iii) the future items in the same format. Let t0 be the index of the first token of the future (response) segment. Generation proceeds autoregressively over X:
+
+pθ
+
+ Xt0:T | X1: t0−1
+
+ =
+
+> T
+
+Y
+
+> t=t0
+
+pθ
+
+ xt | X1: t−1
+
+, (1) where each xt (t ≥ t0) is a semantic-ID token or separator token, and X1: t0−1 denotes the instruction and history prefix. 
+
+b) Latency implication.: Autoregressive decoding re-quires one forward pass per token and is strictly sequential. For a list of length m with K semantic-ID tokens per item and 
+
+K′ separator tokens per item on average, the response segment contains approximately m (K+K′) tokens (in addition to the instruction/history prefix), leading to m (K+K′) decoding steps. This limits parallelism and increases latency as models scale, motivating inference acceleration tailored to generative recommendation. 
+
+B. Speculative Decoding and Its Challenges in Generative Recommendation 
+
+To reduce autoregressive latency, speculative decoding (SD) [8] employs a small draft model to propose multiple future tokens in parallel as a candidate block —or a candidate tree 
+
+in tree-based variants—after which the target LLM scores these proposals and accepts a target-verified prefix, allow-ing decoding to advance by multiple tokens in one round. Subsequent work refines this pipeline [14], [15], [20], [29]. 
+
+EAGLE [14] strengthens the draft by augmenting it with 
+
+candidate token embeddings (plus contextual features) so proposals better match the target head and thus improve acceptance, but its training is single-step while inference drafts 
+
+multiple steps—creating a train–decode mismatch. HASS [15] addresses this by training the draft model to roll forward mul-tiple steps so the training context mirrors multi-step drafting at test time. For clarity going forward, we denote by B the 
+
+speculation depth , i.e., the number of draft steps proposed per round; we unroll up to B steps during training and expand IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 4
+
+candidates up to depth B at inference, and—unless otherwise noted—use the same depth for both ( Btrain =Btest =B). While these advances raise acceptance in general language tasks, directly applying SD to LLM-based generative recom-mendation exposes two task-specific gaps. First, slot-positional structure is underused : each item is realized as a fixed tuple of semantic-ID tokens (typically four IDs plus separators), and a token’s role depends on its within-item slot, yet standard draft models treat tokens uniformly without encoding slot iden-tity, weakening intra-item modeling and alignment. Second, 
+
+depth-driven uncertainty is unmanaged : later draft steps—both across items and within an item’s token tuple—are typically harder, but the draft model’s behavior is largely step-agnostic, missing the opportunity to adapt proposal confidence as depth grows. These observations motivate augmenting the draft model with lightweight position signals that encode the within-item slot and the draft step. We introduce such a position-aware drafting module in the next section. IV. M ETHOD 
+
+In this section, we address the two challenges identified for SD in LLM-based generative recommendation—underused item-structural cues and unmanaged depth-driven uncertainty. We propose a position-aware drafting module that injects two complementary signals into the draft model: (i) item position embeddings to encode the within-item slot, and (ii) step position embeddings to encode the generation depth. Fig. 2 illustrates the integration of the two embeddings in PAD-Rec. To balance these signals with the base representation, we further introduce gating mechanisms : a learnable gate for item-position cues and an uncertainty-aware gate for step-position cues. We first detail each component and its integration with SD, and then outline the overall training/inference pipeline. 
+
+A. Item Position Embeddings 
+
+As outlined in Section III-A, each item is emitted as a fixed tuple of K semantic-ID tokens, typically K=4 , corresponding to different codebook levels in RQ-VAE [18]. We index the 
+
+within-item slots as 1: K, while separator tokens and instruc-tion/context tokens are treated as special markers. A typical instruction–response pair looks like: 
+
+Instruction: 
+
+After interacting with items <a_13> <b_202><c_9><d_188>, ..., <a_171> <b_50><c_228><d_186>, what are the next 10 items that could be recommended for the user? 
+
+Response: 
+
+<a_171><b_154><c_190><d_26>, <a_13> <b_216><c_67><d_214>, ..., <a_23> <b_143><c_82><d_240> 
+
+To make the slot identity explicit to the draft model, we introduce item position embeddings (IPE). Each token in 𝒆 𝟏                                 
+
+> 𝒂 _𝟏 𝒃 _𝟏 𝒄 _𝟏 𝒅 _𝟏 ,
+> Embedding
+> 𝒆 𝒂 _𝟏 𝒆 𝒄 _𝟏 𝒆 𝒃 _𝟏 𝒆 𝒅 _𝟏
+> 𝒗 𝟏 𝒗 𝟑 𝒗 𝟐 𝒗 𝟒
+> 𝒆 ,
+> 𝒗 𝟓
+> 𝒆 𝒂 _𝟏 𝒆 𝒄 _𝟏 𝒆 𝒃 _𝟏 𝒆 𝒅 _𝟏 𝒆 ,
+> 𝒇 𝒃 _𝟏 𝒇 ,
+> Auto -regressive layer
+> 𝒇 𝒂 _𝟏
+> LM head & Sampling
+> 𝒇 𝒄 _𝟏
+> 𝒅 _𝟏
+> 𝒇 𝒄 _𝟏
+> 𝒇 𝒅 _𝟏
+> ,
+> 𝒇 𝒅 _𝟏
+> 𝒇 ,
+> 𝒂 _𝟐
+> Embedding
+> 𝒂 _𝟏 𝒃 _𝟏
+> 𝒆 𝒂 _𝟏 𝒆 𝒃 _𝟏
+> 𝒇 𝒂 _𝟏 𝒇 𝒃 _𝟏
+> 𝒃 _𝟏 𝒄 _𝟏
+> Transformer
+> Layers
+> LM head &
+> Sampling
+> Step 1Step 2Step 3
+> 𝒆 𝟐 𝒆 𝟑
+> Target LLM Draft Model
+> Step 0Step 0
+> Add SPE
+> Add IPE
+> Concat
+> feature
+> Fig. 2. Training framework of PAD-Rec. Blue blocks denote token em-beddings, and orange blocks denote intermediate features. Tokens already verified by the target LLM are outlined in black, while draft predictions are outlined in red. The draft input is augmented by adding IPE vt, concatenating features, and adding SPE sjbefore the auto-regressive draft layer. Different IPE colors indicate different within-item positions, while darker SPE colors indicate larger draft-step indices j.
+
+the flattened decoding stream is associated with a slot or marker label ℓt ∈ { 1, . . . , K, sep , ctx }, determined by a simple rule based on the known item structure, where sep 
+
+uniformly denotes both commas and spaces and ctx denotes instruction/context. The corresponding IPE is obtained by a lightweight embedding lookup: 
+
+vt = Emb item (ℓt), (2) where Emb item (·) is a small embedding table shared across all positions. By injecting IPE into the draft model, we provide explicit slot-aware cues that strengthen intra-item structural modeling, while adding negligible computational overhead. 
+
+B. Step Position Embeddings 
+
+Predictions made at later draft steps are typically less certain due to longer dependency chains and error accumulation. To enable depth-aware adaptation, we introduce step position embeddings (SPE), which explicitly encode the current draft step. Here, j denotes the draft depth associated with the current token position during speculative decoding. At draft step j, the draft model retrieves the corresponding SPE via an embedding lookup: 
+
+sj = Emb step (j), (3) where Emb step (·) is a small embedding table indexed by the draft step. In our implementation, draft depth indices start from j=1 , and the SPE table is indexed accordingly. SPE is IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 5𝒌 𝒔 𝟎 𝒌 𝒔 𝟎 , 𝒌 𝒔 𝟏 𝒌 𝒔 𝟎 , 𝒌 𝒔 𝟏 , 𝒌 𝒔 𝟐 𝒌 𝒔 𝟎 , 𝒌 𝒔 𝟏 , 𝒌 𝒔 𝟐 , 𝒌 𝒔 𝟑     
+
+> 𝒒 𝒔 𝟎 𝒒 𝒔 𝟏 𝒒 𝒔 𝟐 𝒒 𝒔 𝟑
+> Step 1 Step 4 Step 3 Step 2
+
+(a) Block Construction (b) Unrolled Step -wise Attention Training with IPE and SPE     
+
+> Feature
+> blue: target feature
+> yellow: draft feature
+> IPE
+> color: item slot
+> SPE
+> shade: draft depth
+> Fig. 3. Position-aware unrolled training with IPE and SPE. (a) Each block combines the base feature with an IPE marker for the within-item slot and an SPE marker for the draft step. (b) During unrolled training, target features are progressively replaced by draft features from earlier depths under a causal mask, while red dashed boxes group tokens belonging to the same item.
+
+applied consistently during both training and inference, pro-viding explicit conditioning on draft depth without introducing additional computation or model complexity. 
+
+C. Gating Mechanisms 
+
+We fuse the two position signals— item position embeddings 
+
+and step position embeddings —into the draft model with lightweight gates, so that positional cues strengthen struc-ture/depth awareness without overwhelming the base repre-sentations. Let et ∈ Rd be the token embedding at position t,
+
+ft−1 ∈ Rd the draft feature from the previous step, vt ∈ Rd
+
+the IPE of token t, and sj ∈ Rd the step position embedding corresponding to the current draft depth at position t.
+
+a) Stage-1: slot-aware fusion: We first inject IPE into the token embedding and concatenate it with the previous-step draft feature: 
+
+f ′ 
+
+> t−1
+
+= concat 
+
+
+
+et + gitem vt, ft−1
+
+
+
+, (4) where gitem ∈ [0 , 1] is a learnable scalar that controls the overall strength of slot cues. The concatenation follows the feature-level drafting paradigm of EAGLE [14], which explicitly conditions the current prediction on both token-level embeddings and previously drafted features, thereby reducing feature uncertainty during speculative decoding. 
+
+b) Stage-2: depth-aware fusion: We then project the concatenated feature back to the draft-feature space and add SPE with a context-driven gate: 
+
+zt−1 = FC cat 
+
+ f ′
+
+> t−1
+
+ , zt−1 ∈ Rd, (5) 
+
+ft = zt−1 + gstep (t)sj . (6) Here, FC cat (·) maps the concatenated 2d-dimensional feature to the d-dimensional draft-feature space, so zt−1 and sj have matched dimensions. 
+
+c) Context-driven step gate.: Unlike gitem , which is global and static, the step gate adapts to the current draft context: 
+
+gstep (t) = σ w⊤zt−1
+
+ , (7) where σ(·) is the sigmoid function and w is a learned vector. This design allows the model to increase the influence of depth cues when drafting becomes more uncertain, while down-weighting SPE when the draft features are confident. 
+
+D. Training Pipeline 
+
+PAD-Rec adopts a HASS-style distillation regime with multi-step rollout. We train the draft model only on the re-sponse part (semantic-ID tokens and separators) while keeping the target LLM frozen. The trainable parameters include the draft layer, the IPE/SPE embedding tables, and the gating parameters. Let x1: T be the token stream and t0 the index of the first response token. We define the speculation depth B as the maximum number of future tokens that the draft model is allowed to propose in a single speculative round. For each draft depth j ∈ { 1, . . . , B }, we distill the draft distribution to match the target distribution on response positions t ∈ [t0, T ]:
+
+LPAD-Rec =
+
+> B
+
+X
+
+> j=1
+
+( TX
+
+> t=t0
+
+CE 
+
+
+
+P (l)(xt | x<t ),P (s) 
+
+> θ, j
+
+(xt | x<t )
+
+
+
++ Aux-loss 
+
+)
+
+.
+
+(8) 
+
+Aux −loss is the Top-K distillation loss of HASS, which we adopt unchanged. P (l) denotes the target LLM distribution, and P (s) 
+
+> θ, j
+
+denotes the draft distribution conditioned on the draft depth j with PAD-Rec’s position-aware inputs: 
+
+P (s) 
+
+> θ, j
+
+(xt | x<t ) = Head 
+
+
+
+Mθ
+
+ Fuse( f<t , v<t , sj )
+
+, (9) where Mθ is the trainable draft backbone (a one-layer Trans-former block), and Head is the frozen LM head copied from the target LLM. Fuse( ·) implements the gated position-aware fusion defined in Eqs. (4)–(7). 
+
+a) Causal masking.: During training we use the HASS causal mask, adjusted so that each replaced position only attends to states available at its own timestep (no look-ahead). 
+
+b) Progressive replacement.: Fig. 3 illustrates the un-rolled rollout. At draft depth j=1 , the context uses target (teacher) features for all past positions (EAGLE-style). At draft depth j≥2, the most recent (j−1) positions in the attention context are progressively replaced by draft features produced at earlier depths, while earlier positions remain teacher features. At each depth j, we inject the corresponding SPE sj for the currently replaced window and queries, while providing per-token IPE to all positions. IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 6
+
+E. Inference 
+
+At decoding time, the draft model augments inputs with the corresponding IPE and the SPE indexed by the current draft depth . It then proposes a candidate tree whose maximum depth is bounded by the fixed speculation depth B (following [20]). The target LLM verifies all candidates in one batch and commits the longest accepted prefix, advancing the output by multiple tokens per verification round. PAD-Rec adds minimal overhead to the draft: two em-bedding lookups (IPE/SPE) and lightweight scalar gates per token. The additional parameters introduced by PAD-Rec are negligible compared with the draft backbone (e.g., about 
+
+0.01% when B=6 ). V. E XPERIMENTS 
+
+We comprehensively evaluate PAD-Rec on four real-world datasets, comparing its inference acceleration against strong speculative-decoding baselines. Beyond the main comparison, we conduct ablations to disentangle the contribution of our 
+
+item/step position embeddings and the gating mechanisms , and we analyze key hyperparameters that influence speedup. To assess PAD-Rec for LLM-based generative list-wise recommendation, we answer the following research questions:  
+
+> •
+
+RQ1: How does PAD-Rec compare with state-of-the-art SD methods in terms of wall-clock speedup, accepted length, and recommendation recall?  
+
+> •
+
+RQ2: What are the individual and joint effects of item position embeddings, step position embeddings, and gating on PAD-Rec’s inference acceleration?  
+
+> •
+
+RQ3: How do hyper-parameters like speculation depth affect PAD-Rec’s efficiency?  
+
+> •
+
+RQ4: How well does PAD-Rec scale across different back-bone model sizes? 
+
+A. Experimental Setup 1) Data Preparation.: We evaluate PAD-Rec on four real-world datasets drawn from two widely used recommendation benchmarks. The dataset statistics are summarized in Table I.  
+
+> •
+
+Beauty , Instruments , and Games are three subsets of the Amazon Reviews corpus [61], covering user interactions with beauty and personal care products, musical instruments and related accessories, and video games, respectively.  
+
+> •
+
+Yelp is derived from the Yelp Open Dataset 1, which records user reviews and interactions with local businesses such as restaurants and services. 
+
+Preprocessing and sequence construction. Following [40], we first obtain item semantic embeddings using a pretrained encoder that integrates semantic and collaborative signals, and then discretize items into semantic IDs as described in Sec. III-A. User interactions are sorted chronologically, and users with fewer than 11 interactions are removed. For each remaining user, the most recent 10 items are used as the target list , while all earlier interactions constitute the history .
+
+Train/validation/test splits. We split users into training, validation, and test sets with an 8:1:1 ratio at the user level.              
+
+> 1https://www.yelp.com/dataset TABLE I DATASET STATISTICS .
+> Dataset #Items #Inter. #Seqs #SD Seqs
+> Beauty 12 ,101 198 ,504 22 ,363 6,562
+> Instruments 9,922 206 ,153 24 ,772 5,753
+> Games 17 ,332 342 ,329 49 ,156 7,721
+> Yelp 20 ,033 316 ,354 30 ,431 13 ,516
+> Note. “#Items”, “#Inter.”, and “#Seqs” are counted after preprocessing; “#SD Seqs” denotes sequences used for SD training/evaluation.
+
+This ensures that all interactions of a given user are assigned to the same split, thereby preventing information leakage across data partitions. 
+
+Speculative-decoding data. We first train the target LLM-based list-wise recommender following LC-Rec [17]. Its hid-den features on the instruction-augmented token stream are then used to supervise the draft model. 
+
+2) Baselines.: We compare our proposed PAD-Rec against several strong SD baselines.  
+
+> •
+
+EAGLE-2. [20] It uses a dynamic draft tree with feature-level autoregression to raise verification acceptance and improve end-to-end speed.  
+
+> •
+
+HASS. [15] It uses multi-aligning-step training to match decoding-time context and improve acceptance.  
+
+> •
+
+FSPAD. [30] It uses feature sampling and partial align-ment distillation to reduce feature uncertainty and stabilize alignment, improving candidate quality and speed.  
+
+> •
+
+GRIFFIN. [29] It uses token-alignable training with token-guided fusion to mitigate train–decode misalignment and improve acceptance length. All baselines share the same target LLM and evaluation protocol; we adopt their official configurations for a fair comparison. 
+
+3) Evaluation Metrics.: Following prior SD work, we re-port two efficiency metrics and two recommendation-quality metrics.  
+
+> •
+
+Wall-clock speedup measures end-to-end acceleration, de-fined as the ratio between the inference time of standard autoregressive decoding and that of the speculative decoding pipeline under identical decoding settings.  
+
+> •
+
+Average accepted length ( τ ) measures the average number of drafted tokens accepted per verification step. A larger 
+
+τ implies fewer target-model invocations and thus higher potential speedup.  
+
+> •
+
+Recall@10 measures recommendation accuracy, computed as |G ∩ ˆG| /|G| for a ground-truth list G of size 10 and the generated list ˆG, and averaged over all users.  
+
+> •
+
+NDCG@10 (Normalized Discounted Cumulative Gain) evaluates ranking quality by accounting for the positions of correctly recommended items. We compute NDCG@10 between ˆG and G, normalize by the ideal DCG, and re-port the average across users. Higher NDCG@10 indicates better-ranked recommendations. 
+
+4) Implementation Details.: For the main comparison, we implement PAD-Rec on top of LC-Rec with Llama-3.2-1B-Instruct [62] as the target LLM; the model-scaling IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 7
+
+TABLE II PERFORMANCE COMPARISON BETWEEN PAD-R EC AND BASELINES ON FOUR DATASETS .
+
+Dataset Model temp=0 temp=0.5 Speedup τ Recall@10 NDCG@10 Speedup τ Recall@10 NDCG@10 Beauty Target LLM – – 0.0486 0.0593 – – 0.0569 0.0629 
+
+EAGLE-2 3.00 6.83 0.0480 ↓ 0.0006 0.0588 ↓ 0.0005 2.32 5.65 0.0531 ↓ 0.0038 0.0582 ↓ 0.0047 
+
+HASS 3.04 6.87 0.0483 ↓ 0.0003 0.0591 ↓ 0.0002 2.30 5.59 0.0563 ↓ 0.0006 0.0628 ↓ 0.0001 
+
+FSPAD 2.83 7.21 0.0485 ↓ 0.0001 0.0592 ↓ 0.0001 2.31 5.96 0.0541 ↓ 0.0028 0.0603 ↓ 0.0026 
+
+GRIFFIN 2.82 7.83 0.0480 ↓ 0.0006 0.0588 ↓ 0.0005 2.27 6.45 0.0523 ↓ 0.0046 0.0593 ↓ 0.0036 
+
+PAD-Rec (ours) 3.07 7.35 0.0486 → 0.0000 0.0593 → 0.0000 2.37 6.22 0.0546 ↓ 0.0023 0.0619 ↓ 0.0010 
+
+Instruments Target LLM – – 0.0337 0.0462 – – 0.0323 0.0382 
+
+EAGLE-2 2.39 4.55 0.0337 → 0.0000 0.0462 → 0.0000 1.71 3.88 0.0336 ↑ 0.0013 0.0411 ↑ 0.0029 
+
+HASS 2.76 5.75 0.0339 ↑ 0.0002 0.0463 ↑ 0.0001 2.24 5.01 0.0298 ↓ 0.0025 0.0383 ↑ 0.0001 
+
+FSPAD 3.01 7.13 0.0339 ↑ 0.0002 0.0463 ↑ 0.0001 2.35 6.22 0.0322 ↓ 0.0001 0.0390 ↑ 0.0008 
+
+GRIFFIN 3.03 7.89 0.0351 ↑ 0.0014 0.0476 ↑ 0.0014 2.39 6.81 0.0341 ↑ 0.0018 0.0400 ↑ 0.0018 
+
+PAD-Rec (ours) 3.15 7.43 0.0337 → 0.0000 0.0462 → 0.0000 2.44 6.42 0.0291 ↓ 0.0032 0.0376 ↓ 0.0006 
+
+Games Target LLM – – 0.0182 0.0221 – – 0.0206 0.0220 
+
+EAGLE-2 2.82 7.00 0.0182 → 0.0000 0.0220 ↓ 0.0001 2.17 5.66 0.0188 ↓ 0.0018 0.0202 ↓ 0.0018 
+
+HASS 2.88 7.15 0.0184 ↓ 0.0002 0.0222 ↑ 0.0001 2.21 5.93 0.0213 ↑ 0.0007 0.0242 ↑ 0.0022 
+
+FSPAD 2.94 7.28 0.0182 → 0.0000 0.0220 ↓ 0.0001 2.28 6.13 0.0197 ↓ 0.0009 0.0229 ↑ 0.0009 
+
+GRIFFIN 2.72 8.00 0.0180 ↓ 0.0002 0.0217 ↓ 0.0004 2.18 6.41 0.0201 ↓ 0.0005 0.0217 ↓ 0.0003 
+
+PAD-Rec (ours) 2.94 7.28 0.0182 → 0.0000 0.0221 → 0.0000 2.29 6.06 0.0201 ↓ 0.0005 0.0221 ↑ 0.0001 
+
+Yelp Target LLM – – 0.0055 0.0075 – – 0.0085 0.0088 
+
+EAGLE-2 2.10 5.58 0.0053 ↓ 0.0002 0.0074 ↓ 0.0001 1.68 4.80 0.0076 ↓ 0.0009 0.0079 ↓ 0.0009 
+
+HASS 2.29 5.84 0.0053 ↓ 0.0002 0.0074 ↓ 0.0001 1.82 4.47 0.0076 ↓ 0.0009 0.0073 ↓ 0.0015 
+
+FSPAD 2.31 6.72 0.0053 ↓ 0.0002 0.0074 ↓ 0.0001 2.06 5.31 0.0083 ↓ 0.0002 0.0079 ↓ 0.0009 
+
+GRIFFIN 2.34 6.43 0.0052 ↓ 0.0003 0.0070 ↓ 0.0005 2.13 5.32 0.0082 ↓ 0.0003 0.0086 ↓ 0.0002 
+
+PAD-Rec (ours) 2.36 6.08 0.0054 ↓ 0.0001 0.0074 ↓ 0.0001 2.20 4.77 0.0087 ↑ 0.0002 0.0090 ↑ 0.0002 
+
+Note. Results are reported on Beauty , Instruments , Games , and Yelp . For acceleration metrics, the best results are shown in bold and the second-best results are underlined. For Recall@10 and NDCG@10 , colored arrows indicate deviations from the target LLM: ↑ denotes an increase and ↓ denotes a decrease, followed by the absolute change. 
+
+study further considers Llama-3.2-3B-Instruct and Llama-3-8B-Instruct. We adapt LC-Rec to our list-wise setting by formatting each supervision target as an ordered top-10 list of semantic-ID item tuples and training the model to autoregres-sively generate the flattened list token stream. We first fine-tune this list-wise LC-Rec model with full-parameter tuning to obtain the target model. The target LLM is then frozen, and only the lightweight draft module is trained. PAD-Rec keeps the target model and draft–then–verify framework unchanged, and only augments the draft-side representations with IPE/SPE and their gating parameters. For a fair comparison, all SD baselines and PAD-Rec use the same target LLM, datasets, decoding length, evaluation metrics, and EAGLE-2-style tree-based verification frame-work. We sweep the learning rate in {1e-4, 5e-4, 1e-3 }, set the speculation depth B to 6, and use a tree width of 10 
+
+at inference time. All reported results use the best validation setting under these choices. The draft module is built from a single Transformer layer of the same backbone; PAD-Rec keeps the target model and tree-based verification unchanged and only adds IPE/SPE tables and gating parameters on the draft side. For the system protocol, speculative training uses bf16 mixed precision. Experiments with the 1B target model are trained on a single NVIDIA RTX 3090 GPU, while the 3B and 8B scaling experiments are trained on four NVIDIA A100 GPUs. All latency measurements are conducted on NVIDIA RTX 3090 GPUs in fp16 with batch size 1. We perform three warmup generations and exclude them from all reported numbers. During timing, CUDA is synchronized immediately before and after each generation call. The timed region includes draft proposal construction and target-model verification for SD methods, and the standard generation loop for the autoregressive target LLM; tokenization, post-decoding, file I/O, and metric computation are excluded. Both speculative and autoregressive decoding use the target model with KV cache enabled. 
+
+B. Overall Performance (RQ1) 
+
+We evaluate all methods on four datasets, namely Beauty ,
+
+Instruments , Games , and Yelp , under identical inference con-figurations. Table II reports wall-clock speedup, average ac-cepted length τ , and recommendation quality measured by Recall@10 and NDCG@10 under two sampling temperatures. At temp = 0 , PAD-Rec matches or nearly matches the target LLM’s recommendation metrics; at temp = 0 .5, it largely preserves recommendation quality with limited absolute fluctu-ations under stochastic sampling. To contextualize the reported IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 8                 
+
+> TABLE III NAIVE TARGET -LLM DECODING LATENCY .
+> Dataset #Queries temp=0 temp=0.5 Beauty 652 693.55 725.64
+> Instruments 588 676.70 725.43
+> Games 757 1054.68 1060.07
+> Yelp 1311 882.77 917.73
+> Note. Latency is reported as mean wall-clock decoding time per query (ms/query) for the 1B target LLM with batch size 1.
+
+speedups in real time, Table III reports the absolute autoregres-sive decoding latency of the target LLM in ms/query under the 1B setting. The latency is computed as P wall_time /N ,where N is the number of evaluation queries and each query generates a top-10 recommendation list with approximately 59 output tokens. Since speedup in Table II is measured relative to the same target-LLM baseline, the corresponding PAD-Rec latency can be estimated by dividing the target-LLM latency by the reported speedup.  
+
+> •
+
+HASS vs. EAGLE-2. Across all datasets, HASS consis-tently outperforms EAGLE-2 in terms of accepted length τ
+
+and wall-clock speedup. This trend is observed on Beauty ,
+
+Instruments , and Games , and also holds on the smaller-scale 
+
+Yelp dataset. The results indicate that exposing the draft model to multi-step speculative contexts during training better aligns it with the decoding-time distribution, result-ing in fewer verification rejections and higher end-to-end efficiency, while maintaining comparable Recall@10 and NDCG@10.  
+
+> •
+
+FSPAD and GRIFFIN. Both FSPAD and GRIFFIN im-prove draft–target alignment and yield longer accepted pre-fixes, with GRIFFIN typically achieving the largest τ . How-ever, GRIFFIN’s token-guided fusion introduces additional MLP layers during draft-time inference, increasing memory traffic and latency; as a result, gains in τ do not consistently translate into higher wall-clock speedup. Across datasets, Recall@10 and NDCG@10 remain comparable to the Target LLM, indicating that these methods mainly affect efficiency rather than recommendation quality.  
+
+> •
+
+PAD-Rec (ours). PAD-Rec achieves the highest or near-highest wall-clock speedup across all datasets and tempera-ture settings. At temp = 0 , PAD-Rec reaches 3.07 × speedup on Beauty and 3.15 × on Instruments , with similarly strong acceleration on Games and Yelp . These gains are obtained without introducing heavy fusion modules or changing the target-model verification path. Instead, PAD-Rec relies on two lightweight positional signals. IPE provides within-item slot awareness for semantic-ID tuples, while SPE conditions the draft on the current speculative depth, allowing the model to adapt its behavior as decoding progresses. Both signals are integrated via simple gating mechanisms, achiev-ing better end-to-end speedup with competitive accepted length and lower draft-side overhead.  
+
+> •
+
+Effect of temperature. Sampling temperature has a system-atic impact on speculative decoding. At temp = 0 , decoding is deterministic and closely follows the target model’s top-1 trajectory, resulting in strong proposal–target alignment; 2.5                 
+
+> 2.7
+> 2.9
+> 3.1
+> 3.3
+> Speedup
+> Beauty
+> 2.5
+> 2.7
+> 2.9
+> 3.1
+> 3.3 Instruments
+> temp=0 temp=0.5
+> 5.5
+> 6.0
+> 6.5
+> 7.0
+> 7.5
+> temp=0 temp=0.5
+> 5.5
+> 6.0
+> 6.5
+> 7.0
+> 7.5
+> 2.0
+> 2.1
+> 2.2
+> 2.3
+> 2.4
+> 2.5
+> 2.0
+> 2.1
+> 2.2
+> 2.3
+> 2.4
+> 2.5
+> 4.8
+> 5.2
+> 5.6
+> 6.0
+> 6.4
+> 4.8
+> 5.2
+> 5.6
+> 6.0
+> 6.4
+> baseline w/o IPE w/o SPE PAD-Rec
+> Fig. 4. Embedding ablation on speedup and accepted length τon Beauty and Instruments. In each subplot, temp = 0 is read from the left y-axis, while temp = 0 .5is read from the right y-axis.
+
+consequently, all SD variants achieve long accepted prefixes, stable Recall@10/NDCG@10, and near-maximal wall-clock speedup. When the temperature increases to temp = 0 .5,speedup consistently decreases and variability in Recall@10 and NDCG@10 becomes more pronounced across methods. This behavior is expected, as stochastic sampling increases the divergence between draft proposals and target contin-uations and shifts generation away from the regime used during draft training, leading to earlier verification termina-tion and shorter accepted lengths τ . Moreover, under higher stochasticity, the space of plausible continuations expands rapidly, while the finite draft tree can only cover a limited subset, further increasing the likelihood of early rejection during verification. Overall, these results highlight an inher-ent efficiency–robustness trade-off in speculative decoding; within this trade-off, PAD-Rec consistently maintains strong acceleration while largely preserving recommendation qual-ity under increased sampling stochasticity. 
+
+C. Ablation Study (RQ2) 1) Embedding ablation.: To evaluate the effects of IPE and SPE, we compare PAD-Rec under the same SD setting with its variants and report wall-clock speedup and accepted length τ . Due to space constraints, we present results on two representative datasets, Beauty and Instruments, and conduct the remaining analytical experiments on the same datasets, with similar trends observed on the others. The ablations comprise Baseline (no PAD-Rec) , PAD-Rec w/o IPE , PAD-Rec w/o SPE , and PAD-Rec (full) . In Fig. 4, the two temperatures use separate y-axes for readability: temp = 0 corresponds to the left axis and temp = 0 .5 corresponds to the right axis. From Fig. 4 we observe:  
+
+> •
+
+Overall acceleration. The full PAD-Rec yields the strongest or near-strongest speedup across datasets and temperatures while keeping τ among the top two, indicating more tokens verified per target call without notable complexity. IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 91.5                  
+
+> 2.0
+> 2.5
+> 3.0
+> Speedup
+> Beauty
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> Instruments
+> temp=0 temp=0.5
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> temp=0 temp=0.5
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> 1.2
+> 1.6
+> 2.0
+> 2.4
+> 1.2
+> 1.6
+> 2.0
+> 2.4
+> 3.2
+> 4.0
+> 4.8
+> 5.6
+> 6.4
+> 3.2
+> 4.0
+> 4.8
+> 5.6
+> 6.4
+> w/o both w/o IPE gate w/o SPE gate PAD-Rec
+> Fig. 5. Gate ablation on speedup and accepted length τon Beauty and
+> Instruments . In each subplot, temp = 0 is read from the left y-axis, while temp = 0 .5is read from the right y-axis.
+> •
+
+Effect of IPE. Removing IPE reduces speedup on structured outputs (semantic-ID tuples), showing that explicit slot cues help the draft model form proposals that verify more readily.  
+
+> •
+
+Effect of SPE. Removing SPE is most harmful at temp = 0 .5,where deeper draft steps are noisier; step-aware conditioning improves stability at depth, preserving speedup.  
+
+> •
+
+Complementarity. IPE (item-structure) and SPE (depth-adaptive) are complementary: the full model consistently outperforms either single ablation. 
+
+Takeaway. Lightweight slot and step signals—modulated by simple gates—improve draft–target alignment and deliver con-sistent acceleration with minimal overhead. 
+
+2) Gating ablation.: To assess the necessity of the two gates modulating positional signals, we conduct another abla-tion study. We compare four variants: w/o both gates (disabling both), w/o IPE gate (disabling only the item gate), w/o SPE gate (disabling only the step gate), and the full model PAD-Rec . As in Fig. 4, Fig. 5 uses the left y-axis for temp = 0 and the right y-axis for temp = 0 .5. The results show:  
+
+> •
+
+Removing both gates hurts most. Without any gating, speedup drops sharply across all settings (e.g., ∼ 1.96 ×
+
+on Beauty and ∼ 1.76 × on Instruments at temp = 0 ), accompanied by the lowest τ . This shows that ungated ad-dition of position signals destabilizes proposals and lowers acceptance.  
+
+> •
+
+Item gate is crucial. Disabling only the IPE gate ( w/o IPE gate ) remains far from the full model, close to the w/o both 
+
+variant. This indicates the item gate is essential to scale slot cues properly and avoid overwhelming token semantics.  
+
+> •
+
+Step gate provides consistent gains. Disabling only the SPE gate ( w/o SPE gate ) retains most of the performance (e.g., speedup 2.81 × vs. 3.07 × on Beauty ; 2.93 × vs. 3.15 × on 
+
+Instruments at temp = 0 ), with τ very close to the full model. Thus, the step gate yields modest but consistent 
+
+improvements by fine-tuning depth-wise conditioning rather than being the primary driver.  
+
+> •
+
+Full model is best. PAD-Rec (full) attains the highest speedup in all settings and the top (or near-top) τ , con-1.6                             
+
+> 2.0
+> 2.4
+> 2.8
+> 3.2
+> Speedup
+> Beauty
+> 1.6
+> 2.0
+> 2.4
+> 2.8
+> 3.2 Instruments
+> 1246810 12
+> Inference Depth
+> 2.5
+> 4.0
+> 5.5
+> 7.0
+> 8.5
+> 9.5
+> 1246810 12
+> Inference Depth
+> 2.5
+> 4.0
+> 5.5
+> 7.0
+> 8.5
+> 9.5
+> temp=0 temp=0.5
+> Fig. 6. Effect of speculation depth Btest (with Btrain =12 ) on speedup and accepted length τat temp = 0 and 0.5on Beauty and Instruments .
+
+firming that both gates together deliver the most reliable acceleration. 
+
+Takeaway. The item gate serves as the primary stabilizer for slot-aware cues, while the step gate provides a lighter depth-adaptive adjustment; together they maximize acceptance and end-to-end acceleration with negligible overhead. 
+
+D. Hyper-parameter Analysis (RQ3) 
+
+Speculation depth. We study the effect of inference specu-lation depth Btest while fixing the training speculation depth at Btrain =12 (to fully cover step positions for SPE). We vary 
+
+Btest ∈ { 1, 2, 4, 6, 8, 10 , 12 } across both datasets and report 
+
+speedup and accepted length τ (Fig. 6). The main observations are as follows:  
+
+> •
+
+Growth of τ with depth. For both datasets and tempera-tures, τ increases monotonically as Btest grows. Initially, it increases linearly up to B = 6 , while speedup also rises significantly with τ . However, after B = 6 , τ grows more slowly, converging to around 7, and speedup starts to drop.  
+
+> •
+
+Speedup peaks at moderate depths. Speedup follows aunimodal trend: it increases with depth, peaks at moderate values (typically around Btest ≈ 4–6), and then decreases as the depth continues to grow. This reflects the trade-off between (i) longer accepted prefixes (larger τ ) and (ii) the overhead and diminishing returns in acceptance when proposing too deep a draft. In our structured outputs, each item consists of a small, fixed number of semantic-ID tokens plus separators, and moderate Btest already spans roughly one item, which is generally the sweet spot for end-to-end latency.  
+
+> •
+
+Across temperatures. The trends above hold for both temp =0 and temp = 0 .5; quantitatively, temp = 0 is slightly higher in speedup at its peak, yielding more stable, longer accepted prefixes at the same Btest . 
+
+> •
+
+Practical choice of depth. Although we trained with 
+
+Btrain =12 to cover all step indices for SPE, the optimal 
+
+inference depth is smaller (e.g., Btest ≈ 4–6). Therefore, for deployment, we default to a moderate speculation IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 10 1B 3B 8B          
+
+> 2.5
+> 3.0
+> 3.5
+> Speedup
+> Beauty
+> 1B 3B 8B
+> 3
+> 4
+> Instruments
+> 1B 3B 8B
+> 6
+> 7
+> Beauty
+> 1B 3B 8B
+> 5
+> 6
+> 7
+> Instruments
+> PAD-Rec HASS temp = 0 temp = 0.5
+
+Fig. 7. Scaling analysis on speedup and accepted length τ at temp = 0 and 
+
+0.5 on Beauty and Instruments .
+
+depth of Btest =6 to balance acceptance length and verifi-cation/branching overhead. 
+
+E. Scaling Analysis (RQ4) 
+
+Model size. We analyze the scaling behavior of speculative decoding by varying the backbone model size and comparing PAD-Rec with HASS, while fixing the other hyper-parameters (with B=6 ). Specifically, we evaluate three instruction-tuned backbones, Llama-3.2-1B-Instruct , Llama-3.2-3B-Instruct , and 
+
+Llama-3-8B-Instruct [62]. For each backbone, we first perform recommendation fine-tuning under the same protocol, and then report inference speedup and accepted length τ at temp = 0 and 
+
+0.5 on both Beauty and Instruments (see Fig. 7). The main observations are summarized as follows:  
+
+> •
+
+Speedup increases with model size. Across both datasets and temperatures, speedup consistently improves as the backbone scales from 1B to 8B. This indicates that specu-lative decoding benefits more from larger backbones, where the relative overhead of draft generation and verification becomes smaller.  
+
+> •
+
+Diminishing marginal gains. Although speedup grows monotonically with model size, the improvement from 3B to 8B is smaller than that from 1B to 3B, exhibiting a clear diminishing-return effect. This suggests that scaling the backbone yields progressively smaller marginal benefits for speculative acceleration.  
+
+> •
+
+PAD-Rec vs. HASS. PAD-Rec consistently achieves higher speedup than HASS across all model sizes and tempera-tures. This demonstrates that PAD-Rec can more effectively exploit speculative acceptance for acceleration, and its ad-vantage remains stable as the model scales.  
+
+> •
+
+Accepted length τ . The accepted length τ increases mildly with model size and remains relatively stable compared to speedup. This implies that scaling behavior is mainly driven by efficiency gains rather than substantial changes in acceptance behavior. VI. C ONCLUSION 
+
+In this work, we study speculative decoding for LLM-based generative list-wise recommendation and highlight that effective acceleration must respect both the structured nature of item representations and the multi-step decoding process. To this end, we propose PAD-Rec, a position-aware draft-ing module that augments the draft model with item posi-tion embeddings and step position embeddings, modulated by lightweight gates to better align draft proposals with structured recommendation outputs. Extensive experiments on four real-world datasets demonstrate that PAD-Rec consis-tently achieves substantial inference acceleration—up to 3.1 ×
+
+wall-clock speedup—while incurring negligible overhead and largely preserving recommendation quality. Further analyses show that PAD-Rec is robust across sampling temperatures, hyper-parameter choices, and backbone model scales, and consistently outperforms prior speculative decoding baselines. These results indicate that incorporating structure-aware induc-tive biases into speculative decoding is a practical and effective approach for accelerating LLM-based generative recommenda-tion systems. REFERENCES [1] B. Chen, X. Guo, S. Wang, Z. Liang, Y. Lv, Y. Ma, X. Xiao, B. Xue, X. Zhang, Y. Yang et al. , “Onesearch: A preliminary exploration of the unified end-to-end generative framework for e-commerce search,” arXiv preprint arXiv:2509.03236 , 2025. [2] J. Deng, S. Wang, K. Cai, L. Ren, Q. Hu, W. Ding, Q. Luo, and G. Zhou, “Onerec: Unifying retrieve and rank with generative recommender and iterative preference alignment,” arXiv preprint arXiv:2502.18965 , 2025. [3] J. Chen, C. Gao, S. Yuan, S. Liu, Q. Cai, and P. Jiang, “Dlcrec: A novel approach for managing diversity in llm-based recommender systems,” in Proceedings of the Eighteenth ACM International Conference on Web Search and Data Mining , 2025, pp. 857–865. [4] J. Zou, A. Sun, C. Long, and E. Kanoulas, “Knowledge-enhanced con-versational recommendation via transformer-based sequential modeling,” 
+
+ACM Transactions on Information Systems , vol. 42, no. 6, pp. 1–27, 2024. [5] C. Wang, Y. Zhang, Z. Wang, T. Shi, K. Bao, F. Feng, and T.-S. Chua, “Decoding in latent spaces for efficient inference in llm-based recommendation,” arXiv preprint arXiv:2509.11524 , 2025. [6] X. Lin, C. Yang, W. Wang, Y. Li, C. Du, F. Feng, S.-K. Ng, and T.-S. Chua, “Efficient inference for large language model-based generative recommendation,” in The Thirteenth International Conference on Learn-ing Representations , 2025. [7] Y. Xi, H. Wang, B. Chen, J. Lin, M. Zhu, W. Liu, R. Tang, Z. Wei, W. Zhang, and Y. Yu, “Efficiency unleashed: Inference acceleration for llm-based recommender systems with speculative decoding,” in Proceed-ings of the 48th International ACM SIGIR Conference on Research and Development in Information Retrieval , 2025, pp. 1891–1901. [8] Y. Leviathan, M. Kalman, and Y. Matias, “Fast inference from transform-ers via speculative decoding,” in International Conference on Machine Learning . PMLR, 2023, pp. 19 274–19 286. [9] H. Xia, T. Ge, P. Wang, S.-Q. Chen, F. Wei, and Z. Sui, “Speculative decoding: Exploiting speculative execution for accelerating seq2seq generation,” arXiv preprint arXiv:2203.16487 , 2022. [10] H. Xia, Z. Yang, Q. Dong, P. Wang, Y. Li, T. Ge, T. Liu, W. Li, and Z. Sui, “Unlocking efficiency in large language model inference: A comprehensive survey of speculative decoding,” in ACL (Findings) ,2024. [11] C. Chen, S. Borgeaud, G. Irving, J.-B. Lespiau, L. Sifre, and J. Jumper, “Accelerating large language model decoding with speculative sam-pling,” arXiv preprint arXiv:2302.01318 , 2023. [12] X. Miao, G. Oliaro, Z. Zhang, X. Cheng, Z. Wang, Z. Zhang, R. Y. Y. Wong, A. Zhu, L. Yang, X. Shi et al. , “Specinfer: Accelerating large language model serving with tree-based speculative inference and ver-ification,” in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , 2024, pp. 932–949. [13] Y. Zhou, K. Lyu, A. S. Rawat, A. K. Menon, A. Rostamizadeh, S. Ku-mar, J.-F. Kagy, and R. Agarwal, “Distillspec: Improving speculative decoding via knowledge distillation,” arXiv preprint arXiv:2310.08461 ,2023. IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 11 
+
+[14] Y. Li, F. Wei, C. Zhang, and H. Zhang, “Eagle: Speculative sampling requires rethinking feature uncertainty,” in International Conference on Machine Learning . PMLR, 2024, pp. 28 935–28 948. [15] L. Zhang, X. Wang, Y. Huang, and R. Xu, “Learning harmonized rep-resentations for speculative sampling,” in The Thirteenth International Conference on Learning Representations , 2025. [16] H. Qu, W. Fan, Z. Zhao, and Q. Li, “Tokenrec: Learning to tokenize id for llm-based generative recommendations,” IEEE Transactions on Knowledge and Data Engineering , 2025. [17] B. Zheng, Y. Hou, H. Lu, Y. Chen, W. X. Zhao, M. Chen, and J.-R. Wen, “Adapting large language models by integrating collaborative semantics for recommendation,” in 2024 IEEE 40th International Conference on Data Engineering (ICDE) . IEEE, 2024, pp. 1435–1448. [18] D. Lee, C. Kim, S. Kim, M. Cho, and W.-S. Han, “Autoregressive image generation using residual quantization,” in Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , 2022, pp. 11 523–11 532. [19] M. Stern, N. Shazeer, and J. Uszkoreit, “Blockwise parallel decoding for deep autoregressive models,” Advances in Neural Information Pro-cessing Systems , vol. 31, 2018. [20] Y. Li, F. Wei, C. Zhang, and H. Zhang, “Eagle-2: Faster inference of language models with dynamic draft trees,” in Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing ,2024, pp. 7421–7432. [21] Z. Chen, A. May, R. Svirschevski, Y. Huang, M. Ryabinin, Z. Jia, and B. Chen, “Sequoia: Scalable, robust, and hardware-aware speculative decoding,” CoRR , 2024. [22] R. Svirschevski, A. May, Z. Chen, B. Chen, Z. Jia, and M. Ryabinin, “Specexec: Massively parallel speculative decoding for interactive llm inference on consumer devices,” Advances in Neural Information Pro-cessing Systems , vol. 37, pp. 16 342–16 368, 2024. [23] Y. Fu, P. Bailis, I. Stoica, and H. Zhang, “Break the sequential de-pendency of llm inference using lookahead decoding,” in Proceedings of the 41st International Conference on Machine Learning , 2024, pp. 14 060–14 079. [24] S. Kou, L. Hu, Z. He, Z. Deng, and H. Zhang, “Cllms: Consistency large language models,” in Forty-first International Conference on Machine Learning , 2024. [25] Z. He, Z. Zhong, T. Cai, J. D. Lee, and D. He, “Rest: Retrieval-based speculative decoding,” in 2024 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, NAACL 2024 . Association for Computational Linguistics (ACL), 2024, pp. 1582–1595. [26] W. Zhao, Y. Huang, X. Han, W. Xu, C. Xiao, X. Zhang, Y. Fang, K. Zhang, Z. Liu, and M. Sun, “Ouroboros: Generating longer drafts phrase by phrase for faster speculative decoding,” in Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , 2024, pp. 13 378–13 393. [27] T. Cai, Y. Li, Z. Geng, H. Peng, J. D. Lee, D. Chen, and T. Dao, “Medusa: Simple llm inference acceleration framework with multiple decoding heads,” in Proceedings of the 41st International Conference on Machine Learning , 2024, pp. 5209–5235. [28] Z. Ankner, R. Parthasarathy, A. Nrusimha, C. Rinard, J. Ragan-Kelley, and W. Brandon, “Hydra: Sequentially-dependent draft heads for medusa decoding,” in First Conference on Language Modeling , 2024. [29] S. Hu, J. Li, X. Xie, Z. Lu, K.-C. Toh, and P. Zhou, “Griffin: Effec-tive token alignment for faster speculative decoding,” arXiv preprint arXiv:2502.11018 , 2025. [30] L. Gui, B. Xiao, L. Su, and W. Chen, “Boosting lossless speculative decoding via feature sampling and partial alignment distillation,” arXiv preprint arXiv:2408.15562 , 2024. [31] Y. Weng, D. Mei, H. Qiu, X. Chen, L. Liu, J. Tian, and Z. Shi, “Coral: Learning consistent representations across multi-step training with lighter speculative drafter,” arXiv preprint arXiv:2502.16880 , 2025. [32] Z. Liu, C. Zhang, and D. Song, “How speculative can speculative decoding be?” in Proceedings of the 2024 Joint International Conference on Computational Linguistics, Language Resources and Evaluation (LREC-COLING 2024) , 2024, pp. 8265–8275. [33] S. Liu, Y. Ye, Q. Zhu, Z. Cao, and Y. He, “Heterospec: Leveraging con-textual heterogeneity for efficient speculative decoding,” arXiv preprint arXiv:2505.13254 , 2025. [34] Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian, C. R´ e, C. Barrett et al. , “H2o: Heavy-hitter oracle for efficient generative inference of large language models,” Advances in Neural Information Processing Systems , vol. 36, pp. 34 661–34 710, 2023. [35] K. Bao, J. Zhang, W. Wang, Y. Zhang, Z. Yang, Y. Luo, C. Chen, F. Feng, and Q. Tian, “A bi-step grounding paradigm for large language mod-els in recommendation systems,” ACM Transactions on Recommender Systems , vol. 3, no. 4, pp. 1–27, 2025. [36] W. Shi, X. He, Y. Zhang, C. Gao, X. Li, J. Zhang, Q. Wang, and F. Feng, “Large language models are learnable planners for long-term recommendation,” in Proceedings of the 47th International ACM SIGIR Conference on Research and Development in Information Retrieval ,2024, pp. 1893–1903. [37] Y. Zhang, W. Xu, X. Zhao, W. Wang, F. Feng, X. He, and T.-S. Chua, “Reinforced latent reasoning for llm-based recommendation,” arXiv preprint arXiv:2505.19092 , 2025. [38] S. Rajput, N. Mehta, A. Singh, R. Hulikal Keshavan, T. Vu, L. Heldt, L. Hong, Y. Tay, V. Tran, J. Samost et al. , “Recommender systems with generative retrieval,” Advances in Neural Information Processing Systems , vol. 36, pp. 10 299–10 315, 2023. [39] Y. Hou, J. Ni, Z. He, N. Sachdeva, W.-C. Kang, E. H. Chi, J. McAuley, and D. Z. Cheng, “Actionpiece: Contextually tokeniz-ing action sequences for generative recommendation,” arXiv preprint arXiv:2502.13581 , 2025. [40] W. Wang, H. Bao, X. Lin, J. Zhang, Y. Li, F. Feng, S.-K. Ng, and T.-S. Chua, “Learnable item tokenization for generative recommendation,” in 
+
+Proceedings of the 33rd ACM International Conference on Information and Knowledge Management , 2024, pp. 2400–2409. [41] W. Hua, S. Xu, Y. Ge, and Y. Zhang, “How to index item ids for recommendation foundation models,” in Proceedings of the Annual International ACM SIGIR Conference on Research and Development in Information Retrieval in the Asia Pacific Region , 2023, pp. 195–204. [42] S. Geng, S. Liu, Z. Fu, Y. Ge, and Y. Zhang, “Recommendation as language processing (rlp): A unified pretrain, personalized prompt & predict paradigm (p5),” in Proceedings of the 16th ACM conference on recommender systems , 2022, pp. 299–315. [43] Y. Wang, J. Xun, M. Hong, J. Zhu, T. Jin, W. Lin, H. Li, L. Li, Y. Xia, Z. Zhao et al. , “Eager: Two-stream generative recommender with behavior-semantic collaboration,” in Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining , 2024, pp. 3245–3254. [44] J. Zhai, L. Liao, X. Liu, Y. Wang, R. Li, X. Cao, L. Gao, Z. Gong, F. Gu, M. He et al. , “Actions speak louder than words: Trillion-parameter sequential transducers for generative recommendations,” arXiv preprint arXiv:2402.17152 , 2024. [45] C. Gao, R. Chen, S. Yuan, K. Huang, Y. Yu, and X. He, “Sprec: Self-play to debias llm-based recommendation,” in Proceedings of the ACM on Web Conference 2025 , ser. WWW ’25, 2025, pp. 5075–5084. [46] C. Gao, M. Gao, C. Fan, S. Yuan, W. Shi, and X. He, “Process-supervised llm recommenders via flow-guided tuning,” in Proceedings of the 48th International ACM SIGIR Conference on Research and Development in Information Retrieval , ser. SIGIR ’25, 2025, pp. 1934– 1943. [47] X. Zhao, J. You, Y. Zhang, W. Wang, H. Cheng, F. Feng, S.-K. Ng, and T.-S. Chua, “Nextquill: Causal preference modeling for enhancing llm personalization,” arXiv preprint arXiv:2506.02368 , 2025. [48] Z. Zhao, C. Gao, Y. Zhang, H. Liu, W. Gan, H. Guo, Y. Liu, and F. Feng, “Don’t start over: A cost-effective framework for migrating personalized prompts between llms,” arXiv preprint arXiv:2601.12034 , 2026. [49] C. Wang, Y. Zhang, W. Wang, X. Zhao, F. Feng, X. He, and T.-S. Chua, “Think-while-generating: On-the-fly reasoning for personalized long-form generation,” arXiv preprint arXiv:2512.06690 , 2025. [50] M. Gao, C. Gao, J. Tang, J. Zhang, X. Zhao, B. Wang, J. Chen, H. He, L. Pan, X. Chen, X. Xin, Q. Cai, P. Jiang, K. Gai, H. Liu, F. Feng, and X. He, “Integrating large language models with reinforcement learning: A survey of llm-rl synergistic recommendation,” TechRxiv Preprint ,2026. [51] Z. Si, Z. Sun, J. Chen, G. Chen, X. Zang, K. Zheng, Y. Song, X. Zhang, J. Xu, and K. Gai, “Generative retrieval with semantic tree-structured identifiers and contrastive learning,” in Proceedings of the 2024 Annual International ACM SIGIR Conference on Research and Development in Information Retrieval in the Asia Pacific Region , 2024, pp. 154–163. [52] J. Tan, S. Xu, W. Hua, Y. Ge, Z. Li, and Y. Zhang, “Idgenrec: Llm-recsys alignment with textual id learning,” in Proceedings of the 47th international ACM SIGIR conference on research and development in information retrieval , 2024, pp. 355–364. [53] H.-T. Cheng, L. Koc, J. Harmsen, T. Shaked, T. Chandra, H. Aradhye, G. Anderson, G. Corrado, W. Chai, M. Ispir et al. , “Wide & deep learning for recommender systems,” in Proceedings of the 1st workshop on deep learning for recommender systems , 2016, pp. 7–10. IEEE TRANSACTIONS ON KNOWLEDGE AND DATA ENGINEERING, VOL. XX, NO. XX, XXXX 2026 12 
+
+[54] X. He, K. Deng, X. Wang, Y. Li, Y. Zhang, and M. Wang, “Lightgcn: Simplifying and powering graph convolution network for recommenda-tion,” in Proceedings of the 43rd International ACM SIGIR conference on research and development in Information Retrieval , 2020, pp. 639– 648. [55] B. Hassibi and D. Stork, “Second order derivatives for network pruning: Optimal brain surgeon,” Advances in neural information processing systems , vol. 5, 1992. [56] S. Zheng, K. Bao, J. Zhang, Y. Zhang, F. Feng, and X. He, “Boosting parameter efficiency in llm-based recommendation through sophisticated pruning,” arXiv preprint arXiv:2507.07064 , 2025. [57] G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han, “Smoothquant: Accurate and efficient post-training quantization for large language models,” in International conference on machine learning .PMLR, 2023, pp. 38 087–38 099. [58] Y. Ding, J. Li, J. McAuley, and Y. Hou, “Inductive generative recom-mendation via retrieval-based speculation,” in Proceedings of the AAAI Conference on Artificial Intelligence , vol. 40, no. 17, 2026, pp. 14 675– 14 683. [59] Y. Wang, S. Zhou, J. Lu, Z. Liu, L. Liu, M. Wang, W. Zhang, F. Li, W. Su, P. Wang et al. , “Nezha: A zero-sacrifice and hyperspeed decoding architecture for generative recommendations,” in Proceedings of the ACM Web Conference 2026 , 2026, pp. 8073–8082. [60] C. Yang, X. Lin, W. Wang, Y. Li, T. Sun, X. Han, and T.-S. Chua, “Earn: Efficient inference acceleration for llm-based generative recom-mendation by register tokens,” in Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining V. 2 , 2025, pp. 3483–3494. [61] J. Ni, J. Li, and J. McAuley, “Justifying recommendations using distantly-labeled reviews and fine-grained aspects,” in Proceedings of the 2019 conference on empirical methods in natural language pro-cessing and the 9th international joint conference on natural language processing (EMNLP-IJCNLP) , 2019, pp. 188–197. [62] A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Yang, A. Fan et al. , “The llama 3 herd of models,” arXiv e-prints , pp. arXiv–2407, 2024.
