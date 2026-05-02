@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-05-02 <!--dpr-date:20260502-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202605/02/2604.24003v1-stabilizing-efficient-reasoning-with-step-level-advantage-selection" data-sidebar-item="{&quot;title&quot;: &quot;Stabilizing Efficient Reasoning with Step-Level Advantage Selection&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2604.24003v1-stabilizing-efficient-reasoning-with-step-level-advantage-selection&quot;, &quot;score&quot;: &quot;7.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;llm&quot;}], &quot;evidence&quot;: &quot;通过推理压缩和剪枝实现高效推理&quot;}">Stabilizing Efficient Reasoning with Step-Level Advantage Selection</a>
   * 2026-05-01 <!--dpr-date:20260501-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202605/01/2604.27747v1-position-aware-drafting-for-inference-acceleration-in-llm-based-generative-list-wise-recommendation" data-sidebar-item="{&quot;title&quot;: &quot;Position-Aware Drafting for Inference Acceleration in LLM-Based Generative List-Wise Recommendation&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2604.27747v1-position-aware-drafting-for-inference-acceleration-in-llm-based-generative-list-wise-recommendation&quot;, &quot;score&quot;: &quot;9.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;llm-sd&quot;}], &quot;evidence&quot;: &quot;基于LLM的推荐系统中的投机解码推理加速&quot;}">Position-Aware Drafting for Inference Acceleration in LLM-Based Generative List-Wise Recommendation</a>

@@ -6,34 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-01
-- 运行时间：2026-05-01 19:55:43 UTC
+- 最新运行日期：2026-05-02
+- 运行时间：2026-05-02 20:13:06 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：1
-- 速读区：3
+- 本次总论文数：1
+- 精读区：0
+- 速读区：1
 
 ### 今日简报（AI）
-今日聚焦 LLM 推理加速与多语言 MoE 模型，深度解析了位置感知草稿技术在列表推荐中的应用。
-重点关注通过位置感知草稿显著提升生成式推荐的推理速度，以及利用 MoE 架构实现高效的多语言模型升级。
-建议优先研读位置感知推理加速方案，并关注大模型在能效优化与服务控制方面的最新进展。
-- 详情：[/202605/01/README](/202605/01/README)
+今日聚焦大模型推理稳定性，探索通过“步骤级优势选择”实现更高效的逻辑演进。
+该研究证明了细粒度反馈在复杂推理中的关键作用，能有效减少训练波动并提升模型产出质量。
+建议关注长链条推理的微调优化，尝试将这种分步评估思路应用于垂直领域的逻辑增强。
+- 详情：[/202605/02/README](/202605/02/README)
 
 ### 精读区论文标签
-1. [Position-Aware Drafting for Inference Acceleration in LLM-Based Generative List-Wise Recommendation](/202605/01/2604.27747v1-position-aware-drafting-for-inference-acceleration-in-llm-based-generative-list-wise-recommendation)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：基于LLM的推荐系统中的投机解码推理加速
+- 本次无精读推荐。
 
 ### 速读区论文标签
-1. [Marco-MoE: Open Multilingual Mixture-of-Expert Language Models with Efficient Upcycling](/202605/01/2604.25578v1-marco-moe-open-multilingual-mixture-of-expert-language-models-with-efficient-upcycling)  
-   标签：评分：7.0/10、query:llm-ef
-   evidence：高效多语言模型推理的稀疏混合专家设计
-2. [LLM-Guided Runtime Parameter Optimization for Energy-Efficient Model Inference](/202605/01/2604.27032v1-llm-guided-runtime-parameter-optimization-for-energy-efficient-model-inference)  
-   标签：评分：7.0/10、query:llm-ef
-   evidence：基于LLM引导的运行时参数优化，实现能效推理
-3. [Belief-Guided Inference Control for Large Language Model Services via Verifiable Observations](/202605/01/2604.27536v1-belief-guided-inference-control-for-large-language-model-services-via-verifiable-observations)  
+1. [Stabilizing Efficient Reasoning with Step-Level Advantage Selection](/202605/02/2604.24003v1-stabilizing-efficient-reasoning-with-step-level-advantage-selection)  
    标签：评分：7.0/10、query:llm
-   evidence：大模型服务的自适应推理控制以优化成本
+   evidence：通过推理压缩和剪枝实现高效推理
 
 
 <div class="dpr-home-promo-card">
