@@ -6,26 +6,36 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-02
-- 运行时间：2026-05-02 20:13:06 UTC
+- 最新运行日期：2026-05-03
+- 运行时间：2026-05-03 19:45:51 UTC
 - 运行状态：成功
-- 本次总论文数：1
-- 精读区：0
-- 速读区：1
+- 本次总论文数：5
+- 精读区：5
+- 速读区：0
 
 ### 今日简报（AI）
-今日聚焦大模型推理稳定性，探索通过“步骤级优势选择”实现更高效的逻辑演进。
-该研究证明了细粒度反馈在复杂推理中的关键作用，能有效减少训练波动并提升模型产出质量。
-建议关注长链条推理的微调优化，尝试将这种分步评估思路应用于垂直领域的逻辑增强。
-- 详情：[/202605/02/README](/202605/02/README)
+今日精选 5 篇论文聚焦模型瘦身，深度探讨了层冗余剪枝与大小模型协同推理的高效
+- 详情：[/202605/03/README](/202605/03/README)
 
 ### 精读区论文标签
-- 本次无精读推荐。
+1. [Rethinking Layer Redundancy in Large Language Models: Calibration Objectives and Search for Depth Pruning](/202605/03/2604.24938v1-rethinking-layer-redundancy-in-large-language-models-calibration-objectives-and-search-for-depth-pruning)  
+   标签：评分：9.0/10、query:llm
+   evidence：用于LLM推理效率优化的深度剪枝
+2. [Tandem: Riding Together with Large and Small Language Models for Efficient Reasoning](/202605/03/2604.23623v1-tandem-riding-together-with-large-and-small-language-models-for-efficient-reasoning)  
+   标签：评分：8.0/10、query:llm
+   evidence：大模型与小模型协作框架，降低推理计算成本
+3. [Shorthand for Thought: Compressing LLM Reasoning via Entropy-Guided Supertokens](/202605/03/2604.26355v1-shorthand-for-thought-compressing-llm-reasoning-via-entropy-guided-supertokens)  
+   标签：评分：8.0/10、query:llm
+   evidence：通过超级标记压缩LLM推理过程以减少推理计算量
+4. [Shorthand for Thought: Compressing LLM Reasoning via Entropy-Guided Supertokens](/202605/03/2604.26355v2-shorthand-for-thought-compressing-llm-reasoning-via-entropy-guided-supertokens)  
+   标签：评分：8.0/10、query:llm
+   evidence：通过超级标记压缩LLM推理过程
+5. [Exploring the Efficiency of 3D-Stacked AI Chip Architecture for LLM Inference with Voxel](/202605/03/2604.26821v1-exploring-the-efficiency-of-3d-stacked-ai-chip-architecture-for-llm-inference-with-voxel)  
+   标签：评分：8.0/10、query:llm
+   evidence：用于LLM推理的3D堆叠AI芯片架构
 
 ### 速读区论文标签
-1. [Stabilizing Efficient Reasoning with Step-Level Advantage Selection](/202605/02/2604.24003v1-stabilizing-efficient-reasoning-with-step-level-advantage-selection)  
-   标签：评分：7.0/10、query:llm
-   evidence：通过推理压缩和剪枝实现高效推理
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
