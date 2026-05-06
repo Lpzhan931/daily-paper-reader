@@ -6,46 +6,34 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-05
-- 运行时间：2026-05-05 20:12:26 UTC
+- 最新运行日期：2026-05-06
+- 运行时间：2026-05-06 20:44:34 UTC
 - 运行状态：成功
-- 本次总论文数：8
-- 精读区：6
-- 速读区：2
+- 本次总论文数：4
+- 精读区：3
+- 速读区：1
 
 ### 今日简报（AI）
-今日深度复盘 8 篇大模型论文，重点攻克推理加速与服务架构的底层优化难题。
-满分论文 SpecKV 揭示了压缩感知下的自适应投机解码潜力，同时指出 LLM 服务正从启发式策略转向严谨的数学优化。
-建议优先研读 SpecKV 的 KV 压缩策略，并关注 Flexi-LoRA 在语音与推理任务中的高效微调表现。
-- 详情：[/202605/05/README](/202605/05/README)
+今日聚焦大模型推理提速与高效训练，深度解析了 KV Cache 压缩与稀疏化预训练的前沿突破。
+SpecKV 与 AdapShot 均获 9.0 高分，分别通过自适应投机解码与语义感知重用，大幅优化了长文本及多样本推理效率。
+建议重点研读 KV Cache 优化方案，这是目前解决大模型推理瓶颈、实现长序列处理最值得关注的方向。
+- 详情：[/202605/06/README](/202605/06/README)
 
 ### 精读区论文标签
-1. [SpecKV: Adaptive Speculative Decoding with Compression-Aware Gamma Selection](/202605/05/2605.02888v1-speckv-adaptive-speculative-decoding-with-compression-aware-gamma-selection)  
-   标签：评分：10.0/10、query:llm-sd
-   evidence：具有压缩感知的自适应投机解码长度选择
-2. [Position: LLM Serving Needs Mathematical Optimization and Algorithmic Foundations, Not Just Heuristics](/202605/05/2605.01280v1-position-llm-serving-needs-mathematical-optimization-and-algorithmic-foundations-not-just-heuristics)  
+1. [SpecKV: Adaptive Speculative Decoding with Compression-Aware Gamma Selection](/202605/06/2605.02888v2-speckv-adaptive-speculative-decoding-with-compression-aware-gamma-selection)  
    标签：评分：9.0/10、query:llm
-   evidence：LLM服务优化的算法基础
-3. [PipeMax: Enhancing Offline LLM Inference on Commodity GPU Servers](/202605/05/2605.02189v1-pipemax-enhancing-offline-llm-inference-on-commodity-gpu-servers)  
+   evidence：用于大语言模型推理加速的自适应投机解码
+2. [AdapShot: Adaptive Many-Shot In-Context Learning with Semantic-Aware KV Cache Reuse](/202605/06/2605.03644v1-adapshot-adaptive-many-shot-in-context-learning-with-semantic-aware-kv-cache-reuse)  
    标签：评分：9.0/10、query:llm
-   evidence：优化LLM服务的吞吐量与KV缓存卸载
-4. [Statistically-Lossless Quantization of Large Language Models](/202605/05/2605.02404v1-statistically-lossless-quantization-of-large-language-models)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于大语言模型高效部署的统计无损量化
-5. [Silicon Showdown: Performance, Efficiency, and Ecosystem Barriers in Consumer-Grade LLM Inference](/202605/05/2605.00519v2-silicon-showdown-performance-efficiency-and-ecosystem-barriers-in-consumer-grade-llm-inference)  
-   标签：评分：8.0/10、query:llm-ef
-   evidence：LLM推理效率的实证分析
-6. [Importance-Guided Basis Selection for Low-Rank Decomposition of Large Language Models](/202605/05/2605.01627v1-importance-guided-basis-selection-for-low-rank-decomposition-of-large-language-models)  
+   evidence：多样本上下文学习中的KV缓存复用以实现高效推理
+3. [Shorthand for Thought: Compressing LLM Reasoning via Entropy-Guided Supertokens](/202605/06/2604.26355v3-shorthand-for-thought-compressing-llm-reasoning-via-entropy-guided-supertokens)  
    标签：评分：8.0/10、query:llm
-   evidence：用于LLM压缩的低秩分解与剪枝技术
+   evidence：压缩大语言模型推理过程以提高推理效率
 
 ### 速读区论文标签
-1. [Flexi-LoRA with Input-Adaptive Ranks: Efficient Finetuning for Speech and Reasoning Tasks](/202605/05/2605.01959v1-flexi-lora-with-input-adaptive-ranks-efficient-finetuning-for-speech-and-reasoning-tasks)  
+1. [ELAS: Efficient Pre-Training of Low-Rank Large Language Models via 2:4 Activation Sparsity](/202605/06/2605.03667v1-elas-efficient-pre-training-of-low-rank-large-language-models-via-24-activation-sparsity)  
    标签：评分：7.0/10、query:llm-ef
-   evidence：用于高效推理的输入自适应秩
-2. [Activation Compression in LLMs: Theoretical Analysis and Efficient Algorithm](/202605/05/2605.01255v1-activation-compression-in-llms-theoretical-analysis-and-efficient-algorithm)  
-   标签：评分：6.0/10、query:llm
-   evidence：用于内存高效的大模型训练与推理的激活压缩
+   evidence：结构化稀疏用于高效大模型训练与吞吐量提升
 
 
 <div class="dpr-home-promo-card">
