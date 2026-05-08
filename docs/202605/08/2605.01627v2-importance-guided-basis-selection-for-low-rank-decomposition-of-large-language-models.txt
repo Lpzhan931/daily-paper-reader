@@ -1,0 +1,3417 @@
+Title: Importance-Guided Basis Selection for Low-Rank Decomposition of Large Language Models
+
+URL Source: https://arxiv.org/pdf/2605.01627v2
+
+Published Time: Fri, 08 May 2026 01:37:00 GMT
+
+Number of Pages: 26
+
+Markdown Content:
+# Importance-Guided Basis Selection for Low-Rank Decomposition of Large Language Models 
+
+Daniel Agyei Asante 
+
+Iowa State University 
+
+dasante@iastate.edu 
+
+Ernie Chang 
+
+Meta 
+
+erniecyc@meta.com 
+
+Yang Li ∗
+
+Iowa State University 
+
+yangli1@iastate.edu 
+
+## Abstract 
+
+Low-rank decomposition is a compelling approach for compressing large language models, but its effectiveness hinges on selecting which singular-vector bases to retain for a target task. Existing methods such as Basel adapt singular-value co-efficients on downstream data and prune bases with small re-learned magnitudes, a heuristic that can be misaligned with task performance because it ignores the local geometry of the loss landscape. We present Basis Selection with Impor-tance (BSI), a principled low-rank compression framework that ranks and prunes bases by directly estimating the expected loss increase incurred when each basis is removed. BSI derives a derivative-based importance score from a second-order Taylor expansion of the task loss with respect to singular values, combining first-order sensitivity and second-order curvature to quantify pruning impact. To make this criterion practical for LLMs, we develop an efficient Hessian-diagonal esti-mator by adapting the Hutchinson randomized-probing method to loss curvature with symmetric parameter perturbations. We provide a comprehensive theoretical analysis, including loss-increase bounds under basis pruning, explicit propagation of Hessian-diagonal estimation error into these bounds, variance characterization tied to the Hessian spectrum, high-probability sample-complexity guarantees for achieving a target estimation accuracy, and guidance on perturbation intensity. Extensive experiments on mathematical reasoning benchmarks demonstrate that BSI consistently outperforms state-of-the-art low-rank decomposition baselines, with especially strong improvements under deep compression. 
+
+## 1 Introduction 
+
+The remarkable success of large language models (LLMs) has been driven in part by ever-growing parameter counts, but this scaling comes with prohibitive memory footprints and inference latency [ 15 ,11 ]. Enabling LLM deployment in resource-constrained settings such as mobile and wearable devices therefore motivates an active line of work on model compression. Among existing approaches, low-rank decomposition [ 16 , 12 , 18 ] is particularly appealing due to its strong empirical effectiveness and rigorous mathematical grounding, which leverages the low-dimensional structure often present in neural network weights and activations. By approximating large matrices as the product of smaller low-rank factors, low-rank decomposition methods substantially reduce parameter count and computation while largely preserving model performance. Standard low-rank compression typically relies on singular value decomposition (SVD) [ 8]. Given a weight matrix W ∈ Rn×m, SVD yields the rank-r approximation W ≈ USV ⊤ = Pri=1 σi uiv⊤ 
+
+> i
+
+,
+
+where {σi}ri=1 are nonnegative singular values and {ui}ri=1 ⊂ Rn, {vi}ri=1 ⊂ Rm are orthonormal singular vectors. This representation views W as a weighted sum of rank-one orthonormal bases 
+
+> ∗Corresponding author. Address: 2434 Osborn Dr, Ames, IA 50011, United States. Preprint.
+> arXiv:2605.01627v2 [cs.LG] 7 May 2026
+
+{uiv⊤ 
+
+> i
+
+}ri=1 , with weights given by σi. Recent evidence suggests that many such bases encode task-specific semantics (e.g., mathematics, coding, geography) that may be valuable for some downstream applications but unnecessary for others [ 16 ]. Motivated by this observation, Basel [ 16 ], the state-of-the-art low-rank decomposition method for model compression, compresses pretrained models by identifying and removing bases that are irrelevant to the target application. Concretely, Basel augments each SVD factorization with a small set of auxiliary factors: 
+
+fW =
+
+> r
+
+X
+
+> i=1
+
+σi uiv⊤ 
+
+> i
+
++
+
+> ˜r
+
+X
+
+> j=1
+
+˜uj ˜v⊤ 
+
+> j
+
+, (1) where the rank-one bases {uiv⊤ 
+
+> i
+
+}ri=1 are fixed from the pretrained SVD, and only their coefficients 
+
+{σi} are re-learned on target data. The second term introduces ˜r additional learnable vectors 
+
+{(˜ uj , ˜vj )}˜rj=1 to capture domain-specific features absent from pretraining. After optimizing these learnable parameters on the target application, many coefficients σi shrink toward zero, and Basel prunes the corresponding bases by setting σi = 0 . This raises a central challenge: deciding which bases are essential for task performance and which can be safely discarded. We refer to this challenge as the basis selection problem .
+
+1.1 The Basis Selection Problem 
+
+Basel addresses the basis selection problem using a simple magnitude criterion: after adaptation, it ranks bases by their re-learned singular values and prunes those with small σi, implicitly assuming that a smaller σi means the corresponding basis uiv⊤ 
+
+> i
+
+is irrelevant to the target application, whereas a larger σi indicates an essential basis. While intuitive and empirically efficient, this magnitude-based heuristic is not necessarily aligned with the performance of the target task. In particular, treating σi
+
+as a proxy for task relevance overlooks the local geometry of the loss landscape: a basis with a small coefficient can still lie in a direction to which the loss is highly sensitive, so removing it may incur a disproportionate degradation. Moreover, the heuristic ignores curvature (higher-order) information, limiting its ability to reliably predict the impact of pruning. In this paper, we propose Basis Selection with I mportance (BSI), a principled low-rank compression framework that links basis selection directly to the loss landscape. Instead of relying solely on re-learned singular values, BSI evaluates each basis by estimating the expected increase in loss incurred when that basis is removed. Our approach is grounded in a second-order Taylor expansion of the loss 
+
+ℓ with respect to the singular values {σi}. This yields a formal importance score for dropping basis 
+
+i: Ii ≜ −σi E
+
+h ∂ℓ ∂σ i
+
+i
+
++ 12 σ2 
+
+> i
+
+E
+
+h ∂2ℓ∂σ 2
+
+> i
+
+i
+
+. Unlike magnitude-based heuristics, this criterion explicitly incorporates both first-order sensitivity (gradient) and second-order curvature (Hessian) of the loss, thereby quantifying how pruning a basis affects task performance. By prioritizing the retention of bases according to their influence on the loss rather than their spectral magnitude, BSI enables more effective compression of large-scale models while preserving performance (Section 3.1). A key technical challenge in realizing this principle for LLMs is to estimate, efficiently and reliably, the second-order term in Ii at scale. Directly computing Hessian information is prohibitive for the re-parameterized model: if the model has n active singular-value parameters, then the Hessian 
+
+Hσ = ∇2 
+
+> σ
+
+ℓ, whose entries are ∂2ℓ/ (∂σ i∂σ j ), is an n × n matrix, requiring O(n2) storage and making explicit formation or diagonal extraction infeasible. To address this, we adapt the Hutchinson estimator [ 13 ], originally developed for trace estimation of large implicit matrices, to estimate the Hessian diagonal using randomized symmetric parameter perturbations (Section 3.1.1). We provide a comprehensive theoretical analysis of the proposed algorithm. (1) We derive an upper bound on the loss increase induced by basis pruning and quantify how Hessian-diagonal estimation error propagates into this bound (Section 3.2.1). (2) We characterize the variance of our Hessian-diagonal estimator and relate it to the Hessian’s spectral structure (Section 3.2.2). (3) We establish sample-complexity guarantees: the number of stochastic probes required to bound the Hessian-diagonal estimation error within ϵ with probability at least 1 − δ, explicitly in terms of the Hessian spectrum (Section 3.2.3). (4) We analyze the choice of perturbation intensity for accurate Hessian-diagonal estimation (Appendix C.1). Our contributions are summarized as follows: 2• We propose Basis Selection with Importance (BSI), a principled low-rank decomposition framework for LLM compression. BSI links basis selection to the loss landscape via a derivative-based importance metric that incorporates both gradient and Hessian information, aiming to minimize the expected loss increase incurred by dropping bases. • We provide a rigorous theoretical analysis of BSI, including (i) bounds on the loss impact of basis pruning and its dependence on Hessian-diagonal estimation error, (ii) variance and high-probability guarantees for our Hessian-diagonal estimator, and (iii) an analysis of the perturbation intensity used in the estimator. • We demonstrate the practical effectiveness of BSI through extensive experiments on multi-ple mathematical reasoning tasks. BSI consistently outperforms state-of-the-art low-rank decomposition baselines, with particularly strong gains under deep compression. 
+
+1.2 Related Work 
+
+Model compression addresses the deployment bottlenecks of LLMs including memory, inference latency, and computational cost. To compress over-parameterized networks efficiently, researchers have developed several distinct paradigms, primarily categorized into quantization, pruning, and low-rank decomposition. Quantization compresses a model by representing weights or activations with fewer bits (e.g., INT8, INT4) rather than FP16/FP32. This reduces memory and can accelerate inference on hardware optimized for arithmetics. A foundational work in this area is LLM.int8() [ 6 ], which separates the Transformer’s feed-forward and attention weight matrices into outlier and non-outlier dimensions based on activation magnitude. Outlier dimensions are computed in higher precision, while the remaining weights are quantized to 8-bit and multiplied using vector-wise scaling derived from row-and column-wise absolute maxima. Similarly, GPTQ [ 7 ] performs block-wise quantization of weight matrices using a second-order approximation of the loss to minimize quantization error. Pruning reduces model size by identifying and removing redundant parameters from a neural network. Early work by Han et al. [9] introduced iterative magnitude pruning, which learns the importance of individual connections and removes those considered unimportant. More recently, Sun et al. [22] proposed Wanda, which estimates weight importance using both weight magnitude and the norm of the corresponding input activation. To improve inference efficiency, An et al. [1] introduced FLAP, a structured pruning method based on activation fluctuation. FLAP measures how removing individual weight columns changes the output feature map, then prunes components that cause only small fluctuations, helping preserve model performance. Low-rank compression approximates a large weight matrix as the product of lower-dimensional matrices, thereby reducing the number of parameters as well as memory and computational costs. A standard approach in this direction is SVD [ 8, 18 ]. To improve SVD, Hsu et al. [12] propose a weighted low-rank factorization (FWSVD) that incorporates gradient information via Fisher-style weighting to preserve task performance. Recent work by Li et al. [16] interprets singular vectors as semantic bases that encode domain-specific information, and performs basis selection to preserve task performance using the magnitude of the singular values as an importance score. Despite their empirical success, existing low-rank decomposition methods either minimize recon-struction error or adopt heuristic basis selection rules, objectives that can be poorly aligned with the quantities that ultimately matter—downstream loss and accuracy. We investigate this discrepancy through rigorous theoretical analysis, and address it by introducing a principled, loss-grounded importance measure to select bases during compression. 
+
+## 2 Preliminaries 
+
+Notation. To avoid ambiguity, we distinguish the two diagonal operators used throughout the paper. The operator Diag : Rn → Rn×n maps a vector a ∈ Rn to the diagonal matrix whose i-th diagonal entry equals ai (with all off-diagonal entries equal to zero). Conversely, diag : Rn×n → Rn
+
+extracts the diagonal of a matrix, i.e., diag( A) ≜ [A11 , A 22 , . . . , A nn ]⊤, where A ∈ Rn×n and Aii 
+
+denotes the (i, i )-th entry of A. We use this convention consistently throughout the paper. 32.1 Hutchinson Trace and Diagonal Estimators Definition 1 (Rademacher Vectors) . A random vector z = [ z1, z 2, . . . , z n]⊤ is a Rademacher vector if its entries zi are independent and identically distributed (i.i.d) random variables taking values in 
+
+{− 1, +1 }, with probability Pr( zi = ±1) = 12 .
+
+Let z ∈ {− 1, +1 }n be a Rademacher random vector. Hutchinson’s trace estimator T (s) for a matrix 
+
+A ∈ Rn×n is defined as: T (s)(A) = 1
+
+> s
+
+Psk=1 (z(k))⊤A z (k). It is well-established that when A is symmetric, E[T (s)(A)] = tr( A) and Var[ T (s)(A)] = 2 
+
+> s
+
+∥ ¯A∥2 
+
+> F
+
+, where ¯A = A − Diag(diag( A)) 
+
+denotes the matrix obtained from A by setting its diagonal entries to zero. The Hutchinson diagonal estimator can be understood as a localized extension of the trace estimator. While the trace estimator T (s)(A) for a matrix A collapses the quadratic form z⊤Az into a single scalar, the diagonal estimator preserves the entry-wise structure of the operator. Following the formulation of [ 3], the diagonal of a matrix A ∈ Rn×n can be estimated by considering the Hadamard product of a probe vector z and its transformation Az . Formally, given a sequence of 
+
+s number of i.i.d. Rademacher probe vectors {z(k)}sk=1 , Hutchinson’s diagonal estimator D(s) is: 
+
+D(s)(A) = 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+z(k) ⊙ (Az (k)), (2) where ⊙ denotes the element-wise (Hadamard) product. 
+
+2.2 Auxiliary Definitions Definition 2 (Riemann Zeta Function) . The Riemann zeta function is defined for real s > 1 as 
+
+ζ(s) := 
+
+> ∞
+
+X
+
+> k=1
+
+1
+
+ks .
+
+It is classical that the series converges for all s > 1.
+
+Definition 3 (Generalized harmonic number / partial zeta sum) . For n ∈ N and s ∈ R, the generalized harmonic number is defined by 
+
+Hn,s := 
+
+> n
+
+X
+
+> k=1
+
+1
+
+ks .Hn,s increases monotonically in n. Hn,s converges to ζ(s) as n → ∞ for every s > 1.
+
+Lemma 4 (Entrywise Spectral Decomposition) . Let H ∈ Rn×n be a symmetric matrix. Then there exists a set of orthonormal eigenvectors {uk}nk=1 with corresponding eigenvalues {λk}nk=1 such that 
+
+H = Pnk=1 λkuku⊤ 
+
+> k
+
+. In particular, the entries of H satisfy Hij = Pnk=1 λkuki ukj where uki is the 
+
+i-th element of the k-th eigenvector. 
+
+## 3 Basis Selection with Importance (BSI) 
+
+Our BSI framework establishes a principled selection rule that minimizes the expected loss increase incurred by dropping bases. It links the basis selection problem to the local geometry of the loss landscape by deriving an importance metric from the first- and second-order derivatives of the loss ℓ
+
+with respect to the singular values. We first describe the framework design in Section 3.1, and then provide a detailed theoretical analysis in Section 3.2. Throughout, we adopt the denominator-layout convention for matrix calculus. 
+
+3.1 Design of the BSI Algorithm 3.1.1 Importance Metric for Selecting Bases 
+
+Let W denote the weight matrix of a linear layer. Using the singular value decomposition, we write 
+
+W = P 
+
+> i
+
+σiuiv⊤ 
+
+> i
+
+. Given an input x, the layer output is y = Wx = P 
+
+> i
+
+σi uiv⊤ 
+
+> i
+
+x. Dropping the 4i-th basis corresponds to removing its contribution, i.e., setting σi = 0 . Therefore, the induced change in the singular value is ∆σi = 0 − σi = −σi, which in turn yields the following expected change in the loss: 
+
+E[∆ ℓ] ≡ E[ℓ(σi + ∆ σi) − ℓ(σi)] 
+
+≈ E
+
+ 
+
+ℓ(σi) + ∂ℓ ∂σ i
+
+∆σi + 12
+
+∂2ℓ∂σ 2
+
+> i
+
+(∆ σi)2
+
+
+
+− ℓ(σi)
+
+
+
+= E
+
+ ∂ℓ ∂σ i
+
+∆σi + 12
+
+∂2ℓ∂σ 2
+
+> i
+
+(∆ σi)2
+
+
+
+= −σi E
+
+ ∂ℓ ∂σ i
+
+
+
++ 12 σ2 
+
+> i
+
+E
+
+ ∂2ℓ∂σ 2
+
+> i
+
+
+
+.
+
+Considering this, we define importance metric for basis i as 
+
+Ii ≜ −σi E
+
+ ∂ℓ ∂σ i
+
+
+
++ 12 σ2 
+
+> i
+
+E
+
+ ∂2ℓ∂σ 2
+
+> i
+
+
+
+,
+
+where E
+
+h ∂ℓ ∂σ i
+
+i
+
+denotes the gradient with respect to σi, and E
+
+h ∂2ℓ∂σ 2
+
+> i
+
+i
+
+denotes the second derivative with respect to σi. Pruning bases with a larger importance metric is expected to induce a larger increase in the loss; therefore, we should avoid pruning such bases whenever possible. Computing this importance metric requires estimating the second derivative with respect to each singular value, which can be obtained via Theorem 5. 
+
+Theorem 5 (Hessian Diagonal Estimator) . For any parameter σi of the model, 
+
+Ed∼D 
+
+ ∂2ℓ∂σ 2 
+
+> iσ=σ∗
+
+
+
++ O(ϵ2) = Ez∼R (Z)
+
+> d∼D
+
+"
+
+∂ℓ (d)
+
+∂σ σ=σ∗+ ϵ 
+
+> 2z
+
+− ∂ℓ (d)
+
+∂σ σ=σ∗− ϵ 
+
+> 2z
+
+!
+
+> i
+
+· zi
+
+ϵ
+
+#
+
+,
+
+where 0 < ϵ < 1 denotes the perturbation intensity, and z = [ z1, z 2, . . . , z n]⊤ is a Rademacher random vector defined in Definition 1. Proof. The proof can be found in Appendix A.1 Theorem 5 shows that the Hessian diagonal estimate can be obtained using only gradients, by applying symmetric perturbations along randomly sampled Rademacher vectors. 
+
+3.1.2 Algorithmic Design 
+
+The BSI procedure is shown in Algorithm 1. The algorithm compresses a pretrained model M to a target size defined by the KeepRatio through iterative pruning. The process begins by converting linear layer weight matrices, excluding the embedding layer, into the basis-form defined in Eq. (1) .Following Li et al. [16] , the model is fine-tuned both before and after the pruning stage to improve adaptation to the target application. Prior to pruning, the first- and second-order components of the importance metrics Ii are computed. The gradient (the first-order term) is obtained via back-propagation pass. Theorem 5 provides a principled way to estimate the second-order term (Hessian) for large models. To achieve this efficiently, a candidate pool C is first identified (see Appendix C.2) to reduce computational cost. Bases in this pool are considered for the second-order computation. The model is perturbed along both positive and negative directions using z and ϵ, where z is a Rademacher random vector and 
+
+ϵ ∈ R denotes the perturbation intensity. The gradients g+ and g− are computed at these perturbed states yielding the Hessian diagonal estimate E
+
+h ∂2ℓ∂σ 2
+
+> i
+
+i
+
+=  g+ − g− 
+
+> i
+
+· zi 
+
+> ϵ
+
+. The final importance score for dropping the i-th basis combines the gradient-based first-order term with the Hessian-diagonal-based second-order term. Both quantities are averaged over multiple mini-batches for stability. At each pruning step, we remove bases with the smallest Ii until the remaining set satisfies the KeepRatioPerPruning threshold. 5Algorithm 1 BSI Algorithm 
+
+1: Input: Pretrained or fine-tuned model M
+
+2: Output: Compressed model fM
+
+3: Data: PruningEpochs ; PruningRounds ; NumIterPerEpoch ; SamplingIterRatio ; KeepRatio ; Per-turbation Intensity ϵ; Dataset D
+
+4: IterPerPruning ← round( NumIterPerEpoch × PruningEpochs / PruningRounds )
+
+5: KeepRatioPerPruning ← (KeepRatio )1/PruningRounds 
+
+6: NumProfilingIter ← round( SamplingIterRatio × IterPerPruning )
+
+7: for all linear layer ℓ ∈ M — excluding the embedding layer do 
+
+8: Convert weight matrix W(ℓ) into the form of Eq. (1), yielding active bases A(ℓ)
+
+9: end for 
+
+10: E
+
+h ∂ℓ (d)
+
+> ∂σ i
+
+i
+
+← 0, E
+
+h ∂2ℓ(d)
+
+> ∂σ 2
+> i
+
+i
+
+← 0
+
+11: for iter = 1 to NumIterPerEpoch × PruningEpochs do 
+
+12: Sample d ∼ D 
+
+13: IterInBlock ← (( iter − 1) mod IterPerPruning ) + 1 
+
+14: if IterInBlock ≤ IterPerPruning − NumProfilingIter then 
+
+15: Tune learnable parameters in Eq. (1) for all layers using d
+
+16: else 
+
+17: Compute gradients ∂ℓ (d) 
+
+> ∂σ
+
+for all layers in the model 
+
+18: E
+
+h ∂ℓ (d)
+
+> ∂σ
+
+i
+
+← E
+
+h ∂ℓ (d)
+
+> ∂σ
+
+i
+
++ 1
+
+> NumProfilingIter
+> ∂ℓ (d)
+> ∂σ
+
+19: for all linear layer ℓ ∈ M — excluding the embedding layer do 
+
+20: Let A ← A (ℓ) with singular values {σi}i∈A 
+
+21: Define candidate pool C ⊆ A based on Eq. (8) 
+
+22: Sample z ∼ R (Z), where zi = 0 for all i / ∈ C 
+
+23: Compute g+ ← ∂ℓ (d)  
+
+> ∂σσ=σ∗+
+
+ϵ
+
+2 z
+
+24: Compute g− ← ∂ℓ (d)  
+
+> ∂σσ=σ∗−
+
+ϵ
+
+2 z
+
+25: for all i ∈ C do 
+
+26: E
+
+h ∂2ℓ(d)
+
+> ∂σ 2
+> i
+
+i
+
+← E
+
+h ∂2ℓ(d)
+
+> ∂σ 2
+> i
+
+i
+
++ 1
+
+> NumProfilingIter
+
+ g+ − g− 
+
+> i
+
+· zi
+
+> ϵ
+
+27: end for 
+
+28: end for 
+
+29: end if 
+
+30: if IterInBlock = IterPerPruning then 
+
+31: for all linear layer ℓ ∈ M — excluding the embedding layer do 
+
+32: Ii ← − σi E
+
+h ∂ℓ (d)
+
+> ∂σ i
+
+i
+
++ 12 σ2 
+
+> i
+
+E
+
+h ∂2ℓ(d)
+
+> ∂σ 2
+> i
+
+i
+
+33: E
+
+h ∂ℓ (d)
+
+> ∂σ i
+
+i
+
+← 0, E
+
+h ∂2ℓ(d)
+
+> ∂σ 2
+> i
+
+i
+
+← 0
+
+34: Prune bases with the smallest importance scores Ii from the candidate pool C, subject to the constraint that the total importance score of the remaining bases in C is equal to 
+
+KeepRatioPerPruning times the total positive importance score in C before pruning (if all bases in the candidate pool have negative importance scores, we prune the entire pool). 
+
+35: end for 
+
+36: end if 
+
+37: end for 
+
+38: return fM
+
+3.2 Theoretical Analysis of BSI 
+
+We first bound the loss change induced by dropping a basis, considering both the exact Hessian setting and the case with estimator error (Section 3.2.1). We then analyze the variance of the Hutchinson diagonal estimator and derive a probability bound for the estimator error leveraging the power-law decay of neural network Hessian spectrum (Sections 3.2.2 and 3.2.3). In addition, we analyze the perturbation intensity of the Hessian estimate (Appendix C.1). Finally, we prove that the Hessian diagonal estimate for the output layer is non-negative (Appendix A.5). 63.2.1 Loss Change Under Basis Pruning 
+
+In Theorem 6, we give a bound on the loss induced by pruning a basis in the idealized setting where the Hessian diagonal is exact. Theorem 7 extends the bound to the practical setting where the Hessian diagonal are estimated with error. 
+
+Theorem 6 (Bound on Loss Change from Pruning Bases) . Let ℓ : Rr → R be the loss as a function of the basis singular values s, and assume the Hessian ∇2ℓ is ρ-Lipschitz: 
+
+∥∇ 2ℓ(x) − ∇ 2ℓ(y)∥2 ≤ ρ∥x − y∥2 for all x, y.
+
+Pruning basis i leads to a change in loss following the bound 
+
+|∆ℓ| = ℓ(s − siei) − ℓ(s) ≤ −gisi + 12 Hii s2 
+
+> i
+
++ ρ
+
+6 |si|3,
+
+where gi := ∇ℓ(s)⊤ei, Hii := e⊤ 
+
+> i
+
+∇2ℓ(s) ei, and ei = [0 , . . . , 0, 1, 0, . . . , 0] ⊤ with a 1 on its i-th dimension. Proof. We provide the proof in Appendix A.2.1 
+
+Theorem 7 (Bound on Loss Change for Basis Pruning with Relative Hessian Error) . Let ℓ : Rr → R
+
+be the loss as a function of the basis singular values s and assume the Hessian of ℓ is ρ-Lipschitz, Hessian estimate bHii has a maximum relative error of ε:
+
+| bHii − Hii | ≤ ε|Hii |,
+
+where 0 < ε < 1 and Hii is the i-th diagonal element of the Hessian. Pruning basis i leads to a change of the loss satisfying 
+
+|∆ℓ| = |ℓ(s − siei) − ℓ(s)|≤ −gisi + 12 bHii s2 
+
+> i
+
++ ε
+
+2(1 − ε) | bHii |s2 
+
+> i
+
++ ρ
+
+6 |si|3,
+
+where gi is the gradient with respect to si and ei = [0 , . . . , 0, 1, 0, . . . , 0] ⊤ with 1 on its i-th dimension Proof. See Appendix A.2.1 for the proof. 
+
+3.2.2 Convergence of Hessian Diagonal Estimator 
+
+The neural network Hessian has a structural property that does not generally hold for an arbitrary matrix. This property appears in the decay of its eigenvalues. As shown in prior work [ 20 , 23 ], the eigenvalues of neural network Hessians exhibit power-law decay. We state this behavior as Assumption 8. In Appendix B, we provide empirical evidence that this decay also appears in the Hessian of the reparameterized model in the singular-value space. Under this assumption, Theorem 9 provides a bound on the total variance of the diagonal estimator for neural network Hessians. 
+
+Assumption 8 (Spectral Power-Law Decay) . Let H ∈ Rn×n be a symmetric matrix with eigenvalues 
+
+|λ1| ≥ | λ2| ≥ · · · ≥ | λn|. We assume there exist α > 12 such that 
+
+|λk| ≤ | λ1|k−α, for all k ≥ 1.
+
+Theorem 9 (Variance of Hessian Estimator) . Let H ∈ Rn×n be the Hessian of a neural network, and let D(s)(H) = 1
+
+> s
+
+Psk=1 z(k) ⊙ (Hz (k)) be the diagonal estimator computed using s number of independent Rademacher vectors z(1) , . . . , z(s) ∈ {− 1, 1}n. Under spectral power-law decay (Assumption 8), we have Pni=1 Var  D(s)(H)i
+
+ ≤ 1 
+
+> s
+
+|λ1|2ζ(2 α). This upper bound is independent of the dimension n.Proof. We present this proof in Appendix A.3 For a general fixed matrix A ∈ Rn×n, the Hutchinson diagonal estimator is unbiased, and its mean-square error satisfies E∥D(s)(A) − diag( A)∥22
+
+ = Pni=1 Var  D(s)(A)i
+
+ ≤ 1 
+
+> s
+
+∥A∥2 
+
+> F
+
+, which in general grows with the ambient dimension n. Consequently, worst-case guarantees for diagonal estimation typically deteriorate as the matrix dimension increases, unless additional structure infor-mation is imposed. However, when A arises as a neural network Hessian and its spectrum exhibits power-law decay, Theorem 9 shows that the bound on the total variance of the diagonal estimator is controlled by the spectral decay rather than by the dimension. 73.2.3 A Probabilistic Guarantee Of Hessian Diagonal Estimator 
+
+Variance analyses such as those in Section 3.2.2 characterize convergence in expectation, but can be sensitive to large deviations (outliers) in the stochastic estimates. In this section, we derive an 
+
+(ε, δ ) probabilistic guarantee on the number of samples needed to estimate the Hessian diagonal. Definition 10 formalizes this notion by requiring that the relative error exceeds ε with probability at most δ. Theorem 11 bounds the number of samples s needed for D(s) to be a relative (ε, δ )-approximator in terms of Hessian spectrum structure. Corollary 12 presents a bound on the minimum number of samples necessary to reliably estimate the diagonal of a positive semidefinite Hessian. 
+
+Definition 10 (Relative (ε, δ )-approximator) . For any ε > 0 and 0 < δ < 1, the diagonal estimator 
+
+D(s)(A) is a relative (ε, δ )-approximator if Pr   D(s)(A) − diag( A) 2 ≤ ε ∥diag( A)∥2
+
+ ≥ 1−δ, 
+
+where s is the number of samples and diag( A) denotes the diagonal of the matrix A.
+
+Theorem 11 (Probabilistic bound for Hessian Diagonal) . Assume H ∈ Rn×n is symmetric, Tr( H)̸ =0, and the power-law decay condition (Assumption 8) holds, then the Rademacher diagonal estimator 
+
+D(s)(H) is a relative (ε, δ )-approximator if 
+
+s > 2
+
+ |λ21|Hn, 2α 
+
+> 1
+> n
+
+Tr( H)2 − 1
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+= 2 |λ21|Hn, 2α 
+
+> 1
+> n
+
+(Pni=1 λi)2 − 1
+
+!  ln(2 n/δ )
+
+ε2
+
+
+
+,
+
+where Hn, 2α is the generalized harmonic number defined in Definition 3. Proof. We show the detailed proof in Appendix A.4. 
+
+Corollary 12 (Positive Semidefinite Hessian Diagonal Estimator Probabilistic Bound) . If the power law decay condition (Assumption 8) holds and that H is positive semidefinite with λ1̸ = 0 , then the Rademacher diagonal estimator D(s)(H) is a relative (ε, δ )-approximator if 
+
+s > 2 ( n ζ (2 α) − 1) 
+
+ ln(2 n/δ )
+
+ε2
+
+
+
+.
+
+Proof. We prove this in Appendix A.4.1. Our probabilistic bound goes beyond generic worst-case matrix bounds, which are often impractical because they depend on information about the implicit matrix that is typically unavailable. In the specific case of neural network Hessians, eigenvalues are widely observed to exhibit power-law decay [ 23 ]. By leveraging this spectral structure, our bound yields a practically computable sample complexity. 
+
+## 4 Application 
+
+In this section, we provide empirical evidence to support the theoretical findings of BSI. Our primary goal is to demonstrate that BSI yields improved performance in practical settings compared to existing low-rank compression techniques. 
+
+4.1 Evaluation Setup 
+
+Mathematical reasoning is one of the most challenging areas for LLM evaluation because it requires solving non-trivial problems. We evaluate the performance of low-rank compression algorithms across two distinct mathematical reasoning datasets: GSM8K [ 4] and Hendrycks’ MATH [ 10 ]. These experiments are conducted using the Llama 2-7B [ 24 ]. We benchmark our method against four representative low-rank decomposition techniques. We consider SVD [ 21 , 25 , 14 , 5, 29 , 19 ], FWSVD, which augments SVD with gradient-based profiling on the fine-tuning dataset during decomposition [ 12 ], ASVD, which seeks a low-rank weight approximation that minimizes activation reconstruction loss [ 27 ], and Basel, a state-of-the-art approach that exploits the semantic structure of weight matrices for compression [ 16 ]. To ensure a rigorous comparison, each model undergoes a three-stage pipeline: (1) task-specific fine-tuning of the base model, (2) low-rank compression via a candidate algorithm, and (3) post-compression fine-tuning for task adaptation. 81 3 5 7 9 11 13 15 17 19 21 
+
+> Compression Ratio
+> 0
+> 20
+> 40
+> 60
+> Accuracy (%)  SVD
+> FWSVD
+> ASVD
+> BASEL
+> BSI
+
+(a) GSM8K 1 3 5 7 9 11 13 15 17 19 21  
+
+> Compression Ratio
+> 0
+> 5
+> 10
+> 15
+> 20
+> Accuracy (%)  SVD
+> FWSVD
+> ASVD
+> BASEL
+> BSI
+
+(b) MATH 
+
+Figure 1: Accuracy and model size of Llama 2-7B compressed with various low-rank decomposition algorithms on mathematical reasoning tasks. 
+
+4.2 Evaluation on Mathematical Reasoning 
+
+Figures 1 (a) and (b) show the performance of Llama-2-7B on mathematical reasoning tasks across different low-rank compression techniques. At low compression ratios 2 (below approximately 5×), all methods achieve comparable performance on both GSM8K and Hendrycks’ MATH. As compression becomes more aggressive, however, a clear divergence emerges. SVD, ASVD and FWSVD degrade rapidly, with FWSVD exhibiting an early collapse in accuracy. In contrast, our BSI method degrades more gracefully and consistently preserves higher accuracy. On GSM8K, at 16 × compression, the strongest baseline retains only about 9% accuracy, whereas BSI maintains roughly 27%. Moreover, on both GSM8K and Hendrycks’ MATH, BSI at a 19.5 × compression ratio matches the accuracy of Basel at 13.8 × on GSM8K and 14.9 × on MATH. In other words, BSI supports up to about 1.3 ×
+
+higher compression than Basel while maintaining comparable accuracy. 
+
+4.3 Ablation Study 
+
+The BSI importance metric used for basis selection includes both first-order gradient information and second-order Hessian information. To isolate the contribution of the Hessian term, we conduct an ablation study comparing the proposed BSI importance metric with a first-order variant that uses only the gradient term. Specifically, for basis i, the gradient-only importance metric is defined as 
+
+Ii ≜ −σi E
+
+h ∂ℓ ∂σ i
+
+i
+
+. We perform this ablation study using Llama 2-7B on the Hendrycks’ MATH and GSM8K datasets. The results are reported in Figure 3 (Appendix D.2). Across both datasets, the proposed BSI consistently outperforms the gradient-only variant, demonstrating that the second-order term provides useful curvature information for selecting important singular bases. These results validate the role of the Hessian component in the proposed importance metric. 
+
+## 5 Conclusion 
+
+In this work, we set out to better understand the basis selection problem in low-rank compression— specifically, what is actually lost when individual SVD bases are removed. This motivation led to BSI, a framework that moves beyond magnitude-based pruning and instead grounds basis selection directly in the loss landscape. BSI selects and prunes bases using an importance score that estimates the expected change in loss caused by removing each basis. Our theoretical results show that the second-order information required by BSI—namely, the Hessian diagonal—can be estimated efficiently and reliably at scale. Leveraging the spectral structure of the Hessian (including power-law decay), we relate both the estimator’s variance and its high-probability (ε, δ ) error guarantee to the spectrum, thereby clarifying the sample complexity needed for accurate estimation. Beyond estimator analysis, we also bound the loss change induced by basis pruning and characterize how Hessian-diagonal estimation error propagates into this bound. Experiments on mathematical reasoning tasks demonstrate that BSI achieves a stronger compression–accuracy trade-off, compressing models by up to 1.3× more than state-of-the-art low-rank baselines while maintaining similar performance. 
+
+> 2The compression ratio is defined as the quotient of the original model size divided by the compressed model size.
+
+9References 
+
+[1] Yongqi An, Xu Zhao, Tao Yu, Ming Tang, and Jinqiao Wang. Fluctuation-based Adaptive Structured Pruning for Large Language Models. In AAAI Conference on Artificial Intelligence (AAAI) , 2024. [2] Robert A. Baston and Yuji Nakatsukasa. Stochastic Diagonal Estimation: Probabilistic Bounds and an Improved Algorithm. arXiv preprint arXiv:2201.10684 , 2022. [3] Costas Bekas, Effrosyni Kokiopoulou, and Yousef Saad. An Estimator for the Diagonal of a Matrix. Applied Numerical Mathematics , 57(11-12):1214–1229, 2007. [4] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training Verifiers to Solve Math Word Problems. arXiv preprint arXiv:2110.14168 ,2021. [5] Emily Denton, Wojciech Zaremba, Joan Bruna, Yann LeCun, and Rob Fergus. Exploiting Linear Structure within Convolutional Networks for Efficient Evaluation. In Conference on Neural Information Processing Systems (NeurIPS) , 2014. [6] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale. In Conference on Neural Information Processing Systems (NeurIPS) , 2022. [7] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers. In International Conference on Learning Representations (ICLR) , 2023. [8] Gene H. Golub and Charles F. Van Loan. Matrix Computations . Johns Hopkins University Press, Baltimore and London, 1996. [9] Song Han, Jeff Pool, John Tran, and William J. Dally. Learning Both Weights and Connections for Efficient Neural Networks. In Conference on Neural Information Processing Systems (NeurIPS) , 2015. [10] Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring Mathematical Problem Solving with the MATH Dataset. 
+
+Conference on Neural Information Processing Systems (NeurIPS) , 2021. [11] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, Tom Hennigan, Eric Noland, Katie Millican, George van den Driessche, Bogdan Damoc, Aurelia Guy, Simon Osindero, Karen Simonyan, Erich Elsen, Oriol Vinyals, Jack W. Rae, and Laurent Sifre. Training Compute-Optimal Large Language Models. In Conference on Neural Information Processing Systems (NeurIPS) , 2022. [12] Yen-Chang Hsu, Ting Hua, Sung-En Chang, Qian Lou, Yilin Shen, and Hongxia Jin. Language Model Compression with Weighted Low-Rank Factorization. In International Conference on Learning Representations (ICLR) , 2022. [13] Michael F. Hutchinson. A Stochastic Estimator of the Trace of the Influence Matrix for Laplacian Smoothing Splines. Communications in Statistics - Simulation and Computation , 19 (2):433–450, 1990. [14] Max Jaderberg, Andrea Vedaldi, and Andrew Zisserman. Speeding Up Convolutional Neural Networks with Low Rank Expansions. arXiv preprint arXiv:1405.3866 , 2014. [15] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling Laws for Neural Language Models. arXiv preprint arXiv:2001.08361 , 2020. [16] Yang Li, Daniel Agyei Asante, Changsheng Zhao, Ernie Chang, Yangyang Shi, and Vikas Chandra. Streamlining Language Models via Semantic Basis Analysis. Transactions on Machine Learning Research (TMLR) , 2025. 10 [17] James Martens and Roger Grosse. Optimizing Neural Networks with Kronecker-factored Approximate Curvature. In International Conference on Machine Learning (ICML) , 2015. [18] Matan Ben Noach and Yoav Goldberg. Compressing Pre-trained Language Models by Ma-trix Decomposition. In Conference of the Asia-Pacific Chapter of the Association for Com-putational Linguistics and International Joint Conference on Natural Language Processing (AACL-IJCNLP) , 2020. [19] Daniel Povey, Gaofeng Cheng, Yiming Wang, Ke Li, Hainan Xu, Mahsa Yarmohammadi, and Sanjeev Khudanpur. Semi-Orthogonal Low-Rank Matrix Factorization for Deep Neural Networks. In Conference of International Speech Communication Association (INTERSPEECH) ,2018. [20] Levent Sagun, Utku Evci, V Ugur Guney, Yann Dauphin, and Leon Bottou. Empirical Analysis of the Hessian of Over-Parametrized Neural Networks. In International Conference on Learning Representations (ICLR) Workshop Track , 2018. [21] Pratyusha Sharma, Jordan T. Ash, and Dipendra Misra. The Truth is in There: Improv-ing Reasoning in Language Models with Layer-Selective Rank Reduction. arXiv preprint arXiv:2312.13558 , 2023. [22] Mingjie Sun, Zhuang Liu, Anna Bair, and J Zico Kolter. A Simple and Effective Pruning Approach for Large Language Models. In International Conference on Learning Representations (ICLR) , 2024. [23] Qian-Yuan Tang, Yufei Gu, Yunfeng Cai, Mingming Sun, Ping Li, zhou Xun, and Zeke Xie. Investigating the Overlooked Hessian Structure: From CNNs to LLMs. In International Conference on Machine Learning (ICLR) , 2025. [24] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open Foundation and Finetuned Chat Models. arXiv preprint arXiv:2307.09288 , 2023. [25] Jian Xue, Jinyu Li, and Yifan Gong. Restructuring of Deep Neural Network Acoustic Models with Singular Value Decomposition. In Conference of International Speech Communication Association (INTERSPEECH) , 2013. [26] Longhui Yu, Weisen Jiang, Han Shi, Jincheng Yu, Zhengying Liu, Yu Zhang, James T Kwok, Zhenguo Li, Adrian Weller, and Weiyang Liu. MetaMath: Bootstrap Your Own Mathematical Questions for Large Language Models. In International Conference on Learning Representation (ICLR) , 2024. [27] Zhihang Yuan, Yuzhang Shang, Yue Song, Dawei Yang, Qiang Wu, Yan Yan, and Guangyu Sun. ASVD: Activation-aware Singular Value Decomposition for Compressing Large Language Models. arXiv preprint arXiv:2312.05821 , 2023. [28] Huishuai Zhang, Caiming Xiong, James Bradbury, and Richard Socher. Block-diagonal Hessian-free Optimization for Training Neural Networks. arXiv preprint arXiv:1712.07296 , 2017. [29] Xiangyu Zhang, Jianhua Zou, Kaiming He, and Jian Sun. Accelerating Very Deep Convolutional Networks for Classification and Detection. IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI) , 38(10):1943–1955, 2016. 11 Appendix Table of Contents Appendix A: Theoretical Analysis of Basis Selection with Importance 
+
+A.1 Efficient Estimation of the Hessian Diagonal via Perturbations . . . . . . . . . . . . . . . . . . 13 A.2 Bound on the Loss Change . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14 A.3 Variance of the Hessian Diagonal Estimator . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17 A.4 Probabilistic Guarantee for Hessian Diagonal Estimation . . . . . . . . . . . . . . . . . . . . . . . 20 A.5 Non-negativity of the Hessian Diagonal of the Output Layer . . . . . . . . . . . . . . . . . . . . 22 
+
+Appendix B: Hessian Spectrum in the Singular-Value Space ................................................... 24 
+
+Appendix C: BSI Practical Design Choices 
+
+C.1 Choosing Perturbation Intensity . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24 C.2 Candidate Pool for Hessian Estimate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25 
+
+Appendix D: BSI Application 
+
+D.1 Evaluation of BSI on Mathematical Reasoning . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26 12 A Theoretical Analysis of Basis Selection with Importance 
+
+This section contains all proofs underlying the theoretical analysis of BSI. (i) We present an efficient perturbation-based estimator for the diagonal elements of the Hessian (Appendix A.1). (ii) We derive bounds on the loss change induced by basis pruning in two settings: one with an exact Hessian and another with estimation error (Appendix A.2). (iii) We establish a bound on the variance of the estimator under power-law spectral decay (Appendix A.3). (iv) We provide a high-probability bound on the sample complexity of the diagonal estimator, explicitly tied to the spectral structure of the Hessian (Appendix A.4), and further specialize this result to the positive semidefinite case (Appendix A.4.1). (v) Finally, we prove the non-negativity of the Hessian diagonal for the output layer of large language models (Appendix A.5). 
+
+A.1 Efficient Estimation of the Hessian Diagonal via Perturbations 
+
+The importance score used in BSI contains a second-order term involving the diagonal of the Hessian with respect to the singular values. Explicit computation of this quantity is infeasible for large models due to the prohibitive cost of forming or storing the full Hessian. Theorem 5 provides an efficient and reliable estimator for the Hessian diagonal that relies only on gradient which can be computed efficiently for large models. The key idea is to use symmetric perturbations and exploit the fact that cross-coordinate interactions are canceled in expectation under Rademacher perturbations. This leaves only the diagonal of the Hessian, allowing us to estimate the Hessian diagonal efficiently using only gradient computations at perturbed values. 
+
+Theorem 5 (Hessian Diagonal Estimator) . For any parameter σi of the model, 
+
+Ed∼D 
+
+ ∂2ℓ∂σ 2 
+
+> iσ=σ∗
+
+
+
++ O(ϵ2) = Ez∼R (Z)
+
+> d∼D
+
+"
+
+∂ℓ (d)
+
+∂σ σ=σ∗+ ϵ 
+
+> 2z
+
+− ∂ℓ (d)
+
+∂σ σ=σ∗− ϵ 
+
+> 2z
+
+!
+
+> i
+
+· zi
+
+ϵ
+
+#
+
+,
+
+where 0 < ϵ < 1 denotes the perturbation intensity, and z = [ z1, z 2, . . . , z n]⊤ is a Rademacher random vector defined in Definition 1. Proof. 
+
+RHS = Ez∼R (Z)
+
+> d∼D
+
+ ∂2ℓ(d)
+
+∂σ2 σ=σ∗
+
+(ϵ ⊙ z) + O(ϵ3)
+
+
+
+> i
+
+· zi
+
+ϵ
+
+
+
+= Ez∼R (Z)
+
+> d∼D
+
+X
+
+> j
+
+ ∂2ℓ(d)
+
+∂σ2 σ=σ∗
+
+
+
+> ij
+
+ϵ · zj
+
+ · zi
+
+ϵ
+
+ + O(ϵ2)= X
+
+> j
+
+Ez∼R (Z)
+
+> d∼D
+
+" ∂2ℓ(d)
+
+∂σ2 σ=σ∗
+
+
+
+> ij
+
+zizj
+
+#
+
++ O(ϵ2).
+
+Since zi and zj are i.i.d., for i̸ = j
+
+E[zizj ] = E[zi]E[zj ] = 0 
+
+RHS = Ez∼R (Z)
+
+> d∼D
+
+ ∂2ℓ(d)
+
+∂σ2 σ=σ∗
+
+
+
+> ii
+
+z2
+
+> i
+
+
+
++ O(ϵ2)= Ed∼D 
+
+ ∂2ℓ(d)
+
+∂σ2 σ=σ∗
+
+
+
+> ii
+
+
+
+Ez∼R (Z)[z2 
+
+> i
+
+] + O(ϵ2)= Ed∼D 
+
+ ∂2ℓ(d)
+
+∂σ2 σ=σ∗
+
+
+
+> ii
+
+
+
++ O(ϵ2)= LHS .
+
+13 A.2 Bound on the Loss Change 
+
+The bounds on the loss change induced by pruning a basis presented in Theorems 6 and 7 rely on the following lemma: 
+
+Lemma 13 (Bound on the Loss Change) . Assume function ℓ : Rr → R is C2, and its Hessian is 
+
+ρ-Lipschitz in operator norm on the line segment {s + t∆ | t ∈ [0 , 1] }:
+
+∇2ℓ(x) − ∇ 2ℓ(y) 2 ≤ ρ ∥x − y∥2 for all x, y on the segment. Then ℓ(s + ∆) = ℓ(s) + ∇ℓ(s)⊤∆ + 12 ∆⊤∇2ℓ(s) ∆ + R(∆), with the cubic remainder bound 
+
+|R(∆)| ≤ ρ
+
+6 ∥∆∥32 .
+
+Proof. Define the one-dimensional restriction 
+
+Φ( t) := ℓ(s + t∆), t ∈ [0 , 1] .
+
+Then, by the chain rule, 
+
+Φ′(t) = ∇ℓ(s + t∆)⊤∆, Φ′′ (t) = ∆⊤∇2ℓ(s + t∆) ∆.
+
+Moreover, 
+
+Φ(1) − Φ(0) = 
+
+Z 10
+
+Φ′(t) dt 
+
+=
+
+Z 10
+
+
+
+Φ′(0) + 
+
+Z t
+
+> 0
+
+Φ′′ (u) du 
+
+
+
+dt 
+
+= Φ ′(0) 
+
+Z 10
+
+dt +
+
+Z 10
+
+Z t
+
+> 0
+
+Φ′′ (u) du dt 
+
+= Φ ′(0) + 
+
+Z 10
+
+Z 1
+
+> u
+
+Φ′′ (u) dt du 
+
+= Φ ′(0) + 
+
+Z 10
+
+(1 − u) Φ ′′ (u) du 
+
+= Φ ′(0) + 
+
+Z 10
+
+(1 − t) Φ ′′ (t) dt. 
+
+Therefore, 
+
+Φ(1) = Φ(0) + Φ ′(0) + 
+
+Z 10
+
+(1 − t) Φ ′′ (t) dt 
+
+= Φ(0) + Φ ′(0) + 12 Φ′′ (0) + 
+
+Z 10
+
+(1 − t) Φ′′ (t) − Φ′′ (0)  dt. 
+
+Further because Φ(1) = ℓ(s + ∆), Φ(0) = ℓ(s), Φ′(0) = ∇ℓ(s)⊤∆, Φ′′ (0) = ∆⊤∇2ℓ(s) ∆, we have 
+
+ℓ(s + ∆) = ℓ(s) + ∇ℓ(s)⊤∆ + 12 ∆⊤∇2ℓ(s) ∆
+
++
+
+Z 10
+
+(1 − t)
+
+
+
+∆⊤∇2ℓ(s + t∆) ∆ − ∆⊤∇2ℓ(s) ∆
+
+
+
+dt. 
+
+Let 
+
+R(∆) := 
+
+Z 10
+
+(1 − t)
+
+
+
+∆⊤∇2ℓ(s + t∆) ∆ − ∆⊤∇2ℓ(s) ∆
+
+
+
+dt 
+
+=
+
+Z 10
+
+(1 − t) ∆⊤
+
+∇2ℓ(s + t∆) − ∇ 2ℓ(s)
+
+
+
+∆ dt. 
+
+14 Then 
+
+|R(∆)| =
+
+Z 10
+
+(1 − t) ∆⊤
+
+∇2ℓ(s + t∆) − ∇ 2ℓ(s)
+
+
+
+∆ dt 
+
+≤
+
+Z 10
+
+(1 − t) ∆⊤
+
+∇2ℓ(s + t∆) − ∇ 2ℓ(s)
+
+
+
+∆ dt. 
+
+Based on the Cauchy–Schwarz inequality and the definition of operator norm, 
+
+∆⊤
+
+∇2ℓ(s + t∆) − ∇ 2ℓ(s)
+
+
+
+∆ ≤ ∥ ∆∥22 ∇2ℓ(s + t∆) − ∇ 2ℓ(s) 2 ,
+
+and therefore 
+
+|R(∆)| ≤ 
+
+Z 10
+
+(1 − t) ∥∆∥22 ∇2ℓ(s + t∆) − ∇ 2ℓ(s) 2 dt. 
+
+Further based on Hessian Lipschitzness, 
+
+∇2ℓ(s + t∆) − ∇ 2ℓ(s) 2 ≤ ρ ∥t∆∥2 = ρt ∥∆∥2,
+
+So, 
+
+|R(∆)| ≤ 
+
+Z 10
+
+(1 − t) ∥∆∥22
+
+ ρt ∥∆∥2
+
+ dt 
+
+= ρ∥∆∥32
+
+Z 10
+
+(t − t2) dt 
+
+= ρ
+
+6 ∥∆∥32.
+
+Therefore, 
+
+ℓ(s + ∆) = ℓ(s) + ∇ℓ(s)⊤∆ + 12 ∆⊤∇2ℓ(s) ∆ + R(∆), with |R(∆)| ≤ ρ
+
+6 ∥∆∥32.
+
+A.2.1 Bound for Loss Change Induced by Pruning a Basis 
+
+We quantify the impact of basis pruning on the change in loss. Theorem 6 presents an upper bound on the loss change resulting from the removal of a basis in the setting where the Hessian diagonal is exact. In practice, however, the Hessian diagonal is obtained via estimation. We therefore extend the bound for the loss change to account for relative error in the Hessian diagonal estimate (Theorem 7). 
+
+Theorem 6 (Bound on Loss Change from Pruning Bases) . Let ℓ : Rr → R be the loss as a function of the basis singular values s, and assume the Hessian ∇2ℓ is ρ-Lipschitz: 
+
+∥∇ 2ℓ(x) − ∇ 2ℓ(y)∥2 ≤ ρ∥x − y∥2 for all x, y.
+
+Pruning basis i leads to a change in loss following the bound 
+
+|∆ℓ| = ℓ(s − siei) − ℓ(s) ≤ −gisi + 12 Hii s2 
+
+> i
+
++ ρ
+
+6 |si|3,
+
+where gi := ∇ℓ(s)⊤ei, Hii := e⊤ 
+
+> i
+
+∇2ℓ(s) ei, and ei = [0 , . . . , 0, 1, 0, . . . , 0] ⊤ with a 1 on its i-th dimension. Proof. Let ∆ = −siei. Based on Lemma 13, 
+
+ℓ(s − siei) = ℓ(s) + ∇ℓ(s)⊤(−siei) + 12 (−siei)⊤∇2ℓ(s) ( −siei) + R(−siei),
+
+with 
+
+|R(−siei)| ≤ ρ
+
+6 ∥− siei∥32 = ρ
+
+6 |si|3.
+
+15 Therefore, 
+
+|∆ℓ| = ℓ(s − siei) − ℓ(s)
+
+= ∇ℓ(s)⊤(−siei) + 12 (−siei)⊤∇2ℓ(s) ( −siei) + R(−siei) .
+
+As gi = ∇ℓ(s)⊤ei and Hii = e⊤ 
+
+> i
+
+∇2ℓ(s) ei, we have 
+
+|∆ℓ| = −sigi + 12 s2 
+
+> i
+
+Hii + R(−siei)
+
+≤ −sigi + 12 s2 
+
+> i
+
+Hii + |R(−siei)|≤ −sigi + 12 s2 
+
+> i
+
+Hii + ρ
+
+6 |si|3.
+
+Theorem 7 (Bound on Loss Change for Basis Pruning with Relative Hessian Error) . Let ℓ : Rr → R
+
+be the loss as a function of the basis singular values s and assume the Hessian of ℓ is ρ-Lipschitz, Hessian estimate bHii has a maximum relative error of ε:
+
+| bHii − Hii | ≤ ε|Hii |,
+
+where 0 < ε < 1 and Hii is the i-th diagonal element of the Hessian. Pruning basis i leads to a change of the loss satisfying 
+
+|∆ℓ| = |ℓ(s − siei) − ℓ(s)|≤ −gisi + 12 bHii s2 
+
+> i
+
++ ε
+
+2(1 − ε) | bHii |s2 
+
+> i
+
++ ρ
+
+6 |si|3,
+
+where gi is the gradient with respect to si and ei = [0 , . . . , 0, 1, 0, . . . , 0] ⊤ with 1 on its i-th dimension Proof. We begin by bounding Hii in terms of bHii . We write 
+
+|Hii | = |(Hii − bHii ) + bHii |≤ | Hii − bHii | + | bHii |
+
+= | bHii − Hii | + | bHii |≤ ε|Hii | + | bHii |.
+
+Rearranging gives 
+
+(1 − ε)|Hii | ≤ | bHii |,
+
+Hence, 
+
+|Hii | ≤ 11 − ε | bHii |.
+
+From Theorem 6, 
+
+|∆ℓ| ≤ −gisi + 12 Hii s2 
+
+> i
+
++ ρ
+
+6 |si|3.
+
+We insert and subtract 12 bHii s2
+
+> i
+
+|∆ℓ| ≤ −gisi + 12 bHii s2 
+
+> i
+
++ 12 Hii s2 
+
+> i
+
+− 12 bHii s2 
+
+> i
+
++ ρ
+
+6 |si|3.
+
+Applying the triangle inequality yields 
+
+|∆ℓ| ≤ −gisi + 12 bHii s2 
+
+> i
+
++ 12 s2 
+
+> i
+
+|Hii − bHii | + ρ
+
+6 |si|3.
+
+16 As bHii has a maximum relative error of ε,
+
+|∆ℓ| ≤ −gisi + 12 bHii s2 
+
+> i
+
++ 12 εs 2 
+
+> i
+
+|Hii | + ρ
+
+6 |si|3.
+
+As |Hii | ≤ 11−ε | bHii |,
+
+|∆ℓ| ≤ −gisi + 12 bHii s2 
+
+> i
+
++ ε
+
+2(1 − ε) | bHii |s2 
+
+> i
+
++ ρ
+
+6 |si|3.
+
+A.3 Variance of the Hessian Diagonal Estimator 
+
+By leveraging the power-law decay of neural network Hessian spectrum (Assumption 8), we prove that the total variance of the Hessian diagonal estimator is bounded independently of the parameter dimension (Theorem 9). 
+
+Theorem 9 (Variance of Hessian Estimator) . Let H ∈ Rn×n be the Hessian of a neural network, and let D(s)(H) = 1
+
+> s
+
+Psk=1 z(k) ⊙ (Hz (k)) be the diagonal estimator computed using s number of independent Rademacher vectors z(1) , . . . , z(s) ∈ {− 1, 1}n. Under spectral power-law decay (Assumption 8), we have Pni=1 Var  D(s)(H)i
+
+ ≤ 1 
+
+> s
+
+|λ1|2ζ(2 α). This upper bound is independent of the dimension n.Proof. We begin by expanding the Hutchinson diagonal estimator. The i-th component is 
+
+D(s)(H)i = 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+z(k) 
+
+> i
+
+(Hz (k))i
+
+= 1
+
+s
+
+> s
+
+X
+
+> k=1
+> n
+
+X
+
+> j=1
+
+Hij z(k) 
+
+> i
+
+z(k)
+
+> j
+
+= 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+Hii (z(k) 
+
+> i
+
+)2 + X 
+
+> j̸=i
+
+Hij z(k) 
+
+> i
+
+z(k)
+
+> j
+
+
+
+= Hii + 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij z(k) 
+
+> i
+
+z(k) 
+
+> j
+
+.
+
+Since E[z(k) 
+
+> i
+
+z(k) 
+
+> j
+
+] = 0 for j̸ = i, we have 
+
+E
+
+h
+
+D(s)(H)i
+
+i
+
+= Hii + 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij E[z(k) 
+
+> i
+
+z(k) 
+
+> j
+
+] = Hii ,
+
+Using Var( X) = E[X2] − (E[X]) 2 with X = D (s)(H)i, we write 
+
+Var  D(s)(H)i
+
+ = E
+
+Hii + 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij z(k) 
+
+> i
+
+z(k)
+
+> j
+
+
+
+> 2
+
+ − H2
+
+> ii
+
+= E
+
+H2 
+
+> ii
+
++ 2Hii 
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij z(k) 
+
+> i
+
+z(k) 
+
+> j
+
++
+
+ 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij z(k) 
+
+> i
+
+z(k)
+
+> j
+
+
+
+> 2
+
+ − H2
+
+> ii
+
+.
+
+= H2 
+
+> ii
+
++ 2Hii 
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij E[z(k) 
+
+> i
+
+z(k) 
+
+> j
+
+] + E
+
+ 1
+
+s
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+Hij z(k) 
+
+> i
+
+z(k)
+
+> j
+
+
+
+> 2
+
+ − H2
+
+> ii
+
+.
+
+17 Since E[z(k)
+
+i z(k)
+
+j ] = 0 for j̸ = i, we have 
+
+Var  D(s)(H)i
+
+ =E
+
+ 1
+
+s
+
+sX
+
+k=1 
+
+X
+
+j̸ =i
+
+Hij z(k)
+
+i z(k)
+
+j
+
+
+
+2
+
+= 1
+
+s2 E
+
+
+
+sX
+
+k=1 
+
+X
+
+j̸ =i
+
+Hij z(k)
+
+i z(k)
+
+j
+
+
+
+2
+
++ 1
+
+s2 E
+
+ X
+
+m̸=n
+
+X
+
+j̸ =i
+
+Hij z(m)
+
+i z(m)
+
+j
+
+X
+
+j̸ =i
+
+Hij z(n)
+
+i z(n)
+
+j
+
+
+
+= 1
+
+s2 E
+
+
+
+sX
+
+k=1 
+
+X
+
+j̸ =i
+
+Hij z(k)
+
+i z(k)
+
+j
+
+
+
+2
+
++ 1
+
+s2
+
+X
+
+m̸=n
+
+E
+
+X
+
+j̸ =i
+
+Hij z(m)
+
+i z(m)
+
+j
+
+ E
+
+X
+
+j̸ =i
+
+Hij z(n)
+
+i z(n)
+
+j
+
+ .
+
+For Rademacher probes, Ez(k)
+
+i z(k)
+
+j
+
+ = 0 for j̸ = i. Therefore, 
+
+E
+
+X
+
+j̸ =i
+
+Hij z(k)
+
+i z(k)
+
+j
+
+ = X
+
+j̸ =i
+
+Hij Ez(k)
+
+i z(k)
+
+j
+
+ = 0 .
+
+As a consequence, the entire m̸ = n contribution is zero, and we are left with 
+
+Var  D(s)(H)i
+
+ = 1
+
+s2 E
+
+
+
+sX
+
+k=1 
+
+X
+
+j̸ =i
+
+Hij z(k)
+
+i z(k)
+
+j
+
+
+
+2
+
+= 1
+
+s2
+
+sX
+
+k=1 
+
+E
+
+X
+
+j̸ =i
+
+Hij z(k)
+
+i z(k)
+
+j
+
+
+
+2
+
+= 1
+
+s2
+
+sX
+
+k=1 
+
+E
+
+X
+
+j̸ =i
+
+H2
+
+ij 
+
+ z(k)
+
+i
+
+2 z(k)
+
+j
+
+2
+
+
+
++ E
+
+X
+
+j1̸ =i, j 2̸ =ij1̸ =j2
+
+Hij 1 Hij 2
+
+ z(k)
+
+i
+
+2 z(k)
+
+j1 z(k)
+
+j2
+
+
+
++ E
+
+X
+
+i1̸ =j, i 2̸ =ji1̸ =i2
+
+Hi1j Hi2j z(k)
+
+i1 z(k)
+
+i2
+
+ z(k)
+
+j
+
+2
+
+
+
++ E
+
+X
+
+i1̸ =i2, j 1̸ =j2
+
+i1̸ =j1, i 2̸ =j2
+
+Hi1j1 Hi2j2 z(k)
+
+i1 z(k)
+
+j1 z(k)
+
+i2 z(k)
+
+j2
+
+!
+
+.
+
+18 For Rademacher probes, (z(k) 
+
+> i
+
+)2 = 1 , Hence 
+
+E
+
+h z(k)
+
+> i
+
+2 z(k)
+
+> j
+
+2i
+
+= E
+
+h
+
+(z(k) 
+
+> i
+
+)2i
+
+E
+
+h
+
+(z(k) 
+
+> j
+
+)2i
+
+= 1 , E
+
+h z(k)
+
+> i
+
+2z(k) 
+
+> j1
+
+z(k)
+
+> j2
+
+i
+
+= 0 ( j1̸ = j2),
+
+E
+
+h
+
+z(k) 
+
+> i1
+
+z(k)
+
+> i2
+
+ z(k)
+
+> j
+
+2i
+
+= 0 ( i1̸ = i2), E
+
+h
+
+z(k) 
+
+> i1
+
+z(k) 
+
+> j1
+
+z(k) 
+
+> i2
+
+z(k)
+
+> j2
+
+i
+
+= 0 (all indices distinct). So only the first (square) term remains, and we get 
+
+Var  D(s)(H)i
+
+ = 1
+
+s2
+
+> s
+
+X
+
+> k=1
+
+X 
+
+> j̸=i
+
+H2 
+
+> ij
+
+= 1
+
+s
+
+X 
+
+> j̸=i
+
+H2 
+
+> ij
+
+.
+
+Therefore, 
+
+> n
+
+X
+
+> i=1
+
+Var  D(s)(H)i
+
+ = 1
+
+s
+
+> n
+
+X
+
+> i=1
+
+X 
+
+> j̸=i
+
+H2 
+
+> ij
+
+≤ 1
+
+s
+
+> n
+
+X
+
+> i=1
+> n
+
+X
+
+> j=1
+
+H2 
+
+> ij
+
+= 1
+
+s ∥H∥2 
+
+> F
+
+.
+
+Moreover, since H is symmetric, we have 
+
+∥H∥2 
+
+> F
+
+= Tr( H⊤H) = Tr( H2),
+
+Then nX
+
+> i=1
+
+Var  D(s)(H)i
+
+ ≤ 1
+
+s Tr( H2)
+
+From spectral theory (Lemma 4), H admits an orthonormal eigen-decomposition: 
+
+H =
+
+> n
+
+X
+
+> k=1
+
+λkuku⊤ 
+
+> k
+
+,
+
+Then, 
+
+H2 =
+
+> n
+
+X
+
+> k=1
+
+λkuku⊤
+
+> k
+
+! nX
+
+> ℓ=1
+
+λℓuℓu⊤
+
+> ℓ
+
+!
+
+=
+
+> n
+
+X
+
+> k,ℓ =1
+
+λkλℓ uk(u⊤ 
+
+> k
+
+uℓ)u⊤ 
+
+> ℓ
+
+.
+
+Since {uk}nk=1 is a set of orthonormal bases, u⊤ 
+
+> k
+
+uℓ = 0 for k̸ = ℓ and u⊤ 
+
+> k
+
+uk = 1 , which yields 
+
+H2 =
+
+> n
+
+X
+
+> k=1
+
+λ2
+
+> k
+
+uku⊤ 
+
+> k
+
+.
+
+We obtain 
+
+Tr( H2) = Tr 
+
+> n
+
+X
+
+> k=1
+
+λ2
+
+> k
+
+uku⊤
+
+> k
+
+!
+
+=
+
+> n
+
+X
+
+> k=1
+
+λ2
+
+> k
+
+Tr( uku⊤ 
+
+> k
+
+) = 
+
+> n
+
+X
+
+> k=1
+
+λ2
+
+> k
+
+Tr( u⊤ 
+
+> k
+
+uk) = 
+
+> n
+
+X
+
+> k=1
+
+λ2
+
+> k
+
+.
+
+Combining the above yields 
+
+> n
+
+X
+
+> i=1
+
+Var  D(s)(H)i
+
+ ≤ 1
+
+s Tr( H2) = 1
+
+s
+
+> n
+
+X
+
+> k=1
+
+λ2
+
+> k
+
+. (3) Under the spectral power-law assumption (Assumption 8), |λk| ≤ | λ1|k−α, and hence λ2 
+
+> k
+
+≤|λ1|2k−2α. Substituting into (3) gives 
+
+> n
+
+X
+
+> i=1
+
+Var  D(s)(H)i
+
+ ≤ 1
+
+s |λ1|2
+
+> n
+
+X
+
+> k=1
+
+1
+
+k2α = 1
+
+s |λ1|2Hn, 2α ≤ 1
+
+s |λ1|2ζ(2 α).
+
+As α > 12 , the series converges as n → ∞ . This bound for the total variance is independent of parameter dimensionality n.19 A.4 Probabilistic Guarantee for Hessian Diagonal Estimation 
+
+We strengthen the variance analysis of the Hutchinson diagonal estimator by deriving a probabilistic bound for the estimation error. Our result, which is presented in Theorem 11, is connected to the spectral structure of the Hessian. The proof of Theorem 11 uses the following Lemma: 
+
+Lemma 14. For any ε > 0, 0 < δ < 1, and matrix A ∈ Rn×n with diag( A)̸ = 0, the Rademacher diagonal estimator D(s)(A) is an (ε, δ )-approximator if the number of samples s satisfies 
+
+s > 2
+
+ ∥A∥2 
+
+> F
+
+− ∥ diag( A)∥22
+
+∥ diag( A)∥22
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+.
+
+Proof. Baston and Nakatsukasa [2] proposed the lemma, which we restate here. 
+
+Theorem 11 (Probabilistic bound for Hessian Diagonal) . Assume H ∈ Rn×n is symmetric, Tr( H)̸ =0, and the power-law decay condition (Assumption 8) holds, then the Rademacher diagonal estimator 
+
+D(s)(H) is a relative (ε, δ )-approximator if 
+
+s > 2
+
+ |λ21|Hn, 2α 
+
+> 1
+> n
+
+Tr( H)2 − 1
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+= 2 |λ21|Hn, 2α 
+
+> 1
+> n
+
+(Pni=1 λi)2 − 1
+
+!  ln(2 n/δ )
+
+ε2
+
+
+
+,
+
+where Hn, 2α is the generalized harmonic number defined in Definition 3. Proof. We begin with the decomposition 
+
+H =
+
+> n
+
+X
+
+> i=1
+
+λiuiu⊤ 
+
+> i
+
+.
+
+By definition of the Frobenius norm, 
+
+∥H∥2 
+
+> F
+
+= Tr( HH ⊤).
+
+Expanding HH ⊤, we obtain 
+
+HH ⊤ =
+
+> n
+
+X
+
+> i=1
+
+λiuiu⊤
+
+> i
+
+! 
+
+> n
+
+X
+
+> j=1
+
+λj uj u⊤
+
+> j
+
+
+
+> ⊤
+
+=
+
+> n
+
+X
+
+> i,j =1
+
+λiλj ui(u⊤ 
+
+> i
+
+uj )u⊤ 
+
+> j
+
+.
+
+Since {ui}ni=1 is a set of orthonormal bases, u⊤ 
+
+> i
+
+uj = 0 for i̸ = j and u⊤ 
+
+> i
+
+ui = 1 , which yields 
+
+HH ⊤ =
+
+> n
+
+X
+
+> i=1
+
+λ2 
+
+> i
+
+uiu⊤ 
+
+> i
+
+.
+
+Therefore, 
+
+∥H∥2 
+
+> F
+
+= Tr( HH ⊤) = Tr 
+
+> n
+
+X
+
+> i=1
+
+λ2 
+
+> i
+
+uiu⊤
+
+> i
+
+!
+
+=
+
+> n
+
+X
+
+> i=1
+
+λ2 
+
+> i
+
+Tr( uiu⊤ 
+
+> i
+
+) = 
+
+> n
+
+X
+
+> i=1
+
+λ2 
+
+> i
+
+Tr( u⊤ 
+
+> i
+
+ui) = 
+
+> n
+
+X
+
+> i=1
+
+λ2 
+
+> i
+
+.
+
+Under the power-law decay condition, 
+
+|λi| ≤ |λ1|
+
+iα ,
+
+Hence, 
+
+λ2 
+
+> i
+
+≤ |λ1|2
+
+i2α .
+
+Consequently, 
+
+> n
+
+X
+
+> i=1
+
+λ2 
+
+> i
+
+≤ | λ1|2
+
+> n
+
+X
+
+> i=1
+
+1
+
+i2α = |λ1|2Hn, 2α.
+
+20 Therefore, 
+
+∥H∥2 
+
+> F
+
+≤ | λ1|2 Hn, 2α (4) Next, we bound the diagonal term. By Cauchy–Schwarz, 
+
+∥ diag( H)∥22 =
+
+> n
+
+X
+
+> i=1
+
+H2 
+
+> ii
+
+≥ 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+Hii 
+
+!2
+
+= 1
+
+n Tr( H)2.
+
+Hence, 
+
+∥ diag( H)∥22 ≥ 1
+
+n Tr( H)2. (5) Combining Eq. (4) and Eq. (5), 
+
+∥H∥2 
+
+> F
+
+− ∥ diag( H)∥22
+
+∥ diag( H)∥22
+
+= ∥H∥2
+
+> F
+
+∥ diag( H)∥22
+
+− 1
+
+≤ |λ1|2Hn, 2α 
+
+> 1
+> n
+
+Tr( H)2 − 1.
+
+From Lemma 14, 
+
+Pr 
+
+
+
+D(s)(H) − diag( H) 2
+
+≤ ε ∥diag( H)∥2
+
+
+
+≥ 1 − δ
+
+provided that 
+
+s > 2
+
+ ∥H∥2 
+
+> F
+
+− ∥ diag( H)∥22
+
+∥ diag( H)∥22
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+.
+
+Therefore, if 
+
+s > 2
+
+ |λ1|2Hn, 2α 
+
+> 1
+> n
+
+Tr( H)2 − 1
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+≥ 2
+
+ ∥H∥2 
+
+> F
+
+− ∥ diag( H)∥22
+
+∥ diag( H)∥22
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+,
+
+we can guarantee that 
+
+Pr 
+
+
+
+D(s) − diag( H) 2
+
+≤ ε ∥diag( H)∥2
+
+
+
+≥ 1 − δ. 
+
+A.4.1 Probabilistic Bound for Positive semidefinite Hessians 
+
+When the Hessian is positive semidefinite, the general probabilistic bound derived in Theorem 11 can be simplified. In this setting, the trace of the Hessian admits a direct lower bound in terms of the leading eigenvalue, yielding a simplified condition on the number of samples required. Corol-lary 12 provides an explicit (ε, δ ) probabilistic bound on the sample complexity for Hessian-diagonal estimation in the positive semidefinite case. 
+
+Corollary 12 (Positive Semidefinite Hessian Diagonal Estimator Probabilistic Bound) . If the power law decay condition (Assumption 8) holds and that H is positive semidefinite with λ1̸ = 0 , then the Rademacher diagonal estimator D(s)(H) is a relative (ε, δ )-approximator if 
+
+s > 2 ( n ζ (2 α) − 1) 
+
+ ln(2 n/δ )
+
+ε2
+
+
+
+.
+
+Proof. As H is positive semidefinite, λi ≥ 0, i = 1 , . . . , n . Further because λ1 > 0,
+
+Tr( H) = 
+
+> n
+
+X
+
+> i=1
+
+λi ≥ λ1 > 0.
+
+Based on Theorem 11, the Rademacher diagonal estimator D(s) is a relative (ε, δ )-approximator if 
+
+s > 2
+
+ |λ21|Hn, 2α 
+
+> 1
+> n
+
+Tr( H)2 − 1
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+.
+
+21 As Tr( H) ≥ λ1,
+
+2
+
+ |λ21|Hn, 2α 
+
+> 1
+> n
+
+Tr( H)2 − 1
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+≤ 2
+
+ |λ21|Hn, 2α 
+
+> 1
+> n
+
+|λ21| − 1
+
+  ln(2 n/δ )
+
+ε2
+
+
+
+= 2 ( n H n, 2α − 1) 
+
+ ln(2 n/δ )
+
+ε2
+
+
+
+< 2 ( n ζ (2 α) − 1) 
+
+ ln(2 n/δ )
+
+ε2
+
+
+
+.
+
+Therefore, D(s) is a relative (ε, δ )-approximator if s > 2 ( n ζ (2 α) − 1) 
+
+ ln(2 n/δ )
+
+> ε2
+
+
+
+.
+
+A.5 Non-negativity of the Hessian diagonal of the output layer ( lm_head )
+
+The lm_head is the only layer whose outputs enter the loss directly. Any change in earlier layers affects the loss through the output produced by the lm_head . The lm_head produces logits, which are passed through Softmax to compute the loss. We prove that the lm_head (output layer) has a non-negative Hessian diagonal (Theorem 15). While this non-negativity property is guaranteed for the lm_head , it is not strictly guaranteed for intermediate layers where non-linear activations (e.g., GeLU) and complex inter-layer dependencies can result in negative Hessian diagonal elements. 
+
+Theorem 15 (Non-negativity of the Hessian diagonal of the output layer) . Consider a model whose 
+
+output layer produces the pre-softmax logits z(σ) = Pri=1 σi uiv⊤ 
+
+> i
+
+x, where x is the layer in-put, {ui, vi}ri=1 are fixed vectors defining rank-one bases uiv⊤ 
+
+> i
+
+, and σ = ( σ1, . . . , σ r ) are the corresponding output-layer singular values (scaling coefficients). Let p = softmax( z), ℓ (σ) = 
+
+−ˆp⊤ log p, where ˆp is a fixed target distribution satisfying ˆp ⪰ 0 and ∥ˆp∥1 = 1 . Then, for every 
+
+i ∈ { 1, . . . , r }, ∂2ℓ∂σ 2
+
+> i
+
+≥ 0.
+
+Proof. We proceed by direct differentiation. For 
+
+pk = ezk
+
+P 
+
+> j
+
+ezj ,
+
+Then 
+
+∂p k
+
+∂z j
+
+=
+
+
+
+ezk
+
+P 
+
+> j
+
+ezj − e2zk
+
+P 
+
+> j
+
+ezj
+
+2 = pk(1 − pk), k = j, 
+
+− ezk ezj
+
+P 
+
+> j
+
+ezj
+
+2 = −pkpj , k̸ = j. 
+
+Consequently, 
+
+∂p
+
+∂z = Diag( p) − pp ⊤.
+
+where p = [ p1, . . . , p n]⊤ and Diag( p) constructs a diagonal matrix with p as its diagonal. The loss can be written as 
+
+ℓ = −
+
+> n
+
+X
+
+> k=1
+
+ˆpk log pk.
+
+Its derivative with respect to pk is 
+
+∂ℓ ∂p k
+
+= − ˆpk
+
+pk
+
+.
+
+Therefore, ∂ℓ ∂p = −(ˆp ⊘ p)⊤.
+
+22 The derivative of z with respect to σi is 
+
+∂z
+
+∂σ i
+
+= uiv⊤ 
+
+> i
+
+x.
+
+Applying the chain rule, 
+
+∂ℓ ∂σ i
+
+= ∂ℓ ∂p
+
+ ∂p
+
+∂z
+
+⊤ ∂z
+
+∂σ i
+
+= −(ˆp ⊘ p)⊤(Diag( p) − pp ⊤)( uiv⊤ 
+
+> i
+
+x)= − ˆp⊤ − ∥ ˆp∥1p⊤(uiv⊤ 
+
+> i
+
+x).
+
+As ∥ˆp∥1 = 1 , this simplifies to 
+
+∂ℓ ∂σ i
+
+= −(ˆp⊤ − p⊤)( uiv⊤ 
+
+> i
+
+x).
+
+Differentiating once more, 
+
+∂2ℓ∂σ 2
+
+> i
+
+= ∂∂z
+
+ ∂ℓ ∂σ i
+
+
+
+· ∂z
+
+∂σ i
+
+= ∂∂p
+
+ ∂ℓ ∂σ i
+
+
+
+·
+
+ ∂p
+
+∂z
+
+⊤
+
+· ∂z
+
+∂σ i
+
+= ( uiv⊤ 
+
+> i
+
+x)⊤(Diag( p) − pp ⊤)( uiv⊤ 
+
+> i
+
+x).
+
+Factoring out the scalar term (v⊤ 
+
+> i
+
+x)2, we obtain 
+
+∂2ℓ∂σ 2
+
+> i
+
+= ( v⊤ 
+
+> i
+
+x)2 u⊤ 
+
+> i
+
+(Diag( p) − pp ⊤)ui.
+
+Next, 
+
+u⊤ 
+
+> i
+
+(Diag( p) − pp ⊤)ui = u⊤ 
+
+> i
+
+Diag( p)ui − u⊤ 
+
+> i
+
+pp ⊤ui
+
+= X
+
+> k
+
+pk u2 
+
+> ik
+
+− (p⊤ui)2
+
+= X
+
+> k
+
+pk u2 
+
+> ik
+
+− 2( p⊤ui)2 + ( p⊤ui)2
+
+= X
+
+> k
+
+pk u2 
+
+> ik
+
+− 2 X
+
+> k
+
+pkuik (p⊤ui) + ( p⊤ui)2.
+
+Further, because P
+
+> k
+
+pk = 1 ,
+
+u⊤ 
+
+> i
+
+(Diag( p) − pp ⊤)ui = X
+
+> k
+
+pk u2 
+
+> ik
+
+− 2 X
+
+> k
+
+pkuik (p⊤ui) + X
+
+> k
+
+pk(p⊤ui)2
+
+= X
+
+> k
+
+pk
+
+h
+
+u2 
+
+> ik
+
+− 2uik (p⊤ui) + ( p⊤ui)2i
+
+= X
+
+> k
+
+pk
+
+ uik − p⊤ui
+
+2.
+
+Because pk ≥ 0 and  uik − p⊤ui
+
+2 ≥ 0 for every k, it follows that 
+
+u⊤ 
+
+> i
+
+(Diag( p) − pp ⊤)ui = X
+
+> k
+
+pk
+
+ uik − p⊤ui
+
+2 ≥ 0.
+
+Therefore, 
+
+∂2ℓ∂σ 2
+
+> i
+
+= ( v⊤ 
+
+> i
+
+x)2u⊤ 
+
+> i
+
+(Diag( p) − pp ⊤)ui ≥ 0.
+
+23 B Hessian Spectrum in the Singular-Value Space 
+
+In BSI, each linear weight matrix is reparameterized in terms of its singular-value components. Here, we provide empirical evidence that Assumption 8 also holds for the Hessian in this reparameterized singular-value space. As an example, we use Llama 2-7B finetuned on a mathematical reasoning dataset [ 26 ]. We first reparameterize each weight matrix using SVD. To make the experiment computationally feasible, we fix the smaller singular values and allow only the top 128 singular values of each matrix to vary. This avoids constructing the Hessian with respect to all singular values, which is infeasible for large models due to memory constraints. To further reduce computational cost, we adopt a layer-wise block-diagonal approximation: we compute Hessian entries only between singular values associated with the same layer and set cross-layer entries to zero. Such block-diagonal curvature approximations are widely used in scalable second-order methods for deep neural networks, where curvature is computed within each layer or block rather than across all parameter pairs [ 28 , 17 ]. We then compute the eigenvalues of the resulting Hessian approximation, sort them by magnitude in descending order, and plot the spectrum on log-log axes. Figure 2 shows the resulting spectrum. The bulk of the spectrum is consistent with Assumption 8: later eigenvalue magnitudes are empirically bounded by a power-law envelope. This is also aligned with prior observations of power-law-type decay in Hessian spectra with respect to the original network weights [ 23 ]. The sharper drop near the tail may be attributed to numerical artifacts, as eigenvalues that are theoretically zero can appear as small nonzero values due to finite-precision errors in the eigendecomposition. 10 0 10 1 10 2 10 3 10 4
+
+> Order of Eigenvalues
+> 10 −10
+> 10 −8
+> 10 −6
+> 10 −4
+> 10 −2
+> Eigenvalue Magnitude
+
+Figure 2: Hessian eigenvalue spectrum in the reparameterized singular-value space for math-finetuned Llama 2-7B. 
+
+## C BSI Practical Design Choices 
+
+This appendix section describes the practical design choices needed for a numerically stable and computationally efficient implementation of BSI in large-scale models. Specifically, it addresses (i) the selection of perturbation intensity for reliable Hessian-diagonal estimation under finite precision, and (ii) the use of a candidate pool to limit the computational cost of Hessian estimation during pruning. 
+
+C.1 Choosing Perturbation Intensity 
+
+The Hessian-diagonal estimator used in the importance score Ii relies on finite-difference pertur-bations of the singular values. The practical accuracy of this estimator therefore depends critically on the choice of the perturbation intensity ϵ. The perturbation magnitude must be chosen to ensure numerical stability under finite-precision arithmetic. We consider the floating-point representation of singular value σi,
+
+σi = ( −1) sign · (1 + fraction ) · 2h,
+
+where the fraction is represented using f bits and σi denotes the singular value that we perturb when computing the Hessian estimate in Theorem 5. The rounding error incurs when perturbing σi by ϵ
+
+24 satisfies 
+
+Error[ σi + ϵ] ≤ 12 2h−f . (6) As 2h < |σi| < 2h+1 , we have 
+
+12 |σi| < 2h < |σi|.
+
+Substituting this bound in Eq. (6) yields 
+
+Error[ σi + ϵ] ≤ 12 2−f |σi|.
+
+Let α denote the relative error tolerance: 
+
+Error( σi + ϵ)
+
+ϵ ≤ α. (7) We need to ensure the largest possible rounding error still satisfies Eq. (7). Therefore,  
+
+> 12
+
+2−f |σi|
+
+ϵ ≤ α. 
+
+Hence 
+
+ϵ ≥ 12α 2−f |σi|
+
+= 1
+
+α 2−(f +1) |σi|.
+
+At the same time, the perturbation intensity must remain sufficiently small to avoid contamination induced by higher order terms. We therefore bound ϵ by ϵmax < 1 and choose: 
+
+ϵ = min 
+
+ 1
+
+α 2−(f +1) σmax , ϵ max 
+
+
+
+,
+
+where σmax denotes the largest singular value across all layers of the model and ϵmax ensures the perturbation remains small enough for reliable estimation. This setting yields a perturbation intensity suitable for all singular values in the model. Using a uniform perturbation intensity reduces estimation variance by alleviating the off-diagonal noise induced by the large singular values. 
+
+C.2 Candidate Pool for Hessian Estimate 
+
+Estimating the Hessian diagonal for all singular values at every pruning step is computationally ex-pensive for large models. To address this, we restrict Hessian estimation to a dynamically constructed 
+
+candidate pool consisting of bases that are likely to be dropped at each pruning round. Formally, let 
+
+A denote the set of currently active bases, and let T be the total number of pruning rounds. We first identify the set of most significant bases K ⊂ A as the minimal subset satisfying: 
+
+X
+
+> i∈K
+
+σi ≥ ρcand 
+
+X
+
+> j∈A
+
+σj , ρcand = ( KeepRatio )γ/T , (8) where KeepRatio is the final target retention ratio of the model parameters, and γ > 0 controls the size of the candidate pool. ρcand is the cumulative sum threshold that we use to form the candidate pool. At a given pruning round, the candidate pool C is defined as the set of remaining bases: 
+
+C = A \ K 
+
+Hessian diagonals are estimated only for singular values corresponding to the bases in the candidate pool. The size of this pool is given by the cardinality |C| = |A| − |K| , where |K| is the number of bases required to satisfy the cumulative sum threshold. 25 D BSI Application 
+
+D.1 Evaluation of BSI on Mathematical Reasoning 
+
+This section presents results on the performance of models compressed using BSI on mathematical reasoning tasks. We report performance under varying compression ratios. All experiments are performed on NVIDIA A100 GPUs. As Table 1 shows, BSI outperforms state-of-the-art low-rank compression baselines at deep compression. Table 1: Accuracy and model size of Llama 2-7B compressed with various low-rank decomposition algorithms on the mathematical reasoning tasks. 
+
+SVD Model Size (Billion) 6.74 5.03 3.18 1.73 1.11 0.56 GSM8K Acc (%) 66.41 63.00 60.96 53.90 32.90 11.90 MATH Acc (%) 20.56 18.30 17.38 13.74 5.34 2.76 FWSVD Model Size (Billion) 6.74 4.79 2.95 1.54 0.96 0.47 GSM8K Acc (%) 66.41 62.70 62.55 56.48 1.52 1.90 MATH Acc (%) 20.56 19.18 17.62 14.20 1.76 1.48 ASVD Model Size (Billion) 6.74 4.09 3.43 2.77 1.45 0.79 GSM8K Acc (%) 66.41 61.94 60.88 59.74 50.49 29.11 MATH Acc (%) 20.56 18.74 18.72 17.30 12.62 5.18 BASEL Model Size (Billion) 6.74 5.11 3.27 1.82 1.20 0.41 GSM8K Acc (%) 66.41 62.55 61.03 56.86 50.34 7.58 MATH Acc (%) 20.56 19.50 18.62 16.20 13.18 2.72 BSI Model Size (Billion) 6.74 4.52 2.85 1.59 0.51 0.34 GSM8K Acc (%) 66.41 62.85 60.35 56.71 35.03 17.66 MATH Acc (%) 20.56 19.44 18.08 15.72 7.78 4.10 
+
+D.2 Ablation Study 
+
+Figures 3(a) and 3(b) report the ablation results for Llama 2-7B on GSM8K and Hendrycks MATH, respectively. The gradient-only variant (BSI w/o Hessian) uses the same compression pipeline as BSI but removes the Hessian term from the importance metric. The proposed BSI method achieves better performance than the gradient-only variant, indicating that the Hessian term improves the quality of basis selection. 1 3 5 7 9 11 13 15 17 19 21  
+
+> Compression Ratio
+> 20
+> 30
+> 40
+> 50
+> 60
+> Accuracy (%)  BSI BSI w/o Hessian
+
+(a) GSM8K 1 3 5 7 9 11 13 15 17 19 21   
+
+> Compression Ratio
+> 5
+> 10
+> 15
+> 20
+> Accuracy (%)  BSI BSI w/o Hessian
+
+(b) MATH 
+
+Figure 3: Accuracy and model size of Llama 2-7B compressed using BSI and its variant without the Hessian term on mathematical reasoning tasks. Exact values are shown in Tables 1 and 2. Table 2: Accuracy and model size of Llama 2-7B compressed with BSI without the Hessian term on the mathematical reasoning tasks. 
+
+BSI w/o Hessian Model Size (Billion) 6.74 3.00 1.30 0.49 GSM8K Acc (%) 66.41 60.65 49.36 27.67 MATH Acc (%) 20.56 17.82 12.60 5.70 
+
+26
