@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-05-09 <!--dpr-date:20260509-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202605/09/2605.05485v1-reacomp-compiling-llm-reasoning-into-symbolic-solvers-for-efficient-program-synthesis" data-sidebar-item="{&quot;title&quot;: &quot;ReaComp: Compiling LLM Reasoning into Symbolic Solvers for Efficient Program Synthesis&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2605.05485v1-reacomp-compiling-llm-reasoning-into-symbolic-solvers-for-efficient-program-synthesis&quot;, &quot;score&quot;: &quot;7.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;llm&quot;}], &quot;evidence&quot;: &quot;通过符号求解器减少Token使用和推理成本&quot;}">ReaComp: Compiling LLM Reasoning into Symbolic Solvers for Efficient Program Synthesis</a>
   * 2026-05-08 <!--dpr-date:20260508-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202605/08/2605.06046v1-requests-of-a-feather-must-flock-together-batch-size-vs-prefix-homogeneity-in-llm-inference" data-sidebar-item="{&quot;title&quot;: &quot;Requests of a Feather Must Flock Together: Batch Size vs. Prefix Homogeneity in LLM Inference&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2605.06046v1-requests-of-a-feather-must-flock-together-batch-size-vs-prefix-homogeneity-in-llm-inference&quot;, &quot;score&quot;: &quot;10.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;llm&quot;}], &quot;evidence&quot;: &quot;通过KV缓存局部性和前缀同质化优化吞吐量&quot;}">Requests of a Feather Must Flock Together: Batch Size vs. Prefix Homogeneity in LLM Inference</a>
