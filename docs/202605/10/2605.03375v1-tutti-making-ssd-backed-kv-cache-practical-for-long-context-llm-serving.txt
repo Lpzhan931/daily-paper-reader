@@ -1,0 +1,585 @@
+Title: Tutti: Making SSD-Backed KV Cache Practical for Long-Context LLM Serving
+
+URL Source: https://arxiv.org/pdf/2605.03375v1
+
+Published Time: Wed, 06 May 2026 00:31:48 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# Tutti: Making SSD-Backed KV Cache Practical for Long-Context LLM Serving 
+
+## Shi Qiu ∗
+
+Xiamen University Xiamen, China 
+
+## Yifan Hu 
+
+Xiamen University Xiamen, China 
+
+## Xintao Wang 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Wenhao Zhu 
+
+Xiamen University Xiamen, China 
+
+## Jianqin Yan 
+
+Xiamen University Xiamen, China 
+
+## Hao Chen 
+
+Xiamen University Xiamen, China 
+
+## Kaiqiang Xu 
+
+Hong Kong University of Science and Technology Hong Kong, China 
+
+## Kai Chen 
+
+Hong Kong University of Science and Technology Hong Kong, China 
+
+## Yiming Zhang †
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Abstract 
+
+LLM serving relies on prefix caching to improve inference performance. As growing contexts push key-value (KV) cache footprint far beyond GPU HBM and CPU DRAM capacity, KV cache is increasingly offloaded to NVMe SSDs. Unfor-tunately, restoring KV cache from SSDs suffers from poor I/O performance and incurs significant GPU stalls. This is primarily because the fragmented GPU memory layout re-sults in a massive number of tiny random I/Os, rendering the low-parallelism CPU a severe bottleneck even with GPU Direct Storage (GDS), which still relies on CPU intervention to initiate each I/O and thus remains CPU-centric .This paper presents Tutti , an efficient SSD-backed KV caching solution that eliminates CPU intervention from the critical data and I/O control paths between HBM and SSDs. At the core of Tutti is a GPU-centric KV cache object store, in which the CPU is only responsible for asynchronously load-ing I/O kernels once per layer to the GPU. Tutti saturates NVMe SSD bandwidth and reduces GPU stalls to near zero through the following designs: (i) we provide a GPU-native object abstraction that enables bulk KV cache transfers and management; (ii) we re-architect the GPU storage stack by in-troducing GPU io_uring to support asynchronous GPU direct object I/O; and (iii) we propose slack-aware I/O scheduling to avoid GPU resource contention. We have implemented Tutti and integrated it to vLLM. Extensive evaluation shows that compared to the state-of-the-art GDS-enabled, SSD-backed LMCache, Tutti reduces TTFT by 78.3% under strict SLO constraints and improves the achievable request rate by 2 ×.The serving cost is reduced by 27%. Tutti achieves nearly the same inference performance as DRAM-backed LMCache, while providing almost infinite capacity. 
+
+> ∗qiushijsxs@outlook.com
+> †Yiming Zhang is the corresponding author. sdiris@gmail.com
+
+## 1 Introduction 
+
+Large Language Models (LLMs) are changing data centers from data storage platforms into token-generation infrastruc-tures for AI services [ 31 , 56 ]. For Model-as-a-Service (MaaS) providers, the latency and cost of token generation deter-mine service competitiveness. Prefix caching [ 6 , 38 , 50 ] has become a key optimization for modern inference serving. It reuses previously computed tokens, known as the key-value (KV) cache , to avoid redundant computation, thereby improv-ing Service Level Objectives (SLOs) and lowering per-token cost by up to an order of magnitude [7, 36]. As LLM context windows and concurrency grow, KV cache footprints rise rapidly. The GPU HBM is quickly exhausted, forcing KV eviction and recomputation that increase latency and cost while limiting the number of concurrent sessions a MaaS provider can sustain [ 9 ]. CPU DRAM is commonly used to extend KV capacity beyond HBM, but still falls short at scale. For instance, even about 2 TB of DRAM retains only around five minutes of KV cache [ 35 ]. Therefore, further expansion requires NVMe SSDs as the next tier [ 12 , 13 , 26 ,27 , 38 , 44 , 51 , 54 ]. Commercial servers can provide over 100 TB capacity of NVMe SSDs [ 9], enough to retain more than one hour of KV cache for long-running conversations and emerging agentic workloads. However, three-tier HBM-DRAM-SSD KV cache systems are too slow for latency-sensitive LLM inference. The bot-tleneck is not raw SSD bandwidth [ 18 , 45 ], but rather arises from the fine-grained, page-based GPU memory layout used by modern LLM engines (vLLM [ 20 ] and SGLang [ 42 ]), which fragments a logically contiguous KV cache into many small, scattered blocks [ 19 , 26 , 32 , 57 ]. Restoring a long prefix from SSDs generates a massive number of tiny random I/Os [ 26 , 50 ], further compounded by DRAM-HBM data copies and CPU-GPU synchronization. All these operations require CPU intervention, and thus the three-tier KV cache hierarchy 
+
+> arXiv:2605.03375v1 [cs.OS] 5 May 2026
+
+is CPU-centric [ 39 ]. Together, these overheads reduce effec-tive SSD-to-GPU bandwidth and induce 70 ∼80% GPU stalls [ 41 ]. Expensive GPU cycles are wasted waiting for KV cache transfers from SSDs to HBM (via DRAM), making KV cache reuse even slower than recomputation [6, 13, 16, 17, 37]. A common optimization is to pipeline KV cache transfers with computation to mitigate the transfer overhead, which is effective for DRAM-backed KV cache systems [ 13 , 16 ]. On SSDs, however, pipelining would fragment transfers, re-duce effective bandwidth, and introduce additional CPU-side scheduling and control overhead, thereby further degrading I/O performance. Consequently, existing systems tend to avoid offloading KV cache to SSDs and keep most KV cache in DRAM [ 1, 11 , 21 , 38 , 50 , 55 ], whose limited capacity lowers hit rates and diminishes the benefits of prefix caching. The state-of-the-art LMCache [ 26 ] integrates GPU Direct Storage (GDS) [ 33 ] to its KV cache hierarchy, enabling an (op-tional) two-tier HBM-SSD mode with direct access between the GPU and SSDs. However, as each I/O must be initiated 
+
+by the CPU (Fig. 1( left )), GDS remains CPU-centric , with the CPU still on the critical I/O control path. As a result, GDS-enabled LMCache still suffers from I/O bottlenecks when transferring KV cache between HBM and SSDs (§2.2). This problem is further exacerbated as GPU compute capability and model-side efficiency continue to increase. This paper presents Tutti , an efficient SSD-backed KV caching solution that eliminates CPU intervention from the critical data and I/O control paths between HBM and SSDs (Fig. 1( right )). At the core of Tutti is a GPU-centric , two-tier (HBM-SSD) KV cache object store, in which the CPU is only responsible for asynchronously loading I/O kernels once per layer to the GPU, reducing CPU overhead from 
+
+𝑂 (𝑙𝑎𝑦𝑒𝑟 ×𝑏𝑙𝑜𝑐𝑘𝑠 ) to 𝑂 (𝑙𝑎𝑦𝑒𝑟 ). This makes the CPU no longer a bottleneck, enabling the GPU to issue massive parallel I/O requests for KV cache objects directly to SSDs. Although GPU-centric storage has been explored for raw blocks (BaM [ 40 ]) and files (GeminiFS [ 39 ] and GoFS [ 23 ]), extending it to KV cache scenarios remains challenging (§2.4) due to (i) abstraction mismatch for KV cache management, (ii) granularity gap between KV cache transfers and GPU stor-age I/O, and (iii) GPU resource contention. Tutti addresses these challenges through the following designs, thereby sat-urating NVMe SSD bandwidth and reducing GPU stalls to near zero. First, we provide a GPU-native object abstraction (§3.1) that enables bulk KV cache transfers and management, al-lowing direct GPU access to KV cache stored on NVMe SSDs. To achieve this, we introduce a GPU file pool, an NVMe file pool (based on GPU file systems like GeminiFS), and a P2P memory mapping table. We also expose a CPU-side interface that integrates allocation, indexing, and high-concurrency GPU access into a single operation. Second, we re-architect the GPU storage stack (§3.2) to support asynchronous GPU direct object I/O. Specifically, “I want to visit Seattle !” Cached KV Paged HBM/DRAM     
+
+> CPU -Centric LMCache
+> SSDs
+> GPU -Centric Tutti
+> DRAM
+> Inference Engine
+> HBM
+> Inference Engine
+> Initiate Memcopies Load I/O Kernels
+> Batch_ Re trieval
+> Control Path Data Path
+> w/o GDS w/ GDS
+> GPU
+> CPU
+> Initiate
+
+Figure 1. Comparison between CPU-centric KV cache stor-age (LMCache w/ and w/o GDS) and GPU-centric Tutti. Tutti eliminates CPU intervention from the critical data and I/O control paths between HBM and SSDs. we introduce GPU io_uring (gio_uring), which emulates the CPU-side io_uring mechanism to remove I/O submission and completion from the GPU computation critical path. We partition GPU resources so that I/O and compute kernels can run in parallel. Third, we propose slack-aware I/O scheduling (§3.3) to avoid GPU resource contention for improving end-to-end inference performance. We estimate per-layer I/O slack via offline profiling, and schedule KV cache transfers within these slacks to maximize compute-I/O overlap and minimize GPU stalls. We have implemented Tutti and integrated it to vLLM [ 20 ] (§3.4). Extensive evaluation shows that compared to the state-of-the-art SSD-backed LMCache (with GDS), Tutti reduces TTFT by 78.3% under strict SLO constraints and improves the achievable request rate by 2 ×. The serving cost is reduced by 27%. This paper makes the following contributions: 
+
+• To the best of our knowledge, Tutti is the first open-source SSD-backed KV caching solution that eliminates CPU in-tervention from the critical data and I/O control paths between HBM and SSDs. 
+
+• We provide a GPU-native object abstraction that bridge the granularity gap between KV cache transfers and GPU storage I/O, together with asynchronous GPU io_uring and slack-aware I/O scheduling. 
+
+• We integrate Tutti into vLLM, and demonstrate its effec-tiveness in saturating NVMe SSD bandwidth and reducing GPU stalls to near zero. SSD-backed Tutti achieves nearly the same inference performance as DRAM-backed LM-Cache, while providing almost infinite capacity. 
+
+## 2 Background and Motivation 
+
+This section starts with the fundamentals of token genera-tion and KV cache in LLM inference. Then, we identify the inefficiency of existing tiered storage for KV cache. Finally, 
+
+> 2
+
+we examine potential design directions to overcome these inefficiencies and highlight the key challenges in realizing such a system. 
+
+2.1 LLM Inference and KV Cache Prefill and Decode. Modern LLMs are built on the Trans-former architecture [ 48 ]. Token generation consists of two phases: prefill and decode . In the prefill phase, the model processes the input prompt in parallel, converts tokens to vectors, and computes Query ( 𝑄 ), Key ( 𝐾 ), and Value ( 𝑉 ) ma-trices. Prefill is typically compute-bound and is measured by Time-to-First-Token (TTFT), the time to process the entire input and emit the first token. In the decode phase, the model generates tokens autoregressively based on previously gen-erated tokens, one step at a time. Inter-Token Latency (ITL) is commonly used to characterize decode performance. 
+
+KV Cache: Trading Memory for Compute. To avoid re-computing tokens during the decode phase, inference en-gines use a Key-Value (KV) cache for previously computed to-kens. The 𝐾 and 𝑉 matrices produced during prefill are stored and reused for subsequent decode steps. The KV cache is not session-bound: it can be reused across requests that share a common prompt, a technique known as prefix caching . When a prompt hits the cache, prefill is skipped, freeing compute capacity and reducing per-token cost by up to ∼90% [ 7 , 36 ]. This help GPUs to generate tokens faster and sustain higher QPS, improving SLOs and user experience. 
+
+Paged KV Memory Management. KV cache footprint grows with input length, and variable-sized requests cause fragmentation in GPU memory. To address this problem, modern inference systems [ 19 ] partition the KV cache into non-contiguous blocks of shape [Block , ℎ, 𝑑 ] along the layer and token dimensions, where each block usually holds 16–32 tokens. Blocks are allocated on demand to support dynamic sequence growth and align with layer-wise computation. This paged layout has become the de facto standard in mod-ern LLM inference engines such as vLLM [ 20 ], SGLang [ 42 ], and TensorRT-LLM [32]. 
+
+2.2 SSD-Induced Bottlenecks in Tiered KV Cache 
+
+As context windows scale to millions of tokens [ 29 , 47 ] and the number of active sessions grows, the aggregate KV cache footprint quickly exceeds GPU HBM capacity [ 27 ]. KV cache offloading extends GPU HBM capacity with CPU DRAM and NVMe SSDs, resulting in the two-tier HBM-DRAM and three-tier HBM-DRAM-SSD hierarchies. The HBM-DRAM hier-archy only incurs slight performance degradation, but the extended capacity is limited. In contrast, the HBM-DRAM-SSD hierarchy provides much higher capacity, but causes significant I/O overhead. When offloading KV cache to SSDs, the main challenge stems from the mismatch between paged KV layouts and SSD access patterns. Once non contiguous GPU KV blocks are HBM     
+
+> DRAM
+> SSD
+> SSD-LW
+> SSD-GDS 0
+> 2
+> 4
+> 6
+> 8
+> (a) vLLM v0.12.0
+> 9.4 30.5
+> 76.9
+> 84.0
+> 73.0
+> HBM
+> DRAM
+> SSD
+> SSD-LW
+> SSD-GDS
+> (b) vLLM v0.17.0
+> 1.7 14.2
+> 72.8
+> 78.9
+> 72.3
+> Inference Time (s)
+> 33.9%
+> Compute Bubble Recompute
+
+Figure 2. Inference performance of vLLM with LMCache on Llama3-8B, across HBM, DRAM, and SSD tiers (sequenth length = 64K, hit rate = 75%). DRAM remains close to HBM, whereas SSD and GDS incurs large GPU bubbles. The dashed line marks recomputation performance. As LLM engines continuously optimize inference computation, restoring KV cache from SSDs is no longer beneficial (vLLM v0.12.0 vs. v0.17.0) due to severe I/O bottleneck. evicted to the SSD, memory fragmentation [ 43 ] becomes se-vere I/O fragmentation. For a 64-layer Qwen3-32B model [ 53 ]with block size 64, reloading a 128K-token KV requires fetch-ing about 256 K (= 2 × 64 × 128 × 1024 /64 ) scattered 80 KB objects. This access pattern generates a massive number of small, random transfers, causing CPU-GPU copy, file sys-tem, and I/O submission overheads [ 23 , 39 , 40 , 43 , 50 ] to dominate data movement. Grouping multiple blocks into larger chunks can improve I/O efficiency, but introduces a tradeoff among transfer efficiency, prefix-sharing effective-ness, and cache-management granularity. For example, the default LMCache [ 26 ] chunk stores 256 tokens, causing a 128K-token KV to require more than 1,000 chunk accesses, most of which are random. With compute-I/O pipelining, the number of accesses further grows to tens of thousands. As a result, expensive GPU cycles are wasted waiting for restoring KV cache from SSDs, making KV cache reuse even slower than recomputation. 
+
+SSD Tiers Cause Growing GPU Bubbles. To examine how these bottlenecks manifest in practice, we use the latest ver-sion (v0.4.2) of LMCache [ 12 , 26 ] as the representative tiered KV cache store. LMCache supports DRAM and SSD tiers, layer-wise compute-I/O pipelining [ 13 , 16 ], and (optional) GPU Direct Storage (GDS) [ 33 ]. We evaluate Llama3-8B on different vLLM versions (v0.12.0 released on Dec. 2025 vs. v0.17.0 on Mar. 2026) with a 64K sequence length at 75% hit rate, with 50 GB/s DRAM-HBM bandwidth and two SSDs with peak bandwidth of 29 GB/s for read and 12 GB/s for write (See §4 for detailed configurations). 1 DRAM tier is efficient. As shown in Fig. 2, loading KV from CPU DRAM introduces only modest overhead relative 
+
+> 3
+
+to HBM. Low-latency, fine-grained DRAM-HBM access, to-gether with LMCache’s GPU-assisted copy, collapses many sequential cudaMemcpyAsync calls into a small number of GPU kernels with minimal control overhead. In addition, DRAM’s low latency and strong random-access performance allow layer-wise pipelining to effectively hide data move-ment behind attention computation. 2 SSD tier is inefficient even with GDS. When extending the hierarchy to SSDs, restoring KV cache becomes highly inefficient even with aggregated KV transfer and asynchro-nous I/O [ 10 ]. As shown in Fig. 2, restoring KV cache from SSDs performs much worse than from DRAM, causing GPU bubbles to exceed 70% of total inference latency in all cases. Applying layer-wise transfers on SSDs (SSD-LW) further reduces I/O granularity and increases the number of opera-tions, inflating end-to-end latency and pushing GPU bubble time to around 80% of total inference latency. GDS [ 33 ] removes CPU-GPU copies through peer-to-peer DMA, but still relies on CPU intervention to initiate each I/O, incurring substantial software overhead and limiting I/O parallelism [ 8, 23 ]. Even with GDS, GPU bubble time remains high at above 70%, indicating that eliminating the CPU from the data path alone hardly alleviates the mismatch between paged KV layouts and SSD access patterns. Moreover, as LLM engines continuously optimize inference computation, restoring KV cache from SSDs is no longer beneficial due to severe I/O bottleneck. 
+
+2.3 GPU-Centric Storage 
+
+GPU-centric storage [ 5, 28 , 39 , 40 ] moves both the data plane and the I/O control plane onto the GPU. It enables GPU threads to issue NVMe I/O without CPU intervention. BaM [ 40 ] was the first to manage NVMe Submission Queues (SQ) and Completion Queues (CQ) directly in GPU mem-ory, so that GPU kernels can enqueue I/O commands, ring the NVMe doorbell, and observe completions entirely from device code. This reduces CPU-GPU synchronization and kernel launch overhead, allowing massively parallel GPU threads to drive high-bandwidth, fine-grained I/O. 
+
+Common GPU-centric storage abstraction. Across GPU-centric storage systems, GPU threads interact with a high-throughput software cache (e.g., an array in BaM or a page cache in GeminiFS [ 39 ]) through a block or file interface. On a cache miss, a GPU thread enqueues an I/O request into the NVMe submission queue in GPU address space and rings the doorbell register. It then polls the completion queue until data arrives. By staggering the I/O and compute phases of different warps, this GPU-centric design can overlap compu-tation and storage access and hide latency. 
+
+Implications for KV cache workloads. While GPU-centric storage provides a promising direction—GPU-controlled, fine-grained access to NVMe—it is designed around generic block and file abstractions and keeps busy-waiting at the thread or warp level. As we show next, this abstraction does not align well with the KV cache layout and tightly pipelined decode in LLM inference, leading to problems including excessive control overhead, poor request coalescing, and underutilized NVMe bandwidth when applied naively to tiered KV storage. 
+
+2.4 Challenges of GPU-centric Storage for KV Cache 
+
+Applying GPU-centric storage to KV cache workloads faces unique challenges in abstraction, granularity, and contention. 
+
+Abstraction mismatch for KV cache management. LLM engines (vLLM [ 20 ] and SGLang [ 42 ]) need dynamic GPU memory block allocation and indexing for KV cache, while GPU-centric storage exposes only low-level disk block and file interfaces. Pushing this management down to the GPU requires implementing hash based allocation and lookup in device code. However, as shown in Fig. 3, GPU hash tables perform poorly: with various sequence lengths, in-sert and lookup costs are higher than CPU hash tables by 
+
+9.0× ∼ 24 .2× and 25 .6× ∼ 50 .0×, respectively, up to seconds per operation. This is hard to fix because hash computation and probing form a sequential dependency chain, and each block’s hash depends on the previous one. Such irregular, pointer chasing workloads map poorly to SIMT execution and cannot exploit GPU parallelism. 
+
+Granularity gap between storage I/O and KV transfers. 
+
+The GPU NVMe driver is optimized for fine-grained, cache-like access, but KV cache reloads require medium-size, con-tiguous transfers to meet SSD bandwidth targets. On PCIe 5.0 SSDs [ 18 , 46 ], 4KB requests can saturate IOPS, yet only use about 80% of read bandwidth and 16% of write bandwidth, resulting in significant underutilization of available through-put. Simply increasing request size is nontrivial. The GPU NVMe driver relies on NVMe Physical Region Pages (PRPs) to describe GPU HBM addresses to the controller. Fixed 4 KB PRPs can be pre-allocated by the CPU driver, but KV cache transfers are variable and much larger ( ∼100 KB). For re-quests above 8 KB, NVMe needs additional PRP list pages, whose allocation and address translation must be done in privileged CPU code [ 39 , 49 ]. Because GPU programs run unprivileged, GPU-centric storage cannot easily coarsen I/O without falling back to the CPU, which undermines the goal of eliminating CPU intervention. 
+
+Resource contention. GPU-centric storage I/O competes with LLM computation for resources. 1 SM competition. LLM inference has strict data depen-dencies: attention cannot proceed until the corresponding KV cache is available. Existing GPU-centric storage designs perform synchronous, busy-waiting I/O, where GPU threads continuously poll completion queues inside the compute kernel and block computation. Without careful decoupling, simply adding more I/O parallelism can only reduce the SM budget available for computation.             
+
+> 4128K 256K 512K 1M
+> Sequence Length
+> 0
+> 200
+> 400
+> 600
+> 800
+> Time (ms)
+> 12.0 13.4 20.7 35.3
+> 108.5
+> 216.2
+> 431.6
+> 862.0
+> CPU Insert
+> GPU Insert
+> 128K 256K 512K 1M
+> Sequence Length
+> 4.2 4.3 13.1 27.7
+> 107.6
+> 215.1
+> 430.0
+> 860.0
+> CPU Lookup
+> GPU Lookup
+
+Figure 3. CPU vs. GPU in Hash Performance. 2 Bandwidth competition. Prefix caching generates heavy, bidirectional traffic. Particularly during compute-I/O pipelin-ing, simultaneous writes (from the previous layer) and reads (for the next layer) cause contention for NVMe resources (e.g., SSD internal cache), degrading NVMe bandwidth (§3.3). Achieving fine-grained I/O orchestration within the GPU to improve utilization is difficult, while separate scheduling tends to increase kernel execution time. 
+
+## 3 Design and Implementation 
+
+In this section, we introduce the design and implementation of Tutti . We first describe the GPU-native object abstrac-tion that enables high-concurrency GPU direct access to KV cache using object semantics. We then explain how appli-cations can efficiently submit and reap asynchronous GPU I/O kernels. Finally, we discuss how to schedule GPU I/O kernels to minimize resource contention. 
+
+3.1 GPU-Centric Object Store 
+
+At the core of Tutti is a GPU-centric KV cache object store. As discussed in §2.4, KV cache management cannot be pushed entirely onto the GPU: indexing, global sharing across re-quests, and engine-visible mapping must remain coordinated with the CPU-side inference engine. Fortunately, all the management logic can be handled by the CPU off the critical data and I/O control paths of KV cache transfers. We therefore build our GPU-centric object store upon GeminiFS [ 39 ], a companion file system for GPUs which coexists with a conventional CPU-side file system (like ext4) so that the file system metadata can be managed on the CPU and shared with the GPU. We extend GeminiFS with a scalable GPU file pool and a P2P memory mapping table for dynamic, bulk KV cache transfers and KV management operations such as Store and Retrieve ). 
+
+Scalable GPU File Pool. As shown in Fig. 4, Tutti aligns storage allocation with the inference engine’s KV block man-ager, by representing each memory block as one object. A GPU file is organized as 2 × 𝐿 objects ( 𝐿 is the number of lay-ers), one key object and one value object for each layer. This mapping preserves the inference engine’s native block gran-ularity, making dynamic allocation, indexing, and sharing consistent across HBM and SSD tiers. A BLayer 0 ...    
+
+> ABLayer n
+> ABLayer 0
+> ABLayer n
+> ...
+> ...
+> ...
+> ...
+> ...
+> Memory Blocks
+> K
+> V
+> GPU KV Cache Pool
+> GPU File Pool
+> ...
+> A
+> A
+> A
+> A
+> NVMe File Pool
+> Layer 0
+> Layer n
+> ...  ...
+> Registration
+> ...
+> P2P memory
+> Mapping Table
+> Virt addr to PCI
+> addr( SGL )
+> Objects
+> GPU File
+> ...
+
+Figure 4. Layout of GPU-centric KV cache store. GPU files are visible to the inference engine, while NVMe files are managed by GeminiFS as physical storage extents allocated to SSDs. Tutti maps each GPU file to multiple NVMe files using the Tensor-Stripe layout, which follows the original tensor granularity instead of fine-grained storage striping. Consequently, the GPU file shape matches the KV cache memory object ( 2 × 𝑙𝑎𝑦𝑒𝑟 × 𝑏𝑙𝑜𝑐𝑘 ), so storage I/O remains aligned with KV transfer granularity. For prompts spanning multiple GPU files, we employ a round-robin placement strategy across devices. Specifically, objects are uniformly distributed across multiple NVMe SSDs in a row-sequential manner. This approach not only balances I/O traffic across the drives to help saturate aggregate NVMe bandwidth but also reduces the indexing overhead between GPU and NVMe files. At system startup, Tutti pre-allocates a large pool of NVMe files on each device and exposes them as free GPU files. When a new KV cache needs to be persisted, the runtime only selects an empty GPU file and installs a CPU-side hash mapping from the KV cache to the GPU file ID. This pre-serves the dynamic allocation semantics expected by the runtime while removing file creation, reclamation, and other metadata operations from the runtime critical path. 
+
+P2P Memory Mapping Table. The GPU file pool solves log-ical object management, while the remaining challenge is to translate KV cache virtual addresses into PCI-visible physical addresses during runtime I/O submission. Because modern inference engines pre-allocate a fixed KV cache memory pool at initialization and keep it stable throughout the process lifetime, Tutti can pre-compute a P2P memory mapping table at startup and reuses it for subsequent GPU I/O. However, a straightforward PRP-based design causes sig-nificant memory overhead. For instance, for a 60 GB KV cache on 80 GB HBM, PRP requires a pointer for every page ( Total Pages = 60 × 1024 3/4096 = 15 , 728 , 640 Pages ). If allo-cating PRP List Pages at 64KB granularity (where each page            
+
+> 5IOCTX IOCTX
+> SQ SQ CQ CQ
+> IOCTX IOCTX
+> IOCTX IOCTX IOCTX IOCTX
+> ...
+> ...
+> ...
+> ...
+> [idx, num_ioctx, event]
+> GPU
+> Storage
+> SM SM SM
+> Compute
+> CPU
+> 1. init_queue
+> [queue_depth]
+> 2. get_iocb
+> [nums,event]
+> 3. Issue_io
+> [ IOCB_ids,SMs]
+> 4. wait_cqe
+> [ IOCB_ids ]
+> IOCB
+> 1.Create SQ/CQ
+> 2.1 Get IOCBs
+> ...
+> 2.2 Fill IOCTXs
+> 3.1 Launch Kernel
+> 3.2Write CQE
+> 4. Polling
+> CQ
+
+Figure 5. Architecture and I/O Process of GPU io_uring. holds only 16 pointers), 983 , 040 pages are required. This re-sults in an actual HBM usage of ( 983 , 040 × 4 KB ≈) 3.75 GB ,significantly wasting the expensive HBM resource. To better match medium-sized KV transfers, Tutti adopts Scatter Gather Lists (SGL) [ 49 ] rather than PRP. It uses only 16 Bytes to describe a large chunk of contiguous memory, containing a Physical Address (8 bytes), Length (4 bytes), and Identifier (4 bytes). Consequently, memory consumption drops to ( 983 , 040 × 16 B ≈) 15 MB. At runtime, the inference engine only performs block lookup and P2P table lookup to generate a batch of light-weight GPU I/O contexts , which are then passed to the GPU for concurrent execution. This avoids per-request physi-cal address construction and file-management overhead on the critical I/O path. Engine-visible mappings remain CPU-managed, while the GPU holds only the metadata required for direct I/O submission. Thus, Tutti provides layer-wise batched Store and Retrieval interfaces that reduce CPU overhead from 𝑂 (𝑙𝑎𝑦𝑒𝑟 × 𝑏𝑙𝑜𝑐𝑘𝑠 ) to 𝑂 (𝑙𝑎𝑦𝑒𝑟 ).
+
+3.2 GPU io_uring 
+
+The GPU-centric object store follows a “CPU-prepared, GPU-executed” model. The CPU runtime prepares I/O control blocks (IOCBs) from CPU-managed mappings and enqueues GPU I/O kernels ahead of time together with model-compute kernels. Once enqueued, GPU-side dependency tracking de-termines when SSD access is issued, so the runtime I/O criti-cal path no longer involves the CPU. This naturally decouples GPU I/O from the computation kernel while enabling effi-cient parallelism between the I/O kernel and the computation kernel. Since its design mirrors the CPU-side io_uring [ 10 ], we call it GPU io_uring (gio_uring), the architecture of which is shown in Fig. 5. 
+
+Zero-Copy Ring Buffers. To avoid runtime memory allo-cation, copying, and CPU-GPU synchronization when the CPU prepares GPU I/O work ahead of execution, gio_uring utilizes a pair of lock-free ring buffers (SQ and CQ) resid-ing in GPU HBM but mapped to the CPU via non-cached mmap [ 52 ]. To accommodate thousands of concurrent GPU I/O requests, the system uses a batching queue structure. In contrast to the traditional CPU io_uring (where one SQ entry corresponds to a single command), each SQ entry is defined as an I/O IOCB, with each IOCB containing 2048 I/O contexts (IOCTXs). An IOCTX records the SGL address, GPU file offset, and length. The number of IOCTXs aligns with the GPU’s mini-mum scheduling unit. For example, on an H100 (where the unit is 2 SMs), each SM supports 64 Warps of 32 threads, total-ing 4096 concurrent threads. Considering register pressure, we typically divide the theoretical limit by 2. This design allows GPU submit massive I/O requests at once. 
+
+SM Partitioning For Accurate I/O. Simple concurrency using multiple CUDA streams is insufficient for achieving fine-grained overlap between computation and I/O. Due to the largely non-preemptive nature of the GPU’s hardware scheduler [ 24 ], a long-running I/O kernel can monopolize resources and block the execution of a critical compute kernel on another, even if idle SMs are available. Through NVIDIA green context [ 34 ], we isolate GPU resources at the hardware level into a “Compute Domain” and an “I/O Control Domain”. The I/O control kernel runs on dedicated SMs, unaffected by compute workload fluctuations. This ensures that latency-sensitive kernels start and complete as quickly as possible. This design avoids long-tail latency and resource starvation which are common in traditional cooperative multitasking, and provides deterministic QoS. 
+
+Async I/O Processing : The processing of gio_ring is similar to the conventional CPU-side io_uring: 1 init_queue(depth) 
+
+creates an SQ and CQ containing depth IOCBs, each with a unique index. 2 get_iocb(nums, event) is called before exe-cution to retrieve the necessary IOCBs. The application fills them with CPU-side virtual addresses and updates num_ioctx .To maintain correctness under out-of-order stream execu-tion, a CUDA event is inserted so that the GPU I/O kernel starts only after the required dependency is satisfied. 3 is-sue_io(IOCB_ids, SMs) enqueues a GPU I/O kernel with the specified IOCB IDs and SM allocation, realizing intra-device parallelism. After the kernel is enqueued, SSD commands are generated and issued entirely on the GPU. When the kernel completes, it atomically writes the IOCB index to the CQ. 4 wait_cqe() provides fine-grained waiting by checking the CQ for a specific IOCB index without requiring CPU participation in per-I/O issuance. 
+
+3.3 Slack-Aware I/O Scheduler 
+
+Simply using asynchronous I/O and SM partitioning is in-sufficient for achieving stable compute-I/O overlap, as two sources of interference remain. First, read and write I/O contend for SSD bandwidth and internal resources. This is common in naive layer-wise pipelining, where write I/O for newly generated KV competes with read I/O for the next layer. The loss is not a simple additive sharing effect: as shown in Fig. 6, total bandwidth drops by 60% under con-current read/write, whereas separate calls can saturate the device. This is mainly because large-block reads and writes                 
+
+> 60510 15 20 25 30 35 40 45
+> 0
+> 10
+> 20
+> 30
+> 40
+> Throughput (GB/s)
+> (a) Concurrent Read/Write
+> Bandwidth Conflict
+> (60.1% drop)
+> PCIe Read
+> PCIe Write
+> 0510 15 20 25 30
+> Time (ms)
+> 0
+> 10
+> 20
+> 30
+> 40
+> Throughput (GB/s)
+> (b) Decoupled Read/Write PCIe Read
+> PCIe Write
+
+Figure 6. Concurrent vs. decoupled read/write PCIe band-width utilization. Time            
+
+> SM
+> Util. WWWW
+> R
+> W
+> Decode
+> Slack
+> Window
+> I/O
+> Stream
+> SQ N-1
+> RR
+> Prefill 1
+> RR
+> Prefill 2
+> RR
+> Prefill 3
+> W
+> Prefill n -1
+> W
+> Prefill n
+> 1234
+> 3
+> Event
+> 12N
+> Submit I/O
+> Launch W After R
+> RRead
+> Kernel
+> Write
+> Kernel Kernel Launch Async I/O
+
+... 
+
+... 
+
+... 
+
+> Layer -Wise
+
+Figure 7. Slack aware I/O scheduler. contend for the NVMe’s internal cache [ 15 , 25 ], and we re-produced this behavior with FIO using one read thread and one write thread at 256 MB granularity. Second, I/O kernels also compete with model execution for SM resources. Operators such as embedding, normalization, and GEMM may require up to 90% of GPU resources. Under non-preemptive GPU scheduling, a long-running I/O ker-nel can therefore delay critical compute kernels and reduce inference performance. To address both effects, Tutti proposes a lookup-table-driven slack-aware I/O scheduler, as shown in Fig. 7. Slacks refer to execution windows with spare SM resources and without harmful read/write bandwidth contention. The sched-uler uses offline profiles to place read and write kernels only into such windows, thereby minimizing interference with model execution. 
+
+Offline Profiling of SM Slack Windows. Prefill complex-ity varies with prefix length. The primary source of variation is attention complexity. As prefix length increases, the num-ber of attention operations per new token increases linearly, leading to higher FLOPs compared to the zero-prefix baseline. Conversely, other operators within a layer (such as Linear Projections and Normalization) are unaffected by context length. Therefore, we profile each layer offline and store the resulting slack information in a lookup table indexed by input length ( 𝐿 𝑖𝑛𝑝𝑢𝑡 ) and prefix length ( 𝐿 𝑝𝑟𝑒 𝑓 𝑖𝑥 ). Each entry records the duration and available SM budget of schedulable slack windows, allowing the runtime to directly look up how many IOCBs can be launched without online modeling. The step size aligns with the token length of a single warp, dras-tically reducing both the offline profiling time and data size. Additionally, we profile decode duration and the execution time and SM occupancy of read/write kernels under different IOCB counts, enabling the scheduler to select an appropriate launch size by table lookup. 
+
+Decoupled Scheduling for Read and Write. To avoid the bandwidth collapse caused by concurrent read/write exe-cution, Tutti does not use naive layer-wise pipelining that overlaps reads and writes indiscriminately. Instead, it sched-ules them separately according to the profiled slack table. During prefill, read kernels have higher priority because KV retrieval lies on the critical path of reuse. When an inference request arrives, the runtime enqueues the corresponding read IOCBs. Before each layer begins, the scheduler consults the lookup table using the current input length and prefix length, then launches the maximum IOCB count that fits within the next profiled slack window. If no suitable slack window exists, high reuse has made KV retrieval the bottle-neck, and the scheduler immediately launches the required reads to avoid stalling computation. Write requests are handled only after the critical-path reads have been scheduled. Pending writes remain recorded in SQ, and gio_uring automatically inserts CUDA events to preserve correctness. If the current prefill layer still exposes a schedulable slack window, the scheduler issues as many writes as the lookup table allows; otherwise, it defers them to shorten prefill and preserve TTFT. Remaining writes are flushed during decode using a best-effort policy. Although decode usually offers lower GPU utilization, its slack win-dows are short and less predictable, so the scheduler relies on table lookup to opportunistically issue writes. Requests that do not fit remain queued for later slack windows, reducing inter-request interference and improving throughput. 
+
+3.4 Tutti Implementation Integration with vLLM. We implemented Tutti using ∼8,000 LoC in C++ and integrated it with vLLM’s KVConnector in multiple versions using ∼1,500 LoC in Python. This inte-gration preserves vLLM’s block-granular KV management. The GPU file pool exposes layer-wise retrieve_layer and 
+
+store_layer interfaces to support efficient layer-wise KV movement in vLLM. This organization matches the layer-wise transfer model described earlier and creates opportuni-ties to overlap KV movement with model computation. The extension to vLLM is used to register the pre-allocated KV memory block pool, identify reusable prefixes, and construct the mapping from logical KV blocks to GPU files. Retrieve_layer is issued on the critical path of reuse, while store_layer is queued and deferred when necessary so it 
+
+> 7
+
+can be flushed in later slack windows, including subsequent requests, thereby reducing inter-request interference. To pre-serve correctness and limited GPU resource usage, these interfaces are bound to CUDA stream dependencies, while the detailed GPU-side submission and completion flow fol-lows Sec. 3.2. Scheduling decisions are then delegated to the slack-aware scheduler. During the warm-up, Tutti profiles the per-layer slack windows for a given model and system configuration. The resulting profile only needs to be generated once and can be reused across inference processes under the same deploy-ment setting. Before each retrieve_layer or store_layer call, the runtime consults the current layer’s slack entry to decide whether to issue I/O and how many IOCBs to launch, thereby minimizing contention with inference kernels. 
+
+Support for Multi-GPUs. When the model uses multi-GPU deployment such as tensor parallelism, vLLM launches one process per GPU, allowing one Tutti instance to be deployed alongside each GPU process. Each Tutti only manages part of KV cache, each process are independently responsible for the KV blocks corresponding to its GPU-resident layers, and the size of GPU file will adjust accordingly. To support NVMe sharing between GPUs, we use a local daemon that allocates GPU memory and initializes a dedicated NVMe submission/completion queue pair for each GPU. The cor-responding vLLM process obtains the addresses of its GPU-resident queues through GPU inter-process shared memory and submits I/O commands directly through them. Because each GPU owns an independent queue pair, there is no inter-GPU queue contention, allowing all GPUs to access local NVMe in parallel for high-throughput KV reads and writes. The Solidigm D7-PS1010 [ 45 ] used in our prototype support up to 256 I/O queues, allowing us to provision 32 queues for each of 8 GPUs. This queue count is already sufficient for Tutti to fully utilize the bandwidth of a single SSD. 
+
+Scalability. To scale beyond a single node, Tutti combines its local high-performance storage data plane with a distributed coordination layer. In this design, Tutti remains the per-server fast path for GPU-to-local-NVMe KV transfers, while Mooncake [ 38 ] serves as the cluster-wide control plane for space allocation, replica metadata management, and location lookup. This separation preserves the low-latency local path of Tutti while allowing KV cache capacity and reuse to scale across inference servers. When KV cache is evicted from GPU memory, the in-ference engine first requests space allocation from Moon-cake. Tutti then persists the KV tensors to local NVMe SSDs through its P2P DMA path. After the write completes, it notifies Mooncake to register the resulting replica metadata, making the offloaded KV globally discoverable for future reuse. When a request needs to reuse a historical KV cache, the runtime first queries Mooncake for the candidate replica locations. The system follows a local-first routing policy. If a local replica is available, Tutti directly loads it into GPU memory through Tutti. Otherwise, the request falls back to a remote retrieval path, where the data is fetched from a remote node and then delivered to the local GPU. Our current prototype does not yet optimize this remote path. It uses a CPU-side interface to read the GPU file into host memory and then transfers it across nodes via RDMA, which minimizes changes to Mooncake but adds extra CPU overhead. In future work, we plan to extend the design to sup-port a more direct GPU-driven remote path, for example by staging data in GPU memory and then issuing GPU-initiated RDMA to the destination GPU. 
+
+## 4 Evaluation 
+
+We have conducted a series of experiments to evaluate the effectiveness of Tutti, focusing on the following two critical questions: 1. How does Tutti perform in terms of end-to-end latency for LLM inference compared to state-of-the-art KV cache services? 2. How do the components of Tutti contribute to and opti-mize the final inference latency and overall system effi-ciency? 
+
+Environments. We deployed Tutti on a 64-core Intel Xeon 6530 server equipped with 512 GB of memory. The server is equipped with two H100 GPUs with 80GB HBM and 4×
+
+Solidigm D7-PS1010 7.68TB enterprise SSDs [ 45 ]. For tiered-storage configurations, we allocate 256 GB host DRAM as pinned memory and provision 14 TB of SSD volume for each GPU. 
+
+Baselines. We compare Tutti against baselines from two gen-erations of vLLM: vLLM 0.12.0 and vLLM 0.17.0. This setup allows us to examine how improvements in serving-side compute efficiency affect end-to-end system behavior. LM-Cache optimizes data movement by aggregating tokens into coarse-grained chunks (e.g., 256 tokens) to maximize SSD bandwidth, contrasting with vLLM’s fine-grained 64-token paging. To evaluate performance across different tiered stor-age systems, we configure the following four baselines: (1) HBM: the standard vLLM serving with HBM only; (2) DRAM (LMCache-DRAM-LW): extends capacity using host mem-ory and applies layer-wise compute-I/O pipelining to overlap retrieval overhead; (3) LMCache-SSD: offloads KV data to NVMe SSDs using memcopy and standard asynchronous I/O; and (4) LMCache-GDS: further optimizes SSD access using GDS to bypass the CPU bounce buffer. Unless other-wise stated in end-to-end results, DRAM refers to LMCache-DRAM-LW; in ablations, we additionally report LMCache-DRAM without layerwise transfer. 
+
+Models. We primarily evaluate performance using the Llama3-8B[ 30 ] model on a single GPU. To assess the scalability of our                      
+
+> 80.25 0.50 0.75 1.00 1.25 1.50 024
+> Average TTFT (s)
+> 0.25 0.50 0.75 1.00 1.25 1.50 20 40 60 80
+> Average ITL (ms)
+> 0.2 0.3 0.4 0.5 0.6 0510 15 20 25 30
+> Average TTFT (s)
+> 0.2 0.3 0.4 0.5 0.6 20 40 60 80
+> Average ITL (ms)
+> vllm=0.12.0 lmcache=0.3.9
+> 0.25 0.50 0.75 1.00 1.25 1.50
+> Request Rate (req/s)
+> 024
+> Average TTFT (s)
+> 0.25 0.50 0.75 1.00 1.25 1.50
+> Request Rate (req/s)
+> 20 40 60 80
+> Average ITL (ms)
+> 0.2 0.3 0.4 0.5 0.6
+> Request Rate (req/s)
+> 010 20 30 40 50
+> Average TTFT (s)
+> 0.2 0.3 0.4 0.5 0.6
+> Request Rate (req/s)
+> 20 40 60 80
+> Average ITL (ms)
+> vllm=0.17.0 lmcache=0.4.1
+> LEval LooGLE
+> HBM LMCache-DRAM LMCache-SSD LMCache-GDS Tutti
+
+Figure 8. End-to-end TTFT and ITL on Llama3-8B across LEval and LooGLE under two vLLM versions (v0.12.0 vs. v0.17.0) with the latest LMCache. As request rate increases, Tutti maintains the lowest and most stable latency curves, consistent with the end-to-end analysis that its storage-compute co-design remains effective across versions. Data points are omitted when systems violate SLO constraints. 
+
+Table 1. Cache hit rates across different storage tiers. 
+
+Storage Medium Cache Hit Rate (%) LEval LooGLE 
+
+HBM 8 4DRAM 53 24 SSD 84 86 system in ultra-long sequence inference, we additionally em-ploy GLM-4-9B-Chat-1M[ 14 ]. This model, which supports a 1M token context window, is distributed across two GPUs using Tensor Parallelism. 
+
+Workloads. We use two established benchmarks: LEval[ 2 ]and LooGLE[22]. LEval is a comprehensive long-context evaluation suite comprising 20 sub-tasks categorized into two main groups, covering a wide range of domains, including law, finance, technology, academic papers, and code. The input lengths in LEval span a broad spectrum from 3k to 200k tokens. LooGLE, including 4 sub-tasks, is tailored for ultra-long con-text understanding, featuring significantly higher average document lengths, with many test samples exceeding 100k tokens. It focuses on complex tasks such as long dependency QA and single-turn summarization. Under our current system configuration, cache hit rates across storage tiers are shown in Table 1. HBM capacity is insufficient for long-context serving, yielding only 8% and 4% hit rates on LEval and LooGLE, respectively. DRAM improves reuse to 53% (LEval) and 24% (LooGLE), while the larger context lengths in LooGLE still cause substantial misses. In contrast, SSD sustains consistently high hit rates (84% and 86%), indicating that most reusable KV states can be captured by the large-capacity SSD tier. To simulate a multi-session environment, we adopt a round-robin strategy to extract requests from the various sub-datasets of LEval and LooGLE. In order to assess system robust-ness under varying load conditions, we simulate query ar-rivals via a Poisson distribution, as the datasets lack native timestamps. This setup aligns with the evaluation protocols adopted in prior works[ 20 , 38 ]. These requests are contin-uously pushed into the vLLM serving engine, mimicking a real-world scenario where multiple users concurrently sub-mit diverse queries with varying context lengths. 
+
+Metrics. We evaluate Tutti using two categories of metrics: end-to-end application performance and system-level micro-benchmarks. We focus on two standard serving latencies: (1) TTFT, which measures the responsiveness of the prefill phase; and (2) ITL, which quantifies the decoding speed. We report average latency under concurrent load. To dissect the contributions of our system components, we measure: (1) Cache Hit Rate, specifically analyzing its impact on reducing TTFT; (2) Storage Bandwidth, to evaluate the raw throughput of our storage engine; (3) GPU Bubble Time, to assess the efficacy of our asynchronous I/O scheduling in hiding latency; and (4) Inference Cost, to evaluate the cost-effectiveness of our design. 
+
+4.1 End-to-End Performance 
+
+As illustrated in Figure 8, Tutti demonstrates end-to-end performance and stability compared to all baselines. With the newer software version (vLLM 0.17.0), Tutti still delivers the best end-to-end latency across both workloads, confirming that our storage-compute co-design remains effective even when the serving engine becomes more compute-efficient. 
+
+> 9
+
+Time to First Token. Across both software generations, HBM and SSD baselines remain weak for TTFT. HBM is con-strained by limited capacity and low hit rates, which triggers frequent KV recomputation. SSD is constrained by longer I/O latency and CPU-side software overheads (e.g., memory allocation/release), which increase I/O jitter and queueing delay, and in turn enlarge GPU stall time. On LEval with the old version, DRAM, GDS, and Tutti all provide usable TTFT at high request rates (RPS, requests per second), while Tutti remains the best and improves over GDS by 71.8% at the highest load point. With the new version, compute becomes faster and the relative cost of the GDS I/O path becomes more visible; at high load, DRAM now reduces TTFT by 29.6% compared with GDS. Even under this shift, Tutti stays optimal, reducing TTFT by 69.1% versus DRAM and 78.3% versus GDS. Under a 1s TTFT SLO, Tutti increases the effec-tive request rate by 50% over DRAM and by 100% over GDS. On LooGLE, the longer requests make HBM and SSD con-sistently poor in both versions. In the old version, GDS still provides clear benefits over DRAM and is relatively closer to Tutti. In the new version, GDS continues to outperform DRAM but its relative benefit decreases, and at 0.6 RPS its TTFT is still about 2.63 × that of Tutti. At the same load point, Tutti reduces TTFT by 93.2% versus DRAM and 62.0% versus GDS. 
+
+Inter-Token Latency. In the old version on LEval, Tutti already outperformed both DRAM and GDS at high load: at 1.5 RPS, ITL is reduced by 60.4% versus DRAM and 24.9% versus GDS. In the new version, Tutti remains the best de-code path; at 1.5 RPS on LEval, ITL is still reduced by 22.0% versus DRAM and 24.4% versus GDS. The gain comes from two effects: Tutti provides higher effective cache hits during decode and reduces the compute-I/O gap, so the GPU spends more cycles on useful token generation instead of waiting for data. On LooGLE, the gain in the new version narrows (18.3% over GDS at 0.5 RPS and 10.2% at 0.6 RPS), but Tutti remains consistently better. The gap narrows on LooGLE because much longer inputs increase per-token compute time, mak-ing decode relatively more compute-dominated. Even with this narrowing, Tutti maintains the lowest and smoothest ITL curve, suggesting potential headroom to sustain higher RPS under the same ITL target. 
+
+4.2 Ablations 
+
+In this subsection, we conduct ablation studies to isolate the contribution of key design components in Tutti. We evaluate five aspects: raw retrieve/store bandwidth, PRP vs SGL com-mand path, TTFT under varying prefix reuse, distributed scalability, and the effectiveness of layerwise asynchronous pipelining. These ablations directly evaluate key elements of our GPU-centric object-storage path, including command submission overheads, transfer bandwidth, and overlap effi-ciency. To make the DRAM baselines explicit in this section, 010 20           
+
+> Bandwidth (GB/s)  (a) Retrieve
+> 1K 2K 4K 8K 16K 32K 64K 128K
+> Context Length
+> 0510 15
+> Bandwidth (GB/s)  (b) Store
+> LMCache SSD LMCache DRAM LMCache GDS Tutti
+
+Figure 9. Raw bandwidth of retrieve and store interfaces across varying context lengths. we additionally report both LMCache-DRAM and LMCache-DRAM-LW. LMCache-DRAM denotes the DRAM path with-out layerwise (LW) copy/overlap, while LMCache-DRAM-LW denotes the DRAM path with layerwise memory copy and overlap. 
+
+4.2.1 Bandwidth Performance of Retrieve and Store. 
+
+To isolate the performance characteristics of the storage sub-system, we bypass the model execution pipeline and directly benchmark the raw bandwidth of the retrieve and store 
+
+interfaces. All SSD-based backends are evaluated using a two-disk RAID-0 configuration. Evaluations cover a range of sequence lengths from 1K to 128K tokens across four rep-resentative storage backends. As the prefix length increases, retrieval bandwidth emerges as the dominant performance factor, as illustrated in Figure 9(a). LMCache-DRAM exhibits significant instability—for example, its throughput drops to 8.5 GB/s at 16K tokens due to memory fragmentation overhead. In contrast, Tutti maintains a smooth, near-linear scaling trend, reaching up to 25.9 GB/s for longer contexts. Compared to LMCache-GDS, whose performance saturates at around 11.9 GB/s even with two SSDs, Tutti achieves up to a 2.08 × higher retrieval bandwidth. Figure 9(b) reports the store bandwidth. While LMCache-DRAM naturally reaches the highest raw bandwidth (up to 18.4 GB/s) thanks to in-memory writes, it lacks persistence and is limited by DRAM capacity. Among persistent storage backends, Tutti consistently outperforms both LMCache-SSD and LMCache-GDS: it sustains roughly 10 GB/s write bandwidth across all tested lengths (e.g., 9.8 GB/s at 128K tokens), whereas LMCache-GDS remains around 7 GB/s de-spite using the same dual-SSD configuration. Notably, Tutti performance is constrained by the storage device itself, as each SSD provides no more than 10 GB/s peak sequential store bandwidth. Prior work [ 41 ] indicates that store band-width is less critical than retrieval bandwidth for end-to-end inference performance, and 10 GB/s is sufficient to sustain high performance in most scenarios.   
+
+> 10 PRP SGL
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Bandwidth (GB/s)
+> 0.287
+> 8.891
+> 0.032
+> 2.922
+> Read Write
+
+Figure 10. PRP vs SGL bandwidth under a single-thread read/write microbenchmark. Compared with PRP, SGL de-livers substantially higher read and write bandwidth. 16K 32K 64K 96K 112K 128K 
+
+> Prefix Length
+> 0510 15 20
+> TTFT (s)
+> LMCache-SSD LMCache-GDS LMCache-DRAM LMCache-DRAM-LW
+> Tutti
+
+Figure 11. TTFT performance comparison across varying prefix lengths on Llama3-8B-Instruct (Single-GPU). Tutti demonstrates superior I/O efficiency, achieving up to 61.4% lower TTFT than LMCache-GDS. 128K 256K 512K 640K  
+
+> Prefix Length
+> 0110 100 250
+> TTFT (s)
+> LMCache-SSD
+> LMCache-GDS
+> LMCache-DRAM
+> LMCache-DRAM-LW
+> Tutti
+> N/A N/A
+
+Figure 12. Distributed Scalability for GLM-4-9B-1M (2-GPU, 4-Disk). Tutti overcomes LMCache-GDS’s OOM failure at 512K/640K by avoiding staging buffer overhead, demonstrat-ing architectural robustness and achieving the best TTFT 1.2s at 640K. 
+
+4.2.2 PRP vs SGL Bandwidth. To validate the impact of applying SGL in our design, we run a single-GPU-thread microbenchmark that reads and writes 500 MB of data per operation. As shown in Figure 10, under PRP the read/write bandwidth is 0.287 GB/s and 0.032 GB/s, while switching to SGL improves it to 8.891 GB/s and 2.922 GB/s, correspond-ing to 31.0 × and 91.3 × gains. The key reason is that SGL commands reduce PCIe communication overhead between host and NVMe devices compared with PRP, which lowers command/descriptor handling overhead and stabilizes queue progress. 
+
+4.2.3 TTFT Performance across Context Lengths. We evaluate TTFT under varying prefix reuse by fixing the total input length to 128k tokens and increasing the cached prefix from 16k to 128k. LMCache-SSD suffers severe degradation under high reuse due to limited bandwidth; at a 112k pre-fix, its TTFT rises to 7.84s. In contrast, our system sustains stable performance by overlapping retrieval with the remain-ing computation, achieving 3.43s at the same prefix—2.28 ×
+
+faster than SSD. Compared to LMCache-GDS, our method consistently maintains an advantage across all prefix lengths, with improvements ranging from 5.8% at 32k up to 61.4% at 128k. Notably, for moderate reuse (16k–96k), our system even matches or exceeds DRAM performance, achieving up to 13.4% improvement—indicating that effective I/O–compute overlap can outweigh DRAM’s raw latency. Only in ex-tremely high reuse conditions (>96k), where the workload becomes almost purely retrieval-bound, does DRAM regain its expected lead, with our system trailing by at most 20.6%. 
+
+4.2.4 Multi-GPU Scalability. In order to evaluate the scalability of Tutti in distributed settings, we test the TTFT performance using the GLM-4-9B-Chat-1M model across two GPUs (each residing under a PCIe Root complex) and four disks (two attached to each GPU’s root complex). GPUs are connected via NVLink. The experimental data highlights the superior performance of Tutti: for a 128K Prefix Length, Tutti achieved a TTFT of only 155.743 s, representing an approximate 25% latency reduction compared to LMCache-GDS (207.12 s). LMCache-GDS in longer contexts exposes a critical limitation stem-ming from its reliance on GDS technology. GDS leverages the cufile to achieve direct data transfer from storage to GPU memory. Crucially, to enable this mechanism outside the inference work, cufile must allocate a certain block of GPU memory to serve as a staging buffer. In long inference, this memory allocation for I/O acceleration quickly exceeded the available GPU memory capacity, triggering a fatal Out-of-Memory (OOM) error. Consequently, LMCache-GDS failed to complete the tests at both 512K and 640K (marked as N/A). In contrast, Tutti deeply integrates with the inference en-gine and provides register interfaces to directly manage GPU memory without the need for an intermediate staging buffer. This allowed Tutti to successfully complete the most chal-lenging tests, ultimately achieving the overall best TTFT of 1.2 seconds at the extreme 640K Prefix Length. Our perspec-tive is that high-performance I/O must be deeply integrated and co-optimized with computation, instead of being treated as a simple third-party plugin. 
+
+4.2.5 Comparison of Layerwise Async Pipelining. To verify the effectiveness of the Slack-Aware I/O Scheduler, we break down the total inference latency into computation time and bubble time. This evaluation compares the perfor-mance profiles across three distinct storage backends, all        
+
+> 11 05
+> Time (s)  D-LW MCache-SS (a) L
+> 0.0 0.4 0.8 1.2
+> Time (s)
+> 97.9%
+> M-LW ACache-DR (b) LM
+> 50 60 70 80 90 100
+> Cache Hit Rate (%)
+> 0.0 0.4 0.8 1.2
+> Time (s)
+> 98.3%
+> (c) Tutti me Compute Ti eBubble Tim
+
+Figure 13. Decomposition of latency by cache hit rate, high-lighting the critical Crossover Point ( ★) where bubble time begins to exceed compute time. Our layerwise asynchro-nous mechanism successfully pushes this critical point to an extremely high cache hit rate of 98.3%, maintaining a near-optimal compute-bound across the tested range. of which utilize a layerwise pipelining strategy. We specifi-cally exclude LMCache-GDS from this latency decomposi-tion study, as its current implementation does not support this strategy. By fixing the prompt length at 32K and vary-ing the hit rate, we manipulate the compute-to-load ratio. The core principle is to achieve a deep overlap between data transmission and layerwise computation. Ideally, as long as the computation time for a layer exceeds its data transfer time ( 𝑇 𝑐𝑜𝑚𝑝𝑢𝑡𝑒 > 𝑇 𝑡𝑟𝑎𝑛𝑠 𝑓 𝑒𝑟 ), the transmission latency can be completely masked, resulting in near-zero bubble time. As illustrated in Figure 13(a), the LMCache-SSD bubble is excessive; it cannot be effectively hidden by the shorter com-putation phases. The inefficient pipeline exposes raw trans-fer latency, resulting in substantial bubble time (blue dashed line) and degraded end-to-end performance. In contrast, Fig-ure 13(c) demonstrates that our system successfully masks transmission overhead. Across the majority of the testing range, bubble time is negligible (averaging 25ms), and drops to a mere 6ms at a 93.75% hit rate. Tutti maintains a compute-bound profile (dominated by the red solid line), achieving a near-optimal execution curve that is similar to the DRAM-based strong baseline shown in Figure 13(b). We further identify a critical "crossover point" (marked by a star), which indicates the transition from a compute-bound to an I/O-bound state. Critically, for our system, this crossover point is pushed to an extremely high cache hit rate of 98.3%, a signif-icant improvement compared to the much lower thresholds observed in the LMCache-SSD baseline. This result defini-tively proves that our layerwise mechanism successfully extends the "effective zero-bubble zone" to its physical lim-its, only introducing minor bubbles when the computation becomes exceedingly sparse. 0.25 0.5 0.75 1.0 1.25 1.5 1.75 2.0 0.0 0.2 0.4 0.6     
+
+> Cost per 1M Tokens ($)
+> LEval
+> LMCache-SSD LMCache-GDS LMCache-DRAM LMCache-DRAM-LW
+> Tutti
+> 0.2 0.3 0.4 0.5 0.6
+> Request Rate (req/s)
+> 0.0 0.1 0.2 0.3 0.4
+> Cost per 1M Tokens ($)
+> Loogle
+
+Figure 14. Inference cost per 1 million tokens across LEval and LooGLE workloads. Tutti achieves the lowest cost by leveraging SSDs. 
+
+4.3 Inference Cost 
+
+To quantify the economic benefits of Tutti, we calculate the serving cost normalized by the token generation throughput. The total cost aggregates the expenses of GPU and the tiered storage hierarchy (DRAM and SSD). The formula is defined as: Cost 1𝑀 =
+
+> Compute Cost
+
+z }| {
+
+𝑃 𝐺𝑃𝑈 · 𝑁 𝐺𝑃𝑈 +
+
+> Storage Cost
+
+z }| {
+
+𝑃 𝑚𝑒𝑚 · 𝑆 𝑚𝑒𝑚 + 𝑃 𝑠𝑠𝑑 · 𝑆 𝑠𝑠𝑑 
+
+Throughput (tokens/hour) × 10 6
+
+(1) where 𝑃 𝐺𝑃𝑈 is the hourly GPU price, 𝑁 𝐺𝑃𝑈 is the GPU count, and 𝑃 𝑥 /𝑆 𝑥 represent the unit price and capacity for DRAM/SSD, respectively. We adopt typical cloud pricing: $5/hour per NVIDIA H100 GPU, $0.0088/GB/hour for DRAM, and $0.000082/GB/hour for NVMe SSD [ 3, 4 ]. Figure 14 illustrates the cost per 1 mil-lion tokens for the LEval and LooGLE workloads. Tutti con-sistently demonstrates the most favorable cost-efficiency pro-file across all request rates. With increasing context lengths, DRAM-based systems are forced to provision larger mem-ory capacities for the KV cache, resulting in significantly higher operational costs. In contrast, Tutti offloads the ma-jority of KV data to SSDs (which are approximately 100 ×
+
+cheaper per GB than DRAM). While LMCache-SSD lever-ages the same cost-effective storage medium, its inherent performance overheads bottleneck throughput. This ineffi-ciency leads to GPU underutilization, effectively inflating the unit cost. In contrast, our system fully saturates GPU com-pute resources, maximizing throughput and optimizing the yield of tokens per GPU-hour. Specifically, on the LooGLE workload at 0.5 QPS, Tutti reduces the serving cost by 66.2% compared to LMCache-SSD and outperforms LMCache-GDS by roughly 27%. 
+
+> 12
+
+## 5 Conclusion and Future Work 
+
+In this paper, we presented Tutti, a GPU-centric, SSD-backed KV cache store for long-context LLM serving. Tutti removes CPU intervention from critical data and I/O control paths between GPU HBM and NVMe SSDs. By combining a GPU-centric object-storage design with a layerwise GPU compute-I/O pipeline, Tutti enables SSD-backed KV caching to achieve DRAM-like efficiency while effectively suppressing GPU stall time. Our evaluation shows that, compared with the SOTA GDS-enabled SSD-backed solution, Tutti reduces TTFT by 78.3% under strict SLO constraints and improves the achiev-able request rate by 2 ×. Tutti also lowers the LLM serving cost by about 27%. 
+
+## Acknowledgments 
+
+We would like to thank Menglei Chen from Huazhong Uni-versity of Science and Technology for his valuable guidance on GPU hashing during the early stages of this work. We are also grateful to Zheng Zhang from Wuhan University for his guidance and assistance with performance profiling of the GPU I/O kernel. 
+
+## References 
+
+[1] Aliyun. 2025. PolarKVCache. https://help.aliyun.com/zh/polardb/pol ardb-for-mysql/user-guide/polarkvcache-inference-acceleration .[2] Chenxin An, Shansan Gong, Ming Zhong, Xingjian Zhao, Mukai Li, Jun Zhang, Lingpeng Kong, and Xipeng Qiu. 2023. L-Eval: Insti-tuting Standardized Evaluation for Long Context Language Models. arXiv:2307.11088 [cs.CL] https://arxiv.org/abs/2307.11088 
+
+[3] AWS. 2025. Amazon ec2 p4d pricing. https://aws.amazon.com/ec2/ins tance-types/p4/ .[4] AWS. 2025. Amazon ec2 pricing. https://aws.amazon.com/ec2/pricing /.[5] Chia-Hao Chang, Jihoon Han, Anand Sivasubramaniam, Vikram Sharma Mailthody, Zaid Qureshi, and Wen-Mei Hwu. 2024. GMT: GPU Orchestrated Memory Tiering for the Big Data Era. In Proceed-ings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 . 464–478. [6] Weijian Chen, Shuibing He, Haoyang Qu, Ruidong Zhang, Siling Yang, Ping Chen, Yi Zheng, Baoxing Huai, and Gang Chen. 2025. IMPRESS: An Importance-InformedMulti-Tier Prefix KV Storage System for Large Language Model Inference. In 23rd USENIX Conference on File and Storage Technologies (FAST 25) . 187–201. [7] Deepseek. 2025. Models and Pricing. https://api-docs.deepseek.com/ quick_start/pricing/ .[8] DeepSpeedAI. 2025. DeepNVMe: Affordable I/O scaling for Deep Learning Applications. https://github.com/deepspeedai/DeepSpeed/b lob/master/blogs/deepnvme/06-2025/README.md/ .[9] Devansh. 2026. How Weka is Solving AI’s Trillion Dollar Memory Problem. https://www.artificialintelligencemadesimple.com/p/how-one-startup-is-breaking-nvidias?utm_source=publication-search .[10] Diego Didona, Jonas Pfefferle, Nikolas Ioannou, Bernard Metzler, and Animesh Trivedi. 2022. Understanding modern storage APIs: a sys-tematic study of libaio, SPDK, and io_uring. In Proceedings of the 15th ACM International Conference on Systems and Storage . 120–127. [11] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Attention-store: Cost-effective attention reuse across multi-turn conversations in large language model serving. arXiv preprint arXiv:2403.19708 52 (2024), 20–38. [12] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-Efficient large language model serving for multi-turn conversations with CachedAttention. In 2024 USENIX Annual Technical Conference (USENIX ATC 24) . 111–126. [13] Shiwei Gao, Youmin Chen, and Jiwu Shu. 2025. Fast state restoration in llm serving with hcache. In Proceedings of the Twentieth European Conference on Computer Systems . 128–143. [14] Team GLM, Aohan Zeng, Bin Xu, Bowen Wang, Chenhui Zhang, Da Yin, Dan Zhang, Diego Rojas, Guanyu Feng, Hanlin Zhao, et al . 2024. Chatglm: A family of large language models from glm-130b to glm-4 all tools. arXiv preprint arXiv:2406.12793 (2024). [15] Yang Hu, Hong Jiang, Dan Feng, Hao Luo, and Lei Tian. 2015. PASS: A proactive and adaptive SSD buffer scheme for data-intensive workloads. In 2015 IEEE International Conference on Networking, Architecture and Storage (NAS) . IEEE, 54–63. [16] Jinwoo Jeong and Jeongseob Ahn. 2025. Accelerating LLM Serving for Multi-turn Dialogues with Efficient Resource Management. In 
+
+Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 .1–15. [17] Chaoyi Jiang, Lei Gao, Hossein Entezari Zarch, and Murali Annavaram. 2024. KVPR: Efficient LLM Inference with I/O-Aware KV Cache Partial Recomputation. arXiv preprint arXiv:2411.17089 (2024). [18] KIOXIA. 2025. KIOXIA CM7-V Series Enterprise NVMe ™ Mixed Use SSD. https://apac.kioxia.com/en-apac/business/ssd/enterprise-ssd/cm7-v.html .[19] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles . 611–626. [20] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Sto-ica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .[21] Hyungwoo Lee, Kihyun Kim, Jinwoo Kim, Jungmin So, Myung-Hoon Cha, Hong-Yeon Kim, James J Kim, and Youngjae Kim. 2025. Disk-Based Shared KV Cache Management for Fast Inference in Multi-Instance LLM RAG Systems. In 2025 IEEE 18th International Conference on Cloud Computing (CLOUD) . IEEE, 199–209. [22] Jiaqi Li, Mengmeng Wang, Zilong Zheng, and Muhan Zhang. 2024. LooGLE: Can Long-Context Language Models Understand Long Con-texts? arXiv:2311.04939 [cs.CL] https://arxiv.org/abs/2311.04939 
+
+[23] Shaobo Li, Yirui Eric Zhou, Yuqi Xue, Yuan Xu, and Jian Huang. 2025. Managing Scalable Direct Storage Accesses for GPUs with GoFS. In 
+
+Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles . 979–995. [24] Zejia Lin, Hongxin Xu, Guanyi Chen, Xianwei Zhang, and Yutong Lu. 2025. Bullet: Boosting GPU Utilization for LLM Serving via Dy-namic Spatial-Temporal Orchestration. arXiv preprint arXiv:2504.19516 
+
+(2025). [25] Renping Liu, Zhenhua Tan, Linbo Long, Yu Wu, Yujuan Tan, and Duo Liu. 2022. Improving fairness for SSD devices through DRAM over-provisioning cache management. IEEE Transactions on Parallel and Distributed Systems 33, 10 (2022), 2444–2454. [26] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Anantha-narayanan, et al . 2024. Cachegen: Kv cache compression and streaming for fast large language model serving. In Proceedings of the ACM SIG-COMM 2024 Conference . 38–56. 
+
+> 13
+
+[27] Vikram Sharma Mailthody. 2025. Advancing Memory and Storage Architectures for Next-Gen AI Workloads. Flash Memory Summit 
+
+(2025), 1–27. [28] Jonas Markussen, Lars Bjørlykke Kristiansen, Pål Halvorsen, Halvor Kielland-Gyrud, Håkon Kvale Stensland, and Carsten Griwodz. 2021. Smartio: Zero-overhead device sharing through pcie networking. ACM Transactions on Computer Systems (TOCS) 38, 1-2 (2021), 1–78. [29] Meta. 2025. The Llama 4 herd: The beginning of a new era of natively multimodal AI innovation. https://ai.meta.com/blog/llama-4-multim odal-intelligence/ .[30] Meta AI. 2024. Meta-Llama-3-8B-Instruct. https://huggingface.co/met a-llama/Meta-Llama-3-8B-Instruct . Accessed: 2025-12-10. [31] Daye Nam, Andrew Macvean, Vincent Hellendoorn, Bogdan Vasilescu, and Brad Myers. 2024. Using an llm to help with code understanding. In 
+
+Proceedings of the IEEE/ACM 46th International Conference on Software Engineering . 1–13. [32] NIVDIA. 2025. TensorRT LLM’s Documentation. https://nvidia.githu b.io/TensorRT-LLM/ .[33] Nvidia. 2024. NVIDIA GPUDirect Storage. https://docs.nvidia.com/gp udirect-storage/index.html .[34] NVIDIA. 2025. Cuda-programming-guide Green Contexts. https: //docs.nvidia.com/cuda/cuda-programming- guide/04- special-topics/green-contexts.html/ .[35] Doug O’Laughlin. 2026. Another Conversation with Val Bercovici Memory Markets. https://www.fabricatedknowledge.com/p/another-conversation-with-val-bercovici .[36] OpenAI. 2025. API Pricing. https://openai.com/api/pricing/ .[37] Xiurui Pan, Endian Li, Qiao Li, Shengwen Liang, Yizhou Shan, Ke Zhou, Yingwei Luo, Xiaolin Wang, and Jie Zhang. 2025. InstAttention: In-Storage Attention Offloading for Cost-Effective Long-Context LLM Inference. In 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA) . IEEE, 1510–1525. [38] Ruoyu Qin, Zheming Li, Weiran He, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2024. Mooncake: Kimi’s KVCache-centric Architecture for LLM Serving. arXiv preprint arXiv:2407.00079 
+
+(2024). [39] Shi Qiu, Weinan Liu, Yifan Hu, Jianqin Yan, Zhirong Shen, Xin Yao, Renhai Chen, Gong Zhang, and Yiming Zhang. 2025. GeminiFS: A Companion File System for GPUs. In 23rd USENIX Conference on File and Storage Technologies (FAST 25) . 221–236. [40] Zaid Qureshi, Vikram Sharma Mailthody, Isaac Gelado, Seungwon Min, Amna Masood, Jeongmin Park, Jinjun Xiong, Chris J Newburn, Dmitri Vainbrand, I-Hsin Chung, et al . 2023. GPU-initiated on-demand high-throughput storage access in the BaM system architecture. In 
+
+Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 .325–339. [41] Zebin Ren, Krijn Doekemeijer, Tiziano De Matteis, Christian Pinto, Radu Stoica, and Animesh Trivedi. 2025. An I/O Characterizing Study of Offloading LLM Models and KV Caches to NVMe SSD. In Proceedings of the 5th Workshop on Challenges and Opportunities of Efficient and Performant Storage Systems . 23–33. [42] SGLang. 2024. SGLang. https://github.com/sgl-project/sglang?tab=r eadme-ov-file .[43] Ao Shen, Zhiyao Li, and Mingyu Gao. 2024. Fastswitch: Optimizing context switching efficiency in fairness-aware large language model serving. arXiv preprint arXiv:2411.18424 (2024). [44] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. 2023. Flexgen: High-throughput generative inference of large language models with a single gpu. In International Conference on Machine Learning . PMLR, 31094–31116. [45] solidigm. 2024. Solidigm D7-PS1010. https://www.solidigm.com/pro ducts/data-center/d7/ps1010.html .[46] Solidigm. 2025. Solidigm D7-PS1010. https://www.solidigm.com/pro ducts/data-center/d7/ps1010.html#configurator .[47] Gemini Team, Petko Georgiev, Ving Ian Lei, Ryan Burnell, Libin Bai, Anmol Gulati, Garrett Tanzer, Damien Vincent, Zhufeng Pan, Shibo Wang, et al . 2024. Gemini 1.5: Unlocking multimodal understanding across millions of tokens of context. arXiv preprint arXiv:2403.05530 
+
+(2024). [48] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. At-tention is all you need. Advances in neural information processing systems 30 (2017). [49] NVM Express Workgroup. 2022. NVM Express Base Specification Revision 2.0c. https://nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-2.0c-2022.10.04-Ratified.pdf .[50] Zhiqiang Xie, Ziyi Xu, Mark Zhao, Yuwei An, Vikram Sharma Mailthody, Scott Mahlke, Michael Garland, and Christos Kozyrakis. 2025. Strata: Hierarchical Context Caching for Long Context Language Model Serving. arXiv preprint arXiv:2508.18572 (2025). [51] Xie, Zhiqiang. 2025. SGLang HiCache: Fast Hierarchical KV Caching with Your Favorite Storage Backends. https://lmsys.org/blog/2025-09-10-sglang-hicache/ .[52] Jianqin Yan, Shi Qiu, Yina Lv, Yifan Hu, Hao Chen, Zhirong Shen, Xin Yao, Renhai Chen, Jiwu Shu, Gong Zhang, et al . 2025. Phoenix: A Refactored I/O Stack for GPU Direct Storage without Phony Buffers. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis . 1267–1283. [53] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 (2025). [54] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowl-edge Fusion. In Proceedings of the Twentieth European Conference on Computer Systems (Rotterdam, Netherlands) (EuroSys ’25) . As-sociation for Computing Machinery, New York, NY, USA, 94–109. doi: 10.1145/3689031.3696098 
+
+[55] Lu Ye, Ze Tao, Yong Huang, and Yang Li. 2024. Chunkattention: Effi-cient self-attention with prefix-aware kv cache and two-phase parti-tion. arXiv preprint arXiv:2402.15220 (2024). [56] Zihao Yi, Jiarui Ouyang, Yuwen Liu, Tianhao Liao, Zhe Xu, and Ying Shen. 2024. A survey on recent advances in llm-based multi-turn dialogue systems. arXiv preprint arXiv:2402.18013 (2024). [57] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al . 2024. Sglang: Efficient execution of structured language model programs. Advances in neural information processing systems 37 (2024), 62557–62583.

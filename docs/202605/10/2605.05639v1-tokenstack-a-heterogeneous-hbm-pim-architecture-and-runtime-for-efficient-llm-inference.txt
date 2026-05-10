@@ -1,0 +1,1167 @@
+Title: TokenStack: A Heterogeneous HBM-PIM Architecture and Runtime for Efficient LLM Inference
+
+URL Source: https://arxiv.org/pdf/2605.05639v1
+
+Published Time: Fri, 08 May 2026 00:29:30 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# TokenStack : A Heterogeneous HBM-PIM Architecture and Runtime for Efficient LLM Inference 
+
+## Zhuoran Li 
+
+Peking University Beijing, China 2200012710@stu.pku.edu.cn 
+
+## Zhuohang Bian 
+
+Beihang University Beijing, China 22373017@buaa.edu.cn 
+
+## Zihao Huang 
+
+University of Electronic Science and Technology of China Chengdu, China zhhuang@std.uestc.edu.cn 
+
+## Guangyu Sun 
+
+Peking University Beijing, China gsun@pku.edu.cn 
+
+## Yun Liang 
+
+Peking University Beijing, China ericlyun@pku.edu.cn 
+
+## Youwei Zhuo ∗
+
+Peking University Beijing, China youwei@pku.edu.cn 
+
+Abstract 
+
+Large language model (LLM) serving is now limited by the key– value (KV) cache. During decode, each new token rereads prior KV state, so attention becomes a bandwidth- and capacity-heavy mem-ory task. HBM-PIM helps by moving attention closer to memory, but current stack organizations still waste resources. In practice, only hot KV blocks benefit from near-memory compute. Weights, activations, and cold KV mainly need dense storage and GPU-visible bandwidth. A uniform HBM-PIM stack makes all layers pay for PIM logic, while a dedicated-PIM design such as AttAcc recovers capacity but shrinks the HBM bandwidth left for GPU-side work. We propose TokenStack , a vertically heterogeneous HBM-PIM architecture for KV-centric LLM serving that leverages HBM4’s logic-die substrate. TokenStack separates each stack into dense 
+
+capacity layers and PIM-enabled compute layers , then uses the logic base die as a stack-local control point that manages cross-layer movement without host-side overhead. The base-die controller han-dles cross-layer DMA, layered address translation, attention-side gather/broadcast coordination, and inline quantization during mi-gration. On top of this hardware, TokenStack uses topology-aware KV placement, workload-aware eviction, and bounded replication to keep hot KV near PIM compute while moving colder state to dense layers. Using production-derived traces across four models, completed multi-QPS runs show that TokenStack increases geometric-mean token throughput by 1.62 × and SLO-compliant serving ca-pacity by 1.70 × over AttAcc, and reduces per-token energy by 30-47%. 
+
+Keywords 
+
+Processing-in-Memory, HBM-PIM, LLM Inference, KV Cache 
+
+1 Introduction 
+
+Large language model (LLM) serving has become a memory-system problem. During autoregressive decode, each newly generated to-ken must reread the entire accumulated key–value (KV) context; 
+
+> ∗Corresponding author.
+> Conference’17, Washington, DC, USA
+> 2026. ACM ISBN 978-X-XXXX-XXXX-X/XX/XX https://doi.org/XXXXXXX.XXXXXXX
+
+the arithmetic intensity of this step drops to 𝑂 (1), making decode-phase attention fundamentally bandwidth-limited. As sequence lengths and request concurrency grow, the KV Cache dominates both the capacity and bandwidth demands of the serving pipeline [10, 36, 43]. Processing-in-memory (PIM) offers a natural response: by plac-ing lightweight compute units adjacent to the memory arrays that store KV data, PIM reduces the data-movement cost of attention. Recent work has demonstrated this benefit concretely. AttAcc of-floads attention to bank-level HBM-PIM engines while the GPU executes compute-heavy projection and feed-forward layers [36], and subsequent designs extend the approach to mixture-of-experts and grouped-query attention [43]. These results establish that near-memory execution accelerates the attention path; however, they leave open a more fundamental question: given that only a fraction of the data in the memory stack benefits from PIM, how should the stack itself be organized? 
+
+The data mix of KV-centric serving is inherently heterogeneous. Model weights, activations, and runtime metadata require dense storage and high GPU-visible bandwidth but never execute on PIM units. Among KV blocks themselves, reuse is highly skewed: pro-duction traces report that roughly 10% of KV blocks account for 77% of reuse events, and the reuse distribution varies by workload category: short-form API traffic exhibits high single-turn reuse, while long-form reasoning shows almost no cross-request shar-ing [42]. A serving architecture should therefore differentiate be-tween hot KV that benefits from near-memory compute and the remaining data that primarily needs capacity. Recent HBM-PIM organizations fail to provide this differentia-tion because they both operate within a homogeneous substrate. A 
+
+uniform HBM-PIM stack equips every layer with PIM, forcing cold KV, weights, and activations to occupy compute-enabled area even though those objects never execute on PIM units; as bank-level PIM logic consumes roughly half the silicon area per bank, effec-tive storage capacity is approximately halved, leaving less room for genuinely hot KV. At the other extreme, dedicated-PIM organi-zation assigns a subset of dies entirely to PIM and retains the rest as standard HBM [36]. This design cleanly separates KV from GPU-side data, but it simultaneously reduces HBM bandwidth available for prefill, feed-forward computation, and KV transfers, all of which  
+
+> 1
+> arXiv:2605.05639v1 [cs.AR] 7 May 2026 Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo
+
+remain on the GPU’s critical path. Neither organization matches the heterogeneous data mix described above. This organizational mismatch cannot be resolved through soft-ware tiering alone, because the root cause is physical: when all layers share the same substrate, every byte pays the same area and density cost regardless of its access pattern. The fundamental solu-tion is a stack in which different layers serve different roles—dense capacity in some, PIM-enabled compute in others—together with a local controller that can migrate data between them without rout-ing routine traffic through the host. Historically, such stack-local control logic was not available; data migration had to be managed by the host GPU, adding latency and bus contention to the critical path. The HBM4 standard changes this: it replaces the traditionally passive base die with a CMOS logic die capable of hosting active control logic and die-to-die communication with the host [4, 17]. This enables stack-local data management, making heterogeneous stacking practical. We propose TokenStack , a vertically heterogeneous HBM-PIM architecture for KV-centric LLM serving that leverages HBM4’s logic-die substrate to enable efficient stack-local management. At the hardware level, TokenStack divides each memory stack into two layer types. Capacity layers are dense HBM layers that store weights, activations, and cold KV. Compute layers are PIM-enabled layers that hold the hot KV working set adjacent to bank-level attention engines. The logic base die serves as a stack-local con-trol point, managing cross-layer DMA, layered address translation, attention-side gather/broadcast coordination, and inline K8V4 quan-tization during KV migration. By confining PIM logic to only the compute layers, TokenStack matches the hardware cost of each layer to the access patterns it serves: capacity density where needed, compute proximity where beneficial. The heterogeneity is only effective if software policies keep hot KV aligned with the compute layers and cold KV in capacity layers. 
+
+TokenStack ’s runtime policies exploit the stack topology to maxi-mize this alignment. Topology-aware home assignment places each request’s KV blocks near the stack location where its prefix already resides, reducing initial migration cost. Workload-aware eviction uses per-block metadata (request category, reuse recency, and prompt position) to estimate short-horizon reuse probability, demoting low-value blocks to capacity layers via stack-internal DMA. Bounded replication creates a second copy of a frequently accessed block on a remote card only when the predicted callback savings exceed the fanout cost. Continuous batching exposes reuse opportunities in-crementally, allowing newly arrived requests to share prefix blocks that are already resident in compute layers. We evaluate TokenStack using a cycle-accurate simulator ex-tended for heterogeneous stacks and trace-driven serving, across four production-derived traces and four models ranging from Qwen3-4B to GPT-175B (§7). Across all 16 model–trace combinations, To-kenStack delivers a geometric-mean token-throughput improve-ment of 1.62 × over AttAcc, with per-pair gains ranging from 1.03 ×
+
+to 2.32 ×. Under a 2× latency SLO, TokenStack serves 1.70 × more requests than AttAcc (geometric mean), with the capacity advan-tage widest on the largest models where KV pressure is most se-vere. This paper makes four contributions: LLM          
+
+> Decoder 1
+> Decoder 2
+> Decoder N
+> …
+> Hello
+> LLM
+> Decoder 1
+> Decoder 2
+> Decoder N
+> …
+> LLM
+> Decoder 1
+> Decoder 2
+> Decoder N
+> …
+> How can
+> KV Cache
+> KV Cache
+> KV Cache
+> KV Cache
+> KV Cache
+> KV Cache
+> Decode (Generation) Prefill (Summarization) Attention
+> (Memory Bound)
+> q Vector
+> Softmax
+> k Vector
+> k Cache
+> v Vector
+> v Cache
+> qkv
+> Projection
+> FFN Layer
+> o Projection
+> Softmax
+> Attend
+> Logit Q
+> KT
+> V
+> q
+> KT
+> V
+> GEMV
+> GEMV
+> GEMM
+> GEMM
+> qkv
+> ⊕
+> ⊕
+> K Cache
+> V Cache
+> qkv
+> Projection
+> FFN Layer
+> o Projection
+> Softmax
+> Attend
+> Logit
+> QKV
+> ⊕
+> ⊕
+> Hello bot !
+> Attention
+> (Compute Bound) User:
+> Softmax
+> …
+
+Figure 1: LLM inference workflow. Prefill processes the full prompt through compute-heavy projection and feed-forward layers. Decode generates one token per step, reread-ing the accumulated KV cache at each step; as the context grows, attention shifts from compute-bound to memory-bound. 
+
+(1) Problem characterization. We analyze the data-placement requirements of KV-centric LLM serving and show that ho-mogeneous stack designs cannot simultaneously provide the capacity and compute density needed; a heterogeneous stack is required (§2). (2) Heterogeneous stack architecture. Leveraging HBM4’s logic-die control substrate, we design a vertically special-ized HBM stack that combines dense capacity layers, PIM-enabled compute layers, and stack-local data management, including asymmetric Key/Value layouts matched to the at-tention dataflow and an inline quantization path (§4, §5). (3) Topology- and workload-aware runtime. We develop runtime policies (topology-aware placement, category-aware eviction, bounded replication, and continuous batching) that keep the highest-value KV blocks in the compute-visible do-main under dynamic request arrivals (§6). (4) Comprehensive evaluation. We evaluate TokenStack across 16 model–trace combinations and show consistent latency and throughput improvements over uniform-PIM, dedicated-PIM, and GPU baselines, with the largest gains on the mod-els and workloads where KV pressure is severe (§7, §8). 
+
+2 Background and Motivation 
+
+This section establishes the two observations that motivate Token-Stack ’s design. First, autoregressive decode creates coupled band-width and capacity pressure on the KV Cache (§2.1). Second, exist-ing HBM-PIM stack organizations address one dimension of this pressure at the expense of the other (§2.2). 
+
+2.1 Decode-Time KV Cache Pressure 
+
+Autoregressive LLM inference proceeds in two phases with quali-tatively different resource profiles (Fig 1) [32, 36, 43]. During prefill ,the model processes the entire input prompt in parallel: projection and feed-forward layers dominate execution time, and attention operates on a dense 𝐿 ×𝐿 score matrix that amortizes memory ac-cesses over 𝑂 (𝐿 2) arithmetic operations. During decode , the model generates one token per step. Each step appends a single query to the context and must reread the full accumulated Key and Value state to compute attention scores and the weighted output. The arithmetic intensity of this operation—one dot product per cached token—drops to 𝑂 (1), making decode-phase attention fundamen-tally memory-bandwidth-limited. 
+
+> 2
+
+TokenStack for Efficient LLM Inference Conference’17, July 2017, Washington, DC, USA (a) 
+
+GPU       
+
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> Integrated
+> MC
+> 48 GiB Capacity per GPU, ½v.s . normal GPU
+> HBM -PIM
+> Unit
+> PIM Bank PIM Bank
+> KVC
+> KVC #972 KVC #78 W #7988
+> W #127
+> W #5973
+> W #3313
+> W #1238
+> W #10822
+> W #19297
+> W #16624 KVC #72
+> Act #381
+> KVC Only PIM Data can be processed by PIM Unit
+> waste PIM effective capacity & shared BW WAct
+
+GPU     
+
+> HBM
+> Memory
+> HBM
+> Memory
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> HBM -PIM
+> Chip
+> HBM
+> Memory
+> Integrated
+> MC
+> KVC #10
+> KVC #9
+> KVC #25
+> KVC #133
+> HBM -PIM
+> Unit
+> PIM Bank
+> KVC
+> KVC #828
+> KVC #79
+> KVC #133
+> GPU Data
+> KVC #218
+> KVC
+> KVC #470
+> KVC #385
+> KVC #872
+> KVC #771
+> W #10822
+> W #8864
+> W #21812
+> W #297
+> W #2130 W #3465
+> W #4729 Act #20
+> 48 GiB HBM 24 GiB HBM
+> HBM Bank
+> HBM Weight & Act < -> GPU BW is ½of total
+> Causing slow prefill & decode FFN, projection
+> (b)
+
+Figure 2: Baseline HBM-PIM organizations. (a) Uniform: all layers carry PIM, halving density. (b) Dedicated PIM (At-tAcc): fixed subset of dies is PIM-enabled, preserving density elsewhere but reducing GPU-visible HBM bandwidth. 
+
+This bandwidth demand is compounded by a capacity demand that grows along three axes simultaneously. First, the per-token KV footprint scales with the model’s hidden dimension and num-ber of layers. Second, the per-request KV state grows linearly with context length. Third, concurrent serving of multiple requests mul-tiplies the aggregate live KV footprint. These two pressures—bandwidth and capacity—are tightly coupled: when cold KV blocks, model weights, and activation buffers compete for the same high-bandwidth memory as hot KV, the effective bandwidth available for attention diminishes even if the raw memory interface is fast. Production trace studies confirm that the resulting management problem cannot be solved with a simple recency-based eviction policy [42]. Three characteristics of real KV reuse make this clear. 
+
+(1) Skew. A small fraction of KV blocks accounts for a dispro-portionate share of reuse events; the majority of blocks are ac-cessed only by the request that created them. (2) Category depen-dence. Short-form API traffic exhibits high single-turn prefix reuse concentrated in the first few hundred tokens; code-editing work-loads show moderate cross-request sharing over file-context pre-fixes; long-form reasoning workloads generate large per-request KV states with almost no inter-request reuse. (3) Transience. Even among blocks that are reused, the reuse window is often short: a block that is not accessed within a category-specific time horizon is unlikely to be accessed again. Together, these characteristics define a clear requirement for the memory substrate: the system must differentiate between a small, dynamic hot set of KV blocks that benefits from in-situ computation and a much larger body of data—cold KV, weights, and activations—that primarily needs dense, GPU-visible storage. 
+
+2.2 Limitations of Current HBM-PIM Organizations 
+
+A substantial body of work from both academia and industry has investigated diverse PIM architectures spanning a wide spectrum of application domains, including graph analytics [1, 3, 39, 44, 48, 49], sparse and dense linear algebra [5, 8, 24], neural network infer-ence and training [15, 20, 21, 28, 33, 46, 47], and recommendation systems [18, 19, 30, 31]. Among these efforts, HBM-PIM for LLM serving stands out as a particularly compelling use case: decode-phase attention is bandwidth-bound yet touches only a small frac-tion of total memory, making it a natural fit for near-memory ex-ecution. Indeed, AttAcc [36] has demonstrated that placing light-weight compute units adjacent to HBM arrays allows attention to run at bank-level bandwidth without traversing the memory bus to the GPU [26, 36], and Duplex [43] extends this idea to mixture-of-experts and grouped-query attention. The open question, there-fore, is not whether near-memory attention is beneficial, but how 
+
+PIM capability should be distributed across the layers of the mem-ory stack and which data should reside in PIM-enabled regions. Fig 2 illustrates the two organizations that represent the current design space, along with the trade-off each incurs. 
+
+Uniform HBM-PIM. In a uniform organization, every memory layer carries PIM logic. This provides a single homogeneous sub-strate and maximizes aggregate near-memory bandwidth. How-ever, it imposes the area and density overhead of PIM circuitry on all resident data—including model weights, activation buffers, runtime metadata, and cold KV blocks—none of which execute on PIM units. The net effect is reduced effective memory density and, consequently, less capacity for the hot KV blocks that genuinely benefit from near-memory execution. Furthermore, as discussed in §8, uniform PIM introduces an operational constraint: banks must alternate between all-bank (AB) mode for PIM attention and single-bank (SB) mode for regular data access, creating synchronization stalls on every decode step. 
+
+Dedicated-PIM assigns a fixed subset of dies to PIM and retains the remaining dies as standard HBM for GPU-side data, like At-tAcc [36]. This separation avoids storing non-KV data in compute-enabled area, but it introduces a complementary problem: the HBM bandwidth available for prefill, feed-forward layers, and KV call-back transfers shrinks in proportion to the number of dies allocated to PIM. As the model size or batch concurrency increases, this re-duced GPU-visible bandwidth becomes the dominant bottleneck. 
+
+The common limitation. Both organizations share a structural deficiency: the granularity of differentiation is the die , not the layer within a stack . A software-managed caching hierarchy built on top of either organization can prioritize data placement, but it cannot change the underlying cost: in a uniform stack, every byte of cold KV still occupies compute-enabled area; in a dedicated-PIM stack, every additional PIM die still reduces GPU-visible bandwidth. Re-solving this trade-off requires allowing different layers within the same physical stack to serve different roles—dense capacity or PIM-enabled compute—so that the physical cost of each byte matches its access pattern. 
+
+3 Overview of TokenStack 
+
+Fig 3 illustrates the full TokenStack system. The design is orga-nized around four coordinated ideas, each addressing a distinct as-pect of the capacity–compute mismatch identified in §2. 
+
+Heterogeneous stack organization. Each HBM stack is parti-tioned vertically into dense capacity layers that store weights, acti-vations, and cold KV, and PIM-enabled compute layers that hold the hot KV working set adjacent to bank-level attention engines. This avoids both the density penalty of uniform PIM and the bandwidth loss of a dedicated-PIM split (§4.1). 
+
+3Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo Die -to -Die UCIe 
+
+> Interconnect
+> TSVs & Periphery
+
+Bank 0 
+
+Bank 1 
+
+Bank 2 
+
+Bank 3 
+
+> Bank Group I/O
+> Bank
+> Group
+> 0
+> Bank
+> Group
+> 1
+> Bank
+> Group
+> 2
+> Bank
+> Group
+> 3
+> 16 Banks per Pseudo Channel
+
+Capacity Stack Die (DRAM Process) 
+
+# GPU Die 
+
+(Without MC) 
+
+Toke nStack 
+
+Chip 
+
+Base Die (CMOS Logic Process) 
+
+(3) Quantization 
+
+Unit   
+
+> D2D PHY
+> HBM PHY
+
+(2) Attention 
+
+Coordinator 
+
+Shared Buffer 
+
+(a) 
+
+(c) (d) 
+
+Bank 0 
+
+Bank 1 
+
+> HBM -PIM
+> Unit 0
+
+Bank 2 
+
+Bank 3 
+
+> HBM -PIM
+> Unit 1
+> Bank
+> Group
+> 2
+> Bank
+> Group
+> 3
+> 8 banks per Pseudo Channel
+> TSVs & Periphery
+> FP16
+> ADD
+> Odd Bank Interface
+> FP16
+> MULT
+> Even Bank Interface
+> Registers
+> Registers
+> Even Bank Bus
+> Odd Bank Bus
+
+Compute Stack Die 
+
+(e) 
+
+Capacity Stack 
+
+Base Die 
+
+Compute Stack 
+
+Capacity Stack 
+
+Capacity Stack 
+
+Capacity Stack 
+
+Compute Stack 
+
+Compute Stack 
+
+Compute Stack 
+
+> Fanout Interposer
+
+## GPU Die 
+
+> Silicon Bridge
+
+(b) 
+
+> TSVs
+
+(1) Disaggregated MC  
+
+> also for Stack -local DMA Access
+
+Toke nStack 
+
+Chip 
+
+Toke nStack 
+
+Chip 
+
+Toke nStack 
+
+Chip 
+
+Toke nStack 
+
+Chip 
+
+Toke nStack 
+
+Chip 
+
+Figure 3: TokenStack system architecture. Each stack combines dense capacity layers, PIM-enabled compute layers, and a logic base die that coordinates stack-local movement and attention-side communication. Base-die control substrate. The HBM logic base die serves as a stack-local controller that manages cross-layer DMA, layered address translation, attention-side coordination, and inline K8V4 quantization—all without routing routine traffic through the host memory bus (§4.2). 
+
+KV-aware data placement. Key and Value blocks receive asym-metric layouts matched to the attention dataflow: token-major dis-tribution for Keys enables parallel score computation, while dimension-oriented distribution for Values allows output assembly by concate-nation. Each request is assigned a stable home location to minimize cross-card transfers (§5). 
+
+Runtime management. Continuous batching with chunked cache exposes prefix-sharing opportunities incrementally (§6.1). Topology-aware scheduling places new requests near resident prefix blocks. Category-aware eviction estimates short-horizon reuse to demote low-value blocks via stack-internal DMA (§6.2). Bounded replica-tion creates remote copies only when predicted callback savings exceed fanout cost (§6.3). These four layers are mutually reinforcing: the heterogeneous stack creates distinct storage domains; the base-die controller makes move-ment between them cheap; the placement policy matches each data class to its domain; and the runtime policies maintain this match-ing under dynamic workload conditions. The following three sec-tions detail the stack architecture (§4), the data layout (§5), and the runtime policies (§6), respectively. 
+
+4 TokenStack Hardware Design 
+
+TokenStack realizes the heterogeneous stack through three hard-ware pieces: a two-domain stack organization (§4.1), a base-die control substrate (§4.2), and intra-/inter-stack data-transfer paths (§4.3). Interposer 
+
+## GPU Die         
+
+> PU PU PU
+> PU PU PU
+> PU PU PU
+> PU PU PU
+
+Compute 
+
+Stack 
+
+1 GiB/ Stack 
+
+Capacity 
+
+Stack 
+
+2 GiB/ Stack 
+
+Base Die 
+
+Heat Sink Hot KV Cache 
+
+Cold KV Cache 
+
+Model Weight 
+
+Activation Buffer 
+
+HBM -PIM Units PU 
+
+Runtime Overhead 
+
+Figure 4: TokenStack design. Each stack combines dense ca-pacity layers, PIM-enabled compute layers, and a logic base die that manages stack-local movement and attention coor-dination. 
+
+4.1 Heterogeneous Stack Organization 
+
+Figure 4 shows the internal structure of one TokenStack stack. Reading from bottom to top, the stack contains three distinct zones: a logic base die, capacity layers, and compute layers. The two DRAM zones reflect the actual data mix of LLM serving. 
+
+Capacity layers. Standard high-density HBM layers hold weights, activations, metadata, and cold KV—data requiring density over compute. Placed nearest the base die to minimize TSV hops for GPU-originated reads. 
+
+Compute layers. PIM-enabled dies sit above the capacity layers. Embedding FP16 MAC units, register files, and control logic in each Bank Group consumes ∼50% of the silicon area, halving per-bank storage capacity. This trade-off enables in-situ attention execution  
+
+> 4TokenStack for Efficient LLM Inference Conference’17, July 2017, Washington, DC, USA
+
+for hot KV, eliminating the GPU round-trip. Thermal placement at the stack top provides the shortest path to the heat sink. 
+
+Capacity accounting. A stack with 𝐶 capacity and 𝑃 compute lay-ers exposes 𝐶 ×𝐵 full + 𝑃 ×𝐵 half addressable bytes. The host GPU sees a standard HBM device with an auxiliary PIM command interface. 
+
+4.2 Base-Die Control Substrate 
+
+A heterogeneous stack is only useful if data can be migrated be-tween layer types cheaply and without host-side intervention on the critical path. Historically, HBM base dies were passive inter-faces; data migration had to be managed by the host GPU, adding latency and bus contention. The HBM4 standard introduces a CMOS logic base die fabricated on an advanced logic process node [17]. Combined with a die-to-die interconnect such as UCIe [4], it turns the heterogeneous layers into an actively managed memory sys-tem and serves as the sole interface between the DRAM stack and the rest of the system. The base die contains three functional blocks. (1) Disaggregated memory controller (MC). The MC is relo-cated from the GPU die onto the base die, where it sits between the HBM TSV PHY (connecting to DRAM layers) and a UCIe die-to-die link (connecting to the host GPU). It arbitrates between GPU-originated and PIM-originated memory requests with separate queues so that neither path starves the other. The MC implements lay-ered address translation , mapping the same logical KV block to dif-ferent physical locations depending on whether it currently re-sides in a capacity layer or a compute layer, so that promotion and demotion remain transparent to the host. Because the MC directly bridges both PHY interfaces, it also performs stack-local DMA between capacity and compute layers in a streaming, page-at-a-time pipeline: each transfer processes one KV page ( 𝑇 page to-kens) through the quantization path, requiring only a small on-die SRAM page buffer per head group. The streaming granularity matches the paged-interleaved capacity-layer layout (§5.2), scal-ing to arbitrarily large logical blocks without proportional SRAM growth. (2) Attention coordinator. The attention coordinator man-ages the gather, broadcast, and partial-reduce steps of distributed attention across banks and channels within the stack. It sequences PIM commands to the compute layers and collects partial results before returning them to the host or forwarding them to another stack. (3) Quantization / dequantization unit. This unit applies inline K8V4 compression when a KV block is demoted from a com-pute layer to a capacity layer, and reverses the process during pro-motion. This expands effective capacity-layer KV space without adding a separate compression kernel to the GPU timeline. 
+
+External interface. The base die connects to the host GPU through a UCIe die-to-die (D2D) link rather than the legacy HBM PHY. UCIe D2D replaces the wide, low-speed HBM signal bus with a nar-rower, serialized point-to-point interface that runs at up to 32 GT/s per lane, delivering comparable aggregate bandwidth with signifi-cantly higher bandwidth density per millimeter of package shore-line. Moving the MC onto the TokenStack base die frees the corre-sponding HBM PHY and MC silicon area on the GPU die. In a con-ventional design that area is substantial: the 2,048-bit HBM PHY and its associated controller logic occupy a significant fraction of the GPU die edge. Reclaiming this space allows the GPU to dedicate more silicon to compute logic such as CUDA cores, tensor cores, or on-chip SRAM, improving peak throughput without increasing die size. 
+
+Why on the base die. Placing all blocks on an advanced-node base die keeps promotion, demotion, quantization, and attention coordination stack-internal—no host bus transactions. The logic process provides transistor density for the MC, coordinator, and UCIe SerDes, while DRAM layers remain on a memory-optimized process for maximum bit density. 
+
+4.3 Data-Transfer Paths 
+
+TokenStack supports two classes of data movement: intra-stack 
+
+transfers between capacity and compute layers, and off-chip trans-fers that leave the package. 
+
+Intra-stack path. A capacity-to-compute promotion (or the re-verse demotion) follows a two-hop route: source DRAM layer →
+
+base die → target DRAM layer, using the through-silicon vias (TSVs) that connect every die in the stack. The base-die MC redirects the data to the target layer via a second TSV write, keeping the entire migration inside the package. Promotions are tagged latency-critical because the requester stalls until the block arrives; demotions and replica fanout are tagged 
+
+background and fill otherwise idle TSV slots, so migration through-put can grow without inflating tail latency for active attention re-quests. 
+
+Off-chip paths. Data that must leave the stack exits through the base-die UCIe D2D link to the host GPU. From the GPU, two on-ward paths are available. (1) Intra-package: the GPU routes the data over its on-die crossbar to another TokenStack stack on the same interposer, enabling cross-stack KV migration or remote attention gather without leaving the package. (2) Inter-node: the GPU for-wards the data through its NVLink ports to a remote GPU on an-other card. This path is used for cross-node KV replication and dis-tributed attention when a request’s KV blocks span multiple cards. Because both off-chip paths reuse the GPU’s existing interconnect fabric, TokenStack does not require any additional inter-die links beyond the UCIe D2D interface on the base die. 
+
+5 Data Layout Policy 
+
+TokenStack ’s compile-time layout objective is to map every live data object to the memory-layer type whose physical properties— raw density, GPU-visible bandwidth, or near-memory compute capability— best match the object’s access pattern and dominant consumer. We frame this mapping as heterogeneous placement , distinct from generic caching or software-managed tiering: the placement deci-sion is made at allocation time and lazily adjusted during promo-tion and demotion, with quality measured by the fraction of PIM-critical accesses served from compute layers. Table 1 summarizes the resulting strategy for the five principal data classes in LLM serving. The guiding principle is dual qual-ification : only objects that are both frequently accessed and PIM-compute-eligible warrant residence in compute layers. Weights, ac-tivations, runtime metadata, and cold KV blocks fail one or both criteria and are therefore mapped to capacity layers, preserving scarce PIM-enabled area for hot KV. 
+
+Placement objective. Let D = {𝑑 1, . . . , 𝑑 𝑁 } be the set of live data objects in a single stack. Each object 𝑑 𝑖 carries a normalized access 
+
+> 5
+
+Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo 
+
+Table 1: TokenStack data-class placement. Only active KV Cache blocks reside in compute layers; all remaining data classes map to capacity layers. 
+
+Data Class Layer Layout Rationale 
+
+Weights ( 𝑊 𝑄 ,
+
+𝑊 𝐾 ,𝑊 𝑉 ,𝑊 𝑂 , FFN) Capacity Interleaved (chunk) Max. GPU BW Key cache Compute Token-major (bank-local) Score 𝑠 =𝑞𝐾 ⊤
+
+Value cache Compute Dim-head (interleaved) Context 𝑜 =𝑎𝑉 
+
+Activations Capacity Interleaved (chunk) GPU element-wise Historical KV Capacity Paged-interleaved Max. TSV BW 
+
+frequency 𝛼 𝑖 ∈ [ 0, 1] and a PIM affinity flag 𝛽 𝑖 ∈ { 0, 1} (𝛽 𝑖 = 1 iff 
+
+𝑑 𝑖 is a KV block consumed by PIM-side attention). TokenStack 
+
+chooses the placement function 𝜋 : D → { Compute , Capacity }
+
+to maximize compute-layer utility subject to a physical capacity constraint: 
+
+max 
+
+> 𝜋
+
+∑︁ 𝑑 𝑖 : 𝜋 (𝑑 𝑖 )=Compute 
+
+𝛼 𝑖 𝛽 𝑖 , s.t. ∑︁     
+
+> 𝑑 𝑖 :𝜋 (𝑑 𝑖 )=Compute
+
+|𝑑 𝑖 | ≤ 𝐶 comp , (1) where |𝑑 𝑖 | is the size of object 𝑑 𝑖 in bytes and 𝐶 comp = 𝑃 ×𝐵 half is the aggregate compute-layer capacity ( 𝑃 compute-layer dies, each with per-die capacity 𝐵 half ; see §4). All 𝛽 𝑖 = 0 objects are uncon-ditionally assigned to capacity layers; among PIM-eligible objects, those with the highest 𝛼 𝑖 are admitted first—a greedy heuristic re-fined at runtime (§6). 
+
+5.1 Fine-Grained Key and Value Cache Layout 
+
+Among all data classes, the Key and Value caches require the most careful layout because they are the only objects on which PIM units execute. Key and Value participate in two distinct attention phases—score computation and context computation—with funda-mentally different dataflows. TokenStack exploits this asymmetry by giving each cache a separate physical distribution across PIM banks (Figure 5). 
+
+Token-major Key layout. Let 𝐵 be the number of compute-layer PIM banks, 𝐿 the context length, and 𝑑 the head dimension. The score vector 𝑠 = 𝑞𝐾 ⊤ decomposes into per-token dot products. To-kenStack maps token 𝑛 ’s Key to bank 𝑏 𝐾 (𝑛 ) = 𝑛 mod 𝐵 ; each bank computes ⌈𝐿 /𝐵 ⌉ scores independently, and the base die as-sembles 𝑠 by concatenation—no cross-bank reduction. 
+
+Dim-head Value layout. The output 𝑜 = 𝑎𝑉 decomposes into per-dimension weighted sums. TokenStack maps dimension 𝑗 to bank 
+
+𝑏 𝑉 ( 𝑗 ) = 𝑗 mod 𝐵 ; after receiving the broadcast weight vector 𝑎 ,each bank computes ⌈𝑑 /𝐵 ⌉ output elements, again assembled by concatenation. 
+
+Communication cost model. The per-step data traffic between PIM banks and the base die has two components: a per-bank volume 
+
+𝑇 bank (parallel across banks, determines TSV occupancy) and a base-die aggregation volume 𝑇 agg (serialized collection, plus any cross-bank reduction). Table 2 summarizes both for three useful layout configurations. The key results are: 
+
+Default (TM/DH): No cross-bank reduction; 𝑇 agg = 𝐿 + 𝑑 .
+
+TM/TM: Trades the 𝐿 -element weight broadcast for a 𝐵𝑑 -element reduction. Modeling cost as 𝑇 = 𝑇 bank + 𝛾 𝑇 agg , TM/TM wins when 
+
+𝐿 > 𝑑 (1 + 𝛾𝐵 ) ≜ 𝐿 ∗
+
+> TM
+
+.
+
+DH/DH: Trades the 𝑑 -element query broadcast for a 𝐵𝐿 -element reduction; wins when 
+
+𝐿 < 𝑑 /( 1 + 𝛾𝐵 ) ≜ 𝐿 ∗
+
+> DH
+
+.
+
+Table 2: Per-decode-step communication volumes (per head group). 𝐿 : context length; 𝑑 : head dimension; 𝐵 : PIM bank count. TM = token-major; DH = dim-head. The default (TM/DH) avoids all base-die reduction. 
+
+Layout (K / V) 𝑻 bank (per bank) 𝑻 agg (base die) 
+
+TM / DH ( default ) 𝑑 + 𝐿 𝐵 + 𝐿 + 𝑑 𝐵 𝐿 + 𝑑 
+
+TM / TM 2𝑑 + 2𝐿 𝐵 𝐿 + 𝐵𝑑 
+
+DH / DH 2𝐿 + 2𝑑 𝐵 𝐵𝐿 + 𝑑 (a) Score Computation – Token -Major Key 
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+
+K ∈ ℝL×d                                             
+
+> Token n
+> Bank 0 PU
+> Bank 1 PU
+> K[0, 4, :]
+> sn=q·KnT
+> K[1, 5, :]
+> sn=q·KnT
+> Bank 2 PU
+> Bank 3 PU
+> K[2, 6, :]
+> sn=q·KnT
+> K[3, 7, :]
+> sn=q·KnT
+> Base Die S= [ s0s1…sL-1]
+> Concat only -no cross -bank reduction
+> (b ) Context Computation –Dim -Head Value
+> 01234567
+
+V ∈ ℝL×d                                                
+
+> Token  n
+> Bank 0 PU
+> Bank 1 PU
+> Bank 2 PU
+> Bank 3 PU
+> Base Die O= [ o0o1…oL-1]
+> Concat only -no cross -bank reduction
+> bk(n) = n mod BBroadcast q(1 ×d)
+> V[: 0, 4]
+> oj=∑anVn,j
+> n
+> V[: 1, 5]
+> oj=∑anVn,j
+> n
+> V[: 2, 6]
+> oj=∑anVn,j
+> V[: 3, 7]
+> oj=∑anVn,j
+> n
+> n
+> gathe r[L/B] scalars
+> Token  n
+> Dimension j
+> Broadcast a(1 ×L) bv(j) = j mod Bgathe r[d/B] elements
+
+Figure 5: Key/Value placement in compute-layer PIM banks. (a) Token-major Keys: bank 𝑏 𝐾 (𝑛 )=𝑛 mod 𝐵 holds full rows; scores assembled by concatenation. (b) Dim-head Values: bank 𝑏 𝑉 ( 𝑗 )=𝑗 mod 𝐵 holds full columns; outputs assembled by concatenation. No cross-bank reduction in either phase. 
+
+With typical parameters ( 𝐵 ≈ 256 , 𝛾 ≈ 1/𝐵 ) and hysteresis, the thresholds become 𝐿 ∗ 
+
+> TM
+
+≈ 4𝑑 and 𝐿 ∗ 
+
+> DH
+
+≈𝑑 /4; the default covers the moderate-context regime dominant in production mixes. 
+
+5.2 Paged-Interleaved Layout for Historical KV 
+
+Historical KV blocks reside in capacity layers. Following vLLM-style paging [23], each logical block is sliced into pages of 𝑇 page to-kens, and pages are round-robin interleaved across capacity-layers. Concretely, page 𝑝 of a logical block is placed on capacity-layer bank 
+
+bank cap (𝑝 ) = 𝑝 mod 𝐵 cap , (2) where 𝐵 cap is the number of capacity-layer banks in the stack. Inter-leaving maximizes parallel TSV bandwidth (up to 𝐷 cap × single-die throughput) and balances wear across capacity-layer dies. 
+
+Streaming promotion and demotion. Key data follows a simple path: each token’s Key resides in one bank, so scatter/gather has no cross-bank dependency. Value data requires a transpose between token-first (capacity pages) and dimension-first (PIM banks) order-ings in an on-die page buffer. On promotion, the MC dequantizes K8V4 →FP16, scatters Keys, and transposes Values; consecutive-page reads overlap with the transpose of the prior page. Demo-tion reverses, quantizing FP16 →K8V4 before writing compressed pages. The page buffer holds 𝑇 page ×𝑑 ×4 bytes per head group ( few KB), so the pipeline scales to large blocks without proportional SRAM growth. The host GPU sees only logical block identifiers; page-level placement is managed entirely on the base die. 
+
+6TokenStack for Efficient LLM Inference Conference’17, July 2017, Washington, DC, USA 
+
+6 Runtime Optimizations 
+
+Compile-time placement (§5) assigns each data class to its correct layer type, but the hot KV working set shifts with every request arrival and context extension. Maintaining the match between log-ical hotness and physical layer requires runtime policies that de-cide when to move a block between compute and capacity layers and which blocks to replicate across cards—and that execute both decisions cheaply enough to stay off the critical path. All the capa-bilities following are enabled by the base-die MC (§4.2). Figure 6 illustrates the lifecycle of a KV block through the three physical domains. 
+
+6.1 Serving Model and Request Scheduling 
+
+Continuous batching. Requests are admitted as their timestamps mature, processed through chunked prefill, and decoded with im-mediate backfill. This exposes prefix-sharing incrementally: a newly arrived request can reuse compute-layer–resident blocks from an already-active request without waiting for a batch boundary. All evaluated configurations use the same scheduler so that through-put differences isolate the stack organization and KV policies. 
+
+Topology-aware home assignment. Each request is assigned a physical home (𝑐𝑎𝑟𝑑, 𝑑𝑖𝑒 ). The scheduler preferentially places new requests where their prefix blocks already reside in compute layers (identified via hash_id lookup), reducing cross-card callbacks and raising compute-layer hit rates for shared prefixes. 
+
+Category-aware admission. The scheduler tags each request with its workload category (API, text, code, thinking, etc.) and applies category-specific admission windows. Short-form API traffic ex-hibits high single-turn reuse concentrated in the first few hun-dred tokens [42], so prefix blocks are admitted aggressively with short lifespan windows. Long-form reasoning has almost no inter-request sharing; the runtime therefore keeps the current request’s KV resident for the duration of its decode rather than specula-tively caching for future reuse. Code traffic shows moderate cross-request sharing over file-context prefixes; bounded replication (§6.3) is enabled for these prefixes with longer lifespan windows. Per-category parameters are derived from exponential fits of the reuse-time distribution, updated periodically from recent history (see §6.2). 
+
+6.2 Architecture-Aware Eviction 
+
+In TokenStack , eviction is demotion : a block moves from the com-pute layer to the capacity layer via stack-local DMA with inline K8V4 quantization. The block remains retrievable for future pro-motion at the cost of a capacity-layer read plus dequantization (∼1–2 μs), not a full-prefill re-computation. Prior dedicated-PIM designs lack a compressed staging domain for historical KV: in At-tAcc [36], a block removed from PIM dies has no efficient path back, so the runtime must either over-provision PIM capacity or accept costly re-computation when evicted contexts are revisited. 
+
+TokenStack ’s capacity layer turns this trade-off on its head: de-moted blocks persist at 2.667 × compression (K8V4), ready for low-latency promotion, enabling the high-turnover policies described below. 
+
+Per-block metadata. The base-die MC maintains a compact record (≤32 B) per compute-layer block: category 𝑤 , last-access timestamp PU Bank 0 PU                                           
+
+> Rows 0,4,8 …
+> PU PU
+> 1
+> Bank 1
+> Bank 2 Bank 3
+> KVKV
+> KVKV
+> Cols 0,4,8 … Rows 1,5,9 … Cols 1,5,9 …
+> Rows 2,6,10 … Cols 2,6,10 … Rows 3,7,11 … Cols 3,7,11 …
+> Compute Layers –Active KV ·FP16 · PIM Capacity Layers –Cold KV ·K8V4 · Dense HBM
+> Bank 0
+> KV Hash Block 0
+> Page 0
+> Bank 1
+> KV Hash Block 644
+> Page 0
+> …
+> KV Hash Block 0
+> Page 1
+> KV Hash Block 739
+> Page 1
+> …
+> KV Hash Block 0
+> Page 30
+> KV Hash Block 198
+> Page 30
+> KV Hash Block 0
+> Page 31
+> KV Hash Block 33
+> Page 31
+> ……
+> Bank 30 Bank 31
+> ……
+> Shared Buffer
+> Disaggregated MC
+> for Stack -local DMA Access
+> FP16 Vectors Gather token -first storage
+> bank( p) = pmod Dcap
+> Quantization Unit
+> K8V4
+> K8V4
+> Pages Write
+> K8V4 Pages Read
+> K8V4
+> Grouped
+> Quantization
+> FP16
+> FP16 Vectors
+> Scatter
+> 2
+> 3
+> 44
+> 32
+> 1
+> FP16 Vectors
+> Reorganize
+> Dequantization
+> Background Promote
+> Foreground Demote
+
+Figure 6: KV block lifecycle. Active blocks reside in com-pute layers (token-major K, dim-head V). Demotion quan-tizes FP16 →K8V4 and scatters pages to capacity layers; pro-motion reverses the path. Algorithm 1 Compute-layer demotion on the base-die MC. 
+
+Require: Q𝑤 : per-category queue of compute-layer blocks ordered by 𝑡 last ; 𝐹 𝑤 (·) ,
+
+ℓ𝑤 : fitted CDF and lifespan for category 𝑤 ; 𝜃 hi , 𝜃 lo : high/low water marks 
+
+Ensure: Demote blocks until occupancy ≤ 𝜃 lo 
+
+1: while Occupancy () > 𝜃 lo do 
+
+2: 𝑏 ∗ ← null ; 𝑠 ∗ ← (+∞ , −∞ , +∞) 
+
+3: for each active category 𝑤 do 
+
+4: 𝑏 ← Q 𝑤 .front () 
+
+5: Δ𝑡 ← 𝑡 now − 𝑏.𝑡 last 
+
+6: 𝑟 ← 𝐹 𝑤 (Δ𝑡 + ℓ𝑤 ) − 𝐹 𝑤 (Δ𝑡 )
+
+7: 𝑠 ← (− 𝑟, +𝑏. offset , −𝑏.𝑛 remote )
+
+8: if 𝑠 <lex 𝑠 ∗ then 𝑏 ∗ ← 𝑏 ; 𝑠 ∗ ← 𝑠 
+
+9: end if 
+
+10: end for 
+
+11: Pop (Q𝑏 ∗ .𝑤 )12: EnqeueBgDMA (𝑏 ∗, compute →capacity, K8V4) ⊲ non-blocking 13: end while 
+
+𝑡 last , prompt-position offset, remote-hit count 𝑛 remote , and distinct-card count 𝑛 cards —all updated in-line with zero GPU overhead. 
+
+Reuse-probability estimation. The runtime fits a category-specific CDF 𝐹 𝑤 (𝑡 ) from recent trace history [42]. For a block of category 𝑤 
+
+last accessed Δ𝑡 ago, reuse probability within lifespan ℓ𝑤 is 
+
+ReuseProb 𝑤 (Δ𝑡, ℓ 𝑤 ) = 𝐹 𝑤 (Δ𝑡 + ℓ𝑤 ) − 𝐹 𝑤 (Δ𝑡 ). (3) 
+
+Demotion score. TokenStack ranks blocks for demotion using a lexicographic score that combines the reuse estimate with two topology-aware signals: 
+
+Score (𝑏 ) =   −ReuseProb 𝑏.𝑤 (Δ𝑡 𝑏 , ℓ 𝑏.𝑤 ), +𝑏. offset , −𝑏.𝑛 remote 
+
+.
+
+(4) Lexicographic ordering: (1) low reuse first, (2) deeper prompt posi-tions first [42], (3) protect high remote-hit blocks. Algorithm 1 exe-cutes whenever occupancy exceeds a high-water mark; per-category priority queues reduce cost to 𝑂 (| 𝑊 |) . Demotions are background DMAs overlapped with the next decode step. 
+
+On-the-fly KV quantization. The base-die integrates a lightweight quantization/dequantization engine that operates inline with the DMA data path, making capacity expansion a zero-overhead byprod-uct of routine cross-layer movement. On demotion, the engine ap-plies asymmetric K8V4—converting Keys FP16 →INT8 ( 2×) and Val-ues FP16 →INT4 ( 4×)—yielding an overall 2.667 × capacity-layer ex-pansion; on promotion, it dequantizes back to full FP16 before the block reaches any PIM compute unit, so quantization is invisible to the attention path: K8V4 achieves near-lossless accuracy rela-tive to the FP16 baseline, with an average degradation of only 0.3% 
+
+7Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo 
+
+across Llama 3 8B/70B and Qwen2.5 7B/32B on GSM8K and Hu-manEval+ [34, 45]. The engine is provisioned to match the inter-nal TSV transfer bandwidth, so DMA channel contention, not the engine, limits sustained throughput; quantization therefore adds little critical-path latency, in contrast to GPU-side schemes [13, 34, 45] that launch explicit compress/decompress kernels competing for GPU cycles on the host timeline. 
+
+6.3 Selective Replication 
+
+Roughly 10% of KV blocks account for 77% of reuse [42]—primarily system-prompt prefixes. With single-copy placement, these high-reuse blocks trigger repeated cross-card callbacks. Selectively repli-cating only this concentrated set eliminates the callbacks at modest cost. 
+
+Identifying replica-worthy blocks. The base-die MC applies a three-gate test using metadata already maintained for demotion. 
+
+Gate 1 (position): the block’s token-position offset must fall within the system-prompt region ( offset ≤ 𝜏 off ); blocks beyond this thresh-old are user-specific content with negligible cross-request reuse. 
+
+Gate 2 (fan-out): the distinct-card count 𝑛 cards must exceed 𝜏 cards ,ensuring that the callback cost is distributed across enough cards to justify a replica. Gate 3 (frequency): the remote-hit count 𝑛 remote 
+
+must exceed 𝜏 hits , ensuring that the amortized DMA cost of creat-ing the replica is below the cumulative callback savings. A block that passes all three gates is replicated into the requesting card’s compute-layer replica reserve via a background DMA. Replicas whose callback-elimination ratio drops below thresh-old are revoked, returning capacity when patterns shift. 
+
+6.4 Other Runtime Optimizations 
+
+The runtime classifies transfers as foreground (promotions and call-backs, latency-visible) or background (demotions, replica fanout, GC, overlapped with idle TSV slots). Demotion and replication al-ways use background DMAs; only compute-layer misses trigger foreground promotions. For categories with predictable multi-turn reuse (e.g., conversa-tional assistants), the runtime retains a completed request’s ear-liest prefix blocks in compute layers when the category-specific next-turn probability exceeds a threshold. Retention is bounded by a per-conversation budget. 0 1000 2000 3000 4000 5000 6000                   
+
+> # Tokens
+> 0.0
+> 0.5
+> 1.0
+> Density
+> 1e−2
+> View: <= P99 (6000)
+> (a) TraceB
+> Input
+> (mean: 831.91, max: 23677)
+> Output
+> (mean: 77.75, max: 5907)
+> 02000 4000 6000 8000 10000 12000 14000
+> # Tokens
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Density
+> 1e−3
+> View: <= P99 (14000)
+> (b) TraceA
+> Input
+> (mean: 2042.86, max: 23765)
+> Output
+> (mean: 394.48, max: 8000)
+> 02000 4000 6000 8000 10000 12000 14000
+> # Tokens
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Density
+> 1e−3
+> View: <= P99 (14000)
+> (c) Coder
+> Input
+> (mean: 5538.41, max: 17972)
+> Output
+> (mean: 851.80, max: 10768)
+> 05000 10000 15000 20000
+> # Tokens
+> 0.0
+> 0.5
+> 1.0
+> Density
+> 1e−3
+> View: <= P99 (20000)
+> (d) Thinking
+> Input
+> (mean: 3298.83, max: 28978)
+> Output
+> (mean: 3885.52, max: 18154)
+
+Input and Output Token Length Distributions 
+
+Figure 7: Prompt and generation length distributions across four traces. Table 3: Experimental setup. Comp./Cap.: per-card do-main capacities before weight reservation. ¯𝑃 / ¯𝐺 : mean prompt/generation length (tokens).  
+
+> Platform: DGX-A100, 8
+
+×GPU, HBM3, bank-level PIM, W16A16 GPU: 312 TF/s UCIe-A BW: 512 GB/s per stack × 5 stacks TSV DMA BW: 896 GB/s per Stack NVLink3: 600 GB/s Host: 512 GB DDR5                   
+
+> Mode Die org. Comp./Cap. KV policy
+> AttAcc Ded. PIM+HBM 32 / 16 GB LRU, unique Full-GPU No PIM 80 / 0 GB LRU, unique Uniform All-PIM 40 / 0 GB LRU, unique
+> TokenStack Hybrid stack 20 / 40 GB Aware, sel. rep., K8V4
+> Trace Type Reqs
+
+¯𝑃 ¯𝐺                                     
+
+> traceB API/text 15 000 832 78
+> traceA Mixed 8 000 2 043 394
+> coder Code 2 500 5 538 852
+> thinking Reasoning 1 000 3 299 3 886
+> Model Layers Hidden Heads Params
+> Qwen3-4B 36 2 560 32 4 B Qwen3-32B 64 5 120 64 32 B Mixtral-Devstral-123B 80 12 288 96 123 B GPT-175B 96 12 288 96 175 B
+
+7 Experimental Methodology 
+
+Simulation Framework. We evaluate TokenStack with a cycle-accurate simulator built on AttAcc frontend 1 and Ramulator2 2 for bank-level PIM attention timing [35, 36]. The simulator models tensor-parallel GPU execution, heterogeneous attention offload, re-quest scheduling, KV placement, and end-to-end trace-driven serv-ing on DGX-class nodes. Ramulator2 provides cycle-level timing for the PIM attention; Python frontend models the remaining serv-ing pipeline. The key extension over prior PIM-serving simulators is sup-port for vertically heterogeneous HBM stacks. The extended model tracks stack-local DMA between capacity and compute layers, lay-ered address mapping, workload-aware KV placement, bounded replication, and overlap-aware movement accounting across DMA, HBM, NVLink, and PCIe paths. The base-die controller is evalu-ated through its system-level effects—latency, bandwidth utiliza-tion, and data-movement cost—rather than through a separate con-troller RTL model. Inline K8V4 quantization is modeled as a pipelined transfer path with effective bandwidth min (DMA_BW , engine_BW )
+
+and per-byte quantization/dequantization energy. 
+
+Configurations and Workloads. Table 3 consolidates the full ex-perimental setup. We evaluate on a single DGX-A100 node with eight GPUs. The four compared configurations bracket the HBM-PIM design space: Full-GPU removes PIM entirely (GPU-only ref-erence); Uniform makes every HBM layer PIM-enabled; AttAcc [36] dedicates a fixed subset of dies to PIM while retaining the rest as standard HBM; and TokenStack adds the heterogeneous stack (§4), KV-aware layout (§5), and the full runtime policy suite (§6). All four share the same continuous-batching scheduler—admitting requests as they arrive, performing chunked prefill, and immedi-ately backfilling open decode slots—so that performance differences isolate the stack organization and KV management policies. We drive all experiments with 4 anonymized production-derived traces from the Aliyun Qwen-Bailian deployment [42]. Each re-quest carries an arrival timestamp, prompt and generation lengths, request type, turn metadata, and hashed KV block identifiers at 16-token granularity. As Figure 7 shows, the traces span a wide 
+
+> 1
+
+https://github.com/scale-snu/attacc_simulator 
+
+> 2
+
+https://github.com/CMU-SAFARI/ramulator2 8TokenStack for Efficient LLM Inference Conference’17, July 2017, Washington, DC, USA full-gpu attacc uniform*            
+
+> 0.0x 1.0x 2.0x
+> Norm. Throughput (Token/s)
+> 0.99x 1.00x
+> OOM
+> 2.24x
+> GPT-175B | traceA
+> full-gpu attacc uniform*
+> 0.0x 1.0x 2.0x
+> 1.25x 1.00x
+> OOM
+> 2.22x
+> GPT-175B | traceB
+> full-gpu attacc uniform*
+> 0.0x 1.0x 2.0x
+> 0.96x 1.00x
+> OOM
+> 2.22x
+> GPT-175B | coder
+> full-gpu attacc uniform*
+> 0.0x 0.5x 1.0x 1.5x 2.0x
+> 0.75x 1.00x
+> OOM
+> 1.93x
+> GPT-175B | thinking
+> full-gpu attacc uniform
+> 0.0x 0.5x 1.0x 1.5x 2.0x
+> 0.82x 1.00x 1.36x 2.01x
+> Mistral-Devstral2-123B | traceA full-gpu attacc uniform
+> 0.0x 1.0x 2.0x
+> 1.28x 1.00x 1.72x 2.32x
+> Mistral-Devstral2-123B | traceB full-gpu attacc uniform
+> 0.0x 0.5x 1.0x 1.5x 2.0x
+> 0.74x 1.00x 1.30x 1.96x
+> Mistral-Devstral2-123B | coder full-gpu attacc uniform
+> TokenStack 0.0x 0.5x 1.0x 1.5x
+> 0.57x 1.00x 1.23x 1.55x
+> Mistral-Devstral2-123B | thinking full-gpu attacc uniform
+> 0.0x 0.5x 1.0x 1.5x
+> Norm. Throughput (Token/s)
+> 0.59x 1.00x 0.96x 1.44x
+> Qwen3-32B | traceA
+> full-gpu attacc uniform
+> 0.0x 0.5x 1.0x 1.5x
+> 0.88x 1.00x 1.12x 1.63x
+> Qwen3-32B | traceB
+> full-gpu attacc uniform
+> 0.0x 0.5x 1.0x 1.5x
+> 0.52x 1.00x 0.92x 1.42x
+> Qwen3-32B | coder
+> full-gpu attacc uniform
+> 0.0x 0.5x 1.0x
+> 0.43x 1.00x 0.93x 1.10x
+> Qwen3-32B | thinking
+> full-gpu attacc uniform TokenStack 0.0x 0.5x 1.0x
+> 0.61x 1.00x 0.87x 1.22x
+> Qwen3-4B | traceA
+> full-gpu attacc uniform
+> 0.0x 0.5x 1.0x 1.5x
+> 0.80x 1.00x 0.96x 1.34x
+> Qwen3-4B | traceB
+> full-gpu attacc uniform
+> 0.0x 0.5x 1.0x
+> 0.55x 1.00x 0.84x 1.21x
+> Qwen3-4B | coder
+> full-gpu attacc uniform
+> 0.0x 0.2x 0.5x 0.8x 1.0x
+> 0.50x 1.00x 0.91x 1.03x
+> Qwen3-4B | thinking
+
+Generation Throughput * uniform unavailable for GPT-175B (OOM) 
+
+> TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack TokenStack
+
+Figure 8: Token throughput normalized to AttAcc. TokenStack outperforms AttAcc on every pair while preserving large-model capacity. Uniform unavailable for GPT-175B (OOM). 
+
+range—from short-output API calls ( traceB , mean 78 tokens out-put) through mixed and code-heavy traffic to long-form chain-of-thought reasoning ( thinking , mean 3 886 tokens output)—exercising both high-reuse and low-reuse KV regimes. We pair these traces with four models from 4 B to 175 B parameters, covering the range where KV pressure transitions from moderate to dominant. 
+
+Load Sweep and Metrics. We sweep the request arrival rate by scaling original timestamps as raw_qps /target_qps , preserving request order and reuse structure while varying load intensity. We report normalized p50 and p95 TTFT, TBT, and end-to-end request latency; request and token throughput; and total energy per gen-erated token with a five-component breakdown (off-chip DRAM, on-package cache, register file, ALU, inter-die communication). 
+
+Hardware overhead. We used CACTI 7.0 [2] to evaluate the SRAM area cost. A contemporary HBM3 base die occupies ≈121 mm 2 [27]. The MC is relocated from the GPU die, not added. Of the three new blocks, the attention coordinator and the shared SRAM buffer are the largest at ≈1.44 mm 2 (7 nm), dominated by SRAM [36]. The K8V4 quantization/dequantization engine uses parallel group-wise units [14] provisioned to saturate the 896 GB/s per-stack TSV band-width [27], occupying ≈0.09 mm 2 at 7 nm with latency fully pipelined behind the TSV transfer. Together the new blocks occupy a small fraction of the 121 mm 2 die, while replacing the HBM PHY and MC with UCIe D2D frees ≈15 mm 2 per stack on the GPU die [4], returning net silicon to compute. 
+
+8 Evaluation 
+
+We organize the evaluation around four questions. First, does To-kenStack improve delivered throughput without sacrificing large-model support? Second, does it reduce end-to-end request latency under realistic, trace-driven arrivals? Third, does it reduce per-token serving energy? Fourth, which components of the design contribute most to the observed gains? The answers are interdependent: the capacity–bandwidth relief that drives throughput also explains la-tency shape, the energy decomposition quantifies the data-movement savings that cause both, and the ablation isolates which design component contributes most to that relief. 
+
+8.1 Throughput 
+
+Figure 8 reports token throughput normalized to AttAcc. Across all 16 model–trace pairs, TokenStack delivers a geometric-mean im-provement of 1.62 × (arithmetic mean 1.68 ×), ranging from 1.03 ×
+
+(Qwen3-4B/thinking) to 2.32 × (Mistral-Devstral2-123B/traceB). The gain scales monotonically with model size: per-model geometric means are 1.20 × (Qwen3-4B), 1.38 × (Qwen3-32B), 1.94 × (Devstral-123B), and 2.15 × (GPT-175B). This scaling reflects KV capacity over-flow. At 4 B parameters, AttAcc’s flat PIM tier holds the full KV working set even under load (L1 hit rate ≥ 0.96 at peak through-put), so TokenStack ’s capacity layers absorb little additional traf-fic. At 175 B, the KV state far exceeds any single-tier allocation; To-kenStack ’s capacity layers absorb the overflow via stack-internal DMA at 896 GB/s, keeping compute layers exclusively for the hottest blocks. The throughput gain is therefore proportional to the sever-ity of the overflow in the flat baseline. Per-trace geometric means vary from 1.36 × (thinking) to 1.83 ×
+
+(traceB), revealing a second sensitivity axis: reuse structure. traceB (short-form API traffic, 15 K requests, mean output 78 tokens) ex-hibits high temporal locality in system-prompt prefixes, producing a compact hot set that fits entirely in compute layers. The thinking trace (mean output 3 886 tokens) generates fresh KV per request with minimal cross-request sharing, weakening the hot–cold dis-tinction that drives TokenStack ’s advantage. The 1.03 × floor case (Qwen3-4B/thinking) sits at the intersection of both minima: the smallest model and the least structured reuse. Neither AttAcc nor 
+
+TokenStack overflows its compute tier at any load point, so verti-cal heterogeneity adds no value—this delineates the design’s scope rather than indicating a failure. Beyond peak throughput, TokenStack sustains effective serv-ing over a wider load range. On GPT-175B and Devstral-123B, the QPS at which throughput reaches 90% of its maximum is 2.0–3.0×
+
+higher for TokenStack than for AttAcc (e.g., GPT-175B/traceB: QPS = 3.0 vs. 1.0). The wider range follows from reduced per-request service time: because TokenStack resolves each attention step locally, decode slots free earlier, allowing the scheduler to admit the next request sooner and deferring the saturation knee. Among baselines, Uniform achieves a modest 1.07 × geometric-mean speedup over AttAcc on the 12 pairs where it can run but falls below AttAcc on most small-model configurations where the halved capacity out-weighs its bandwidth gain; it cannot serve GPT-175B (OOM). Full-GPU retains the full 80 GB GPU-visible pool and occasionally out-performs AttAcc on traceB for the two largest models, but without PIM it cannot approach TokenStack at any load. 
+
+9Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo 0.0 0.2 0.4 0.6 0.8                                                         
+
+> 0.0x 5.0x 10.0x 15.0x 20.0x
+> E2E (Norm.)
+> GPT-175B | traceA
+> 012
+> 0.0x 2.0x 4.0x 6.0x 8.0x
+> GPT-175B | traceB
+> 0.0 0.1 0.2 0.3
+> 0.0x 2.0x 4.0x 6.0x 8.0x 10.0x GPT-175B | coder
+> 0.0 0.1 0.2 0.3
+> 0.0x 5.0x 10.0x 15.0x 20.0x GPT-175B | thinking
+> 0.0 0.5 1.0
+> 0.0x 1.0x 2.0x 3.0x 4.0x Mistral-Devstral2-123B | traceA
+> 012
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x Mistral-Devstral2-123B | traceB
+> 0.0 0.2 0.4 0.6
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x Mistral-Devstral2-123B | coder
+> 0.0 0.2 0.4
+> 0.0x 10.0x 20.0x 30.0x 40.0x Mistral-Devstral2-123B | thinking
+> 012
+> QPS
+> 0.0x 1.0x 2.0x 3.0x
+> E2E (Norm.)
+> Qwen3-32B | traceA
+> 02468
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x Qwen3-32B | traceB
+> 0.0 0.5 1.0
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x Qwen3-32B | coder
+> 0.0 0.1 0.2 0.3
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x Qwen3-32B | thinking
+> 024
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x Qwen3-4B | traceA
+> 0510 15
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x Qwen3-4B | traceB
+> 012
+> QPS
+> 0.0x 1.0x 2.0x 3.0x Qwen3-4B | coder
+> 0.00 0.25 0.50 0.75 1.00
+> QPS
+> 0.0x 5.0x 10.0x 15.0x 20.0x Qwen3-4B | thinking
+> Generation E2E Latency * uniform unavailable for GPT-175B (OOM) full-gpu attacc uniform Token Stack
+
+Figure 9: Normalized p50 end-to-end latency vs. QPS (normalized to TokenStack ’s minimum). TokenStack stays flat; AttAcc diverges under load. Uniform unavailable for GPT-175B (OOM). GPU-only Uniform AttAcc 0.0 0.2 0.4 0.6 0.8 1.0 Normalized energy per token -47% -6% -14%   
+
+> traceA
+> GPU-only Uniform AttAcc -30% -3% -14%
+> traceB
+> FC layer (Off-chip memory access) Attention layer (Off-chip memory access) FC layer (On-chip memory & compute) Attention layer (On-chip memory & compute) Communication
+> TokenStack TokenStack
+
+Figure 10: Normalized energy break down per token for Mistral-Devstral2-123B at QPS = 32 on traceA and traceB. 
+
+8.2 Latency 
+
+The end-to-end latency divergence visible in Figure 9 is rooted in queue delay. For Mistral-Devstral2-123B on traceA, TokenStack 
+
+reduces average queue delay by 86% at QPS = 0.2, by 95% at QPS = 1.0 (126 s vs. 2,572 s), and still by 55% at QPS = 8.0. The mechanism chains from the throughput analysis: shorter per-step attention latency frees decode slots earlier, shortening queue residence for waiting requests. Under increasing load, the advantage compounds because queueing delay grows superlinearly with utilization; each fractional reduction in per-request service time translates into a progressively larger absolute delay saving. We define the SLO-compliant arrival rate as the maximum QPS at which p50 end-to-end latency remains within 2× of its minimum. Under this SLO, TokenStack serves 1.70 × more requests than At-tAcc (geomean across all 16 pairs), with individual ratios from 1.0×
+
+(Qwen3-4B/thinking) to 3.8× (Mistral-Devstral2-123B/traceB). The capacity advantage scales with model size—per-model geometric means are 1.35 × (4 B), 1.54 × (32 B), 2.13 × (123 B), and 1.95 × (175 B)— mirroring the throughput trend. Beyond the SLO boundary, the gap escalates rapidly: at each subplot’s cutoff QPS, AttAcc’s p50 la-tency exceeds TokenStack ’s by a geomean of 25 .2×, with ratios up to 939 × (GPT-175B/traceB). The 939 × case is mechanistically spe-cific, not an anomaly. At the cutoff QPS of 1.4, AttAcc has already plateaued at 80.7 tok/s (reached at QPS ≈ 1.0) while TokenStack is still in its linear regime at 108.5 tok/s (its plateau of 178.8 tok/s is not reached until QPS ≈ 3.0). The two systems sit at fundamentally different points on their queueing curves—AttAcc in exponential blowup ( 𝑝 50 = 2,029 s), TokenStack below its knee ( 𝑝 50 = 2.2 s)— and the ratio reflects this asymmetry rather than a 939 × raw speed advantage. 
+
+TTFT vs. TBT decomposition. Figure 11 decomposes latency for Mistral-Devstral2-123B and Qwen3-32B. TTFT dominates the gap: AttAcc’s p50 TTFT exceeds TokenStack ’s by a geometric mean of 127 ×, peaking above 4,500 × on Mistral-Devstral2-123B/traceB. The TTFT improvement and the 1.62 × throughput improvement are manifestations of the same mechanism—capacity–bandwidth relief—measured at different granularities: TTFT captures the per-request latency reduction at the point of maximum divergence, while throughput averages it across operating points. TBT differ-ences are smaller (geometric mean 1.8×) because decode is inher-ently sequential, touching only one new token’s KV per step; the gain arises because shorter per-step attention latency lets the sched-uler pack more decode slots per scheduling interval. The TBT ad-vantage is widest on short-output, high-QPS traces (e.g., traceB) where large decode batches amplify the per-step cost. 
+
+Baseline behaviors. Full-GPU retains the full 80 GB GPU-visible pool and avoids the KV-forwarding stall, occasionally outperform-ing AttAcc on traceB for large models, but lacks near-memory compute. Uniform narrows the gap on low-reuse traces but mode-switching stalls and halved capacity prevent it from matching To-kenStack ; it cannot serve GPT-175B (OOM). 
+
+8.3 Energy Efficiency 
+
+Latency and throughput improvements are only valuable if they do not come at disproportionate energy cost. Figure 10 reports nor-malized energy per generated token for Mistral-Devstral2-123B at QPS = 32, decomposed into five components: off-chip and on-chip energy for FC layers and attention layers, plus inter-die commu-nication. TokenStack reduces energy per token by 47% on traceA and 30% on traceB relative to AttAcc. The savings concentrate in the attention layer’s off-chip memory-access component: by keep-ing hot KV adjacent to PIM engines in compute layers, Token-Stack replaces costly off-chip DRAM transfers with stack-internal reads, directly targeting the dominant energy term in bandwidth-bound attention. FC-layer energy is comparable across all config-urations because weights and activations follow the same GPU-visible bandwidth path regardless of PIM organization. Within each model–trace pair, per-token energy tracks inversely with through-put ( 𝑟 > 0.98 across QPS points), confirming that both improve-ments stem from the same root cause—reduced off-chip data move-ment during attention—rather than representing independent op-timizations. GPU-only saves 14% on both traces by avoiding AttAcc’s KV-forwarding overhead, but its attention on-chip energy is higher 
+
+10 TokenStack for Efficient LLM Inference Conference’17, July 2017, Washington, DC, USA 0.0 0.2 0.4 0.6 0.8                                                      
+
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x
+> TTFT (Norm.)
+> Mistral-Devstral2-123B | traceA
+> 012
+> 0.0x 2.0x 4.0x 6.0x 8.0x 10.0x Mistral-Devstral2-123B | traceB
+> 0.0 0.2 0.4
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x Mistral-Devstral2-123B | coder
+> 0.00 0.05 0.10 0.15
+> 0.0x 5.0x 10.0x 15.0x Mistral-Devstral2-123B | thinking
+> 0.0 0.5 1.0 1.5 2.0
+> 0.0x 1.0x 2.0x 3.0x 4.0x 5.0x
+> 02468
+> 0.0x 5.0x 10.0x 15.0x 20.0x Qwen3-32B | traceB
+> 0.00 0.25 0.50 0.75 1.00
+> 0.0x 2.0x 4.0x 6.0x 8.0x 10.0x Qwen3-32B | coder
+> 0.0 0.1 0.2
+> 0.0x 2.0x 4.0x 6.0x 8.0x
+> Qwen3-32B | thinking
+> 0.0 0.5 1.0 1.5
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x
+> TBT (Norm.)
+> 024
+> QPS
+> 0.0x 2.0x 4.0x
+> 0.0 0.2 0.4 0.6
+> QPS
+> 0.0x 2.0x 4.0x
+> 0.0 0.1 0.2 0.3
+> QPS
+> 0.0x 1.0x 2.0x 3.0x
+> 0123
+> QPS
+> 0.0x 1.0x 2.0x 3.0x
+> 0.0 2.5 5.0 7.5 10.0
+> QPS
+> 0.0x 1.0x 2.0x 3.0x
+> 0.0 0.5 1.0
+> QPS
+> 0.0x 1.0x 2.0x 3.0x 4.0x
+> 0.0 0.1 0.2 0.3
+> QPS
+> 0.0x 1.0x 2.0x 3.0x
+> Generation TTFT / TBT * uniform unavailable for GPT-175B (OOM) full-gpu attacc uniform TokenStack
+> Qwen3-32B | traceA
+
+Figure 11: Normalized p50 TTFT (top) and TBT (bottom) vs. QPS for Devstral-123B and Qwen3-32B. TTFT dominates the gap. Hardware-only (+layout) (+Request Scheduling) (+k8v4) (+category-aware eviction)   
+
+> 0.0x 0.5x 1.0x 1.5x 2.0x
+> Normalized Token Throughput (to Hardware-only)
+> baseline +57.9% +9.9% +8.2% +6.1% +2.1% gpu-only (0.78x)
+> (+Selective Replica) TokenStack
+
+Figure 12: Cumulative throughput contribution of each 
+
+TokenStack component (Devstral-123B, QPS = 32, traceA). Dashed line: GPU-only. 
+
+because all attention arithmetic remains on the GPU without near-memory execution. Uniform saves only 3–6%: mode-switching stalls extend per-step active time, converting what would be a bandwidth-proportional energy saving into a near-wash. 
+
+8.4 Ablation and Discussion 
+
+Component contributions. Figure 12 isolates each design com-ponent’s throughput contribution for Mistral-Devstral2-123B at QPS = 32 on traceA, adding features cumulatively atop the bare heteroge-neous hardware. The KV-aware data layout (§5) delivers the sin-gle largest gain: +57 .9% over hardware-only. Without asymmetric Key/Value placement—token-major Keys for reduction-free score gather, dim-head Values for reduction-free output concatenation— PIM banks cannot fully exploit their local bandwidth because KV data is misaligned with the attention dataflow. Layout and topology-aware scheduling (§6, +9.9% ) together account for 67.8% of the total gain because they address the two most fundamental deci-sions: how data is organized within a layer and which layer it goes to. The remaining three components—inline K8V4 quantiza-tion (§4.2, +8.2% ), category-aware eviction (§6.2, +6.1% ), and selec-tive replication (§6.3, +2.1% )—are refinements that squeeze addi-tional throughput from the same physical resources. Together, the five features raise throughput to approximately 2× the hardware-only baseline; for reference, GPU-only achieves only 0.78 × of that baseline, confirming that even bare heterogeneous hardware with-out runtime policies already substantially outperforms a PIM-free GPU. 
+
+Topology robustness. Across 7 topology variants from cap1-comp7 
+
+to cap7-comp1 at QPS = 32, throughput varies by less than 4% co-efficient of variation on 14 of 16 model–trace pairs, with the worst case at 4.0% (GPT-175B/traceB, 10.1% range). This robustness in-dicates that the runtime policies—particularly K8V4 quantization, which expands effective capacity by 2.67 ×, and category-aware eviction—successfully adapt to varying compute-to-capacity ratios. When compute layers shrink, more KV blocks overflow to capac-ity layers, but the runtime absorbs the shift by compressing and prioritizing aggressively. The physical layer split is therefore a sec-ondary design parameter, affording deployment flexibility without sacrificing serving performance. 
+
+Limitations and scope. The improvement is smallest when the KV working set lacks clear hot–cold structure or when the model is small enough that a flat PIM organization holds the full set (Qwen3-4B/thinking, 1.03 ×), as discussed in the throughput analysis. An in-structive corollary emerges from the hit-rate data. At peak through-put on Qwen3-32B/traceA, TokenStack ’s compute-layer hit rate is 0.56 versus AttAcc’s 0.97—yet TokenStack delivers 1.43 × higher throughput. The apparent paradox resolves once we note that At-tAcc has no capacity tier: its high hit rate is inflated because all KV either fits in PIM or is handled via cross-die forwarding. To-kenStack ’s capacity layers absorb the 44% of accesses that miss in the compute tier at stack-internal DMA cost—far cheaper than AttAcc’s forwarding fallback—so the correct performance metric is weighted service time across both tiers, not the hit rate of any single tier. 
+
+9 Related Work 9.1 PIM for LLM Inference 
+
+Recent work explores compiler co-optimization, dynamic schedul-ing, and CXL-based system integration to support complex model execution on PIM [6, 11, 12, 16, 22, 29, 38]. AttAcc [36] showed that bank-level HBM-PIM can accelerate the attention path when the GPU continues to run compute-heavy layers. Duplex [43] extends heterogeneous execution to newer LLM features such as MoE, grouped-query attention, and continuous batching. CENT [10] explores a GPU-free CXL-based path for memory-centric LLM inference. These systems show that attention and other low-Op/B steps benefit from near-memory execution. TokenStack differs in a more basic way: it changes the stack layout itself so that only the data that needs near-memory compute pays for compute-enabled layers. 
+
+11 Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo 
+
+9.2 KV Management and Trace-Aware Serving 
+
+Recent work has shown that KV Cache behavior depends strongly on real workloads[7, 9, 37]. KVCache Cache in the Wild reports that reuse is skewed, category-dependent, and often predictable within a request class [42]. PAM argues that LLM serving must manage bandwidth and capacity together across a memory hier-archy [32]. TokenStack builds on these observations, but it does not stop at software policy. It uses the trace-driven insights to de-cide which blocks deserve compute-layer space inside a physically heterogeneous HBM stack. 
+
+9.3 HBM Evolution and Near-Data Control 
+
+Commercial HBM-PIM work has already shown that bank-level processing is practical [25, 26]. What changes with HBM4 is the re-placement of the traditionally passive base die with a CMOS logic die capable of hosting active control circuitry [17]. Together with die-to-die links such as UCIe [4], this logic base die creates a re-alistic control point for stack-local DMA, layered address transla-tion, attention-side coordination, and inline data transformation— functions that would otherwise require host-side round-trips on every KV migration. Prior near-data processing work often focuses on moving compute close to data [40, 41]. TokenStack adds the next step for KV-centric serving: it gives different parts of the same stack different roles and uses the base die to coordinate them. 
+
+10 Conclusion 
+
+KV-centric LLM serving needs more than a fast attention engine. It needs a memory stack that gives hot KV, cold KV, weights, and activations different physical homes. Uniform HBM-PIM wastes compute-enabled space on data that does not benefit from near-memory execution, while dedicated-PIM splits reduce the HBM re-sources left for GPU-visible work. TokenStack addresses this mis-match with vertically heterogeneous stacks, a logic base die that manages stack-local movement, and runtime policies that keep only the highest-value KV in the compute-visible domain. The result is an architectural lesson for future HBM-PIM sys-tems: the right answer is not to make every layer identical and then add more software policy on top. The stack itself should re-flect the serving data mix. By combining capacity layers, compute layers, and stack-local control, TokenStack turns HBM-PIM into a better substrate for real LLM serving workloads. 
+
+> 12
+
+TokenStack for Efficient LLM Inference Conference’17, July 2017, Washington, DC, USA 
+
+References 
+
+[1] Junwhan Ahn, Sungpack Hong, Sungjoo Yoo, Onur Mutlu, and Kiyoung Choi. 2015. A scalable processing-in-memory accelerator for parallel graph process-ing. In 2015 ACM/IEEE 42nd Annual International Symposium on Computer Ar-chitecture (ISCA) . 105–117. https://doi.org/10.1145/2749469.2750386 [2] Rajeev Balasubramonian, Andrew B. Kahng, Naveen Muralimanohar, Ali Shafiee, and Vaishnav Srinivas. 2017. CACTI 7: New Tools for Interconnect Ex-ploration in Innovative Off-Chip Memories. ACM Trans. Archit. Code Optim. 14, 2, Article 14 (June 2017), 25 pages. https://doi.org/10.1145/3085572 [3] Guohao Dai, Tianhao Huang, Yuze Chi, Jishen Zhao, Guangyu Sun, Yongpan Liu, Yu Wang, Yuan Xie, and Huazhong Yang. 2019. GraphH: A Processing-in-Memory Architecture for Large-Scale Graph Processing. IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems 38, 4 (2019), 640–653. https://doi.org/10.1109/TCAD.2018.2821565 [4] Debendra Das Sharma, Swadesh Choudhary, Peter Onufryk, and Rob Pelt. 2025. On-Package Memory with Universal Chiplet Interconnect Express (UCIe): A Low Power, High Bandwidth, Low Latency and Low Cost Approach. In 2025 Hot Interconnects . arXiv:2510.06513. [5] Alexandar Devic, Siddhartha Balakrishna Rai, Anand Sivasubramaniam, Ameen Akel, Sean Eilert, and Justin Eno. 2022. To PIM or not for emerging general purpose processing in DDR memory systems. In Proceedings of the 49th Annual International Symposium on Computer Architecture (New York, New York) (ISCA ’22) . Association for Computing Machinery, New York, NY, USA, 231–244. https: //doi.org/10.1145/3470496.3527431 [6] Zehao Fan, Yunzhen Liu, Garrett Gagnon, Zhenyu Liu, Yayue Hou, Hadjer Benmeziane, Kaoutar El Maghraoui, and Liu Liu. 2026. STARC: Selective To-ken Access with Remapping and Clustering for Efficient LLM Decoding on PIM Systems. In Proceedings of the 31st ACM International Conference on Archi-tectural Support for Programming Languages and Operating Systems, Volume 2 
+
+(USA) (ASPLOS ’26) . Association for Computing Machinery, New York, NY, USA, 1863–1879. https://doi.org/10.1145/3779212.3790226 [7] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-Efficient Large Language Model Serving for Multi-turn Conversations with CachedAttention. In 2024 USENIX Annual Technical Conference (USENIX ATC 24) . USENIX Asso-ciation, Santa Clara, CA, 111–126. https://www.usenix.org/conference/atc24/ presentation/gao-bin-cost [8] Christina Giannoula, Ivan Fernandez, Juan Gómez Luna, Nectarios Koziris, Geor-gios Goumas, and Onur Mutlu. 2022. SparseP: Towards Efficient Sparse Ma-trix Vector Multiplication on Real Processing-In-Memory Architectures. Proc. ACM Meas. Anal. Comput. Syst. 6, 1, Article 21 (Feb. 2022), 49 pages. https: //doi.org/10.1145/3508041 [9] In Gim, Guojun Chen, Seung-seob Lee, Nikhil Sarda, Anurag Khan-delwal, and Lin Zhong. 2024. Prompt Cache: Modular Attention Reuse for Low-Latency Inference. In Proceedings of Machine Learning and Systems , P. Gibbons, G. Pekhimenko, and C. De Sa (Eds.), Vol. 6. 325–338. https://proceedings.mlsys.org/paper_files/paper/2024/file/ a66caa1703fe34705a4368c3014c1966-Paper-Conference.pdf [10] Yufeng Gu, Alireza Khadem, Sumanth Umesh, Ning Liang, Xavier Servot, Onur Mutlu, Ravi Iyer, and Reetuparna Das. 2025. PIM Is All You Need: A CXL-Enabled GPU-Free System for Large Language Model Inference . Association for Comput-ing Machinery, New York, NY, USA, 862–881. https://doi.org/10.1145/3676641. 3716267 [11] Siyuan He, Zhantong Zhu, Yandong He, and Tianyu Jia. 2025. LP-Spec: Leveraging LPDDR PIM for Efficient LLM Mobile Speculative Inference with Architecture-Dataflow Co-Optimization. arXiv:2508.07227 [cs.AR] https://arxiv. org/abs/2508.07227 [12] Guseul Heo, Sangyeop Lee, Jaehong Cho, Hyunmin Choi, Sanghyeon Lee, Hyungkyu Ham, Gwangsun Kim, Divya Mahajan, and Jongse Park. 2024. Ne-uPIMs: NPU-PIM Heterogeneous Acceleration for Batched LLM Inferencing. In Proceedings of the 29th ACM International Conference on Architectural Sup-port for Programming Languages and Operating Systems, Volume 3 (La Jolla, CA, USA) (ASPLOS ’24) . Association for Computing Machinery, New York, NY, USA, 722–737. https://doi.org/10.1145/3620666.3651380 [13] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024. KVQuant: Towards 10 Million Context Length LLM Inference with KV Cache Quantization. In Ad-vances in Neural Information Processing Systems (NeurIPS) .[14] Weiming Hu, Haoyan Zhang, Cong Guo, Yu Feng, Renyang Guan, Zhendong Hua, Zihan Liu, Yue Guan, Minyi Guo, and Jingwen Leng. 2025. M-ANT: Effi-cient Low-bit Group Quantization for LLMs via Mathematically Adaptive Nu-merical Type. arXiv preprint arXiv:2502.18755 (2025). [15] Mohsen Imani, Saransh Gupta, Yeseong Kim, and Tajana Rosing. 2019. FloatPIM: In-Memory Acceleration of Deep Neural Network Training with High Precision. In 2019 ACM/IEEE 46th Annual International Symposium on Computer Architec-ture (ISCA) . 802–815. [16] Je-Woo Jang, Junyong Oh, Youngbae Kong, Jae-Youn Hong, Sung-Hyuk Cho, Jeongyeol Lee, Hoeseok Yang, and Joon-Sung Yang. 2025. Accelerating Re-trieval Augmented Language Model via PIM and PNM Integration. In Proceed-ings of the 58th IEEE/ACM International Symposium on Microarchitecture (MI-CRO ’25) . Association for Computing Machinery, New York, NY, USA, 246–262. https://doi.org/10.1145/3725843.3756020 [17] JEDEC. 2025. High Bandwidth Memory (HBM4) DRAM. https://www.jedec. org/standards-documents/docs/jesd270-4a [18] Liu Ke, Udit Gupta, Benjamin Youngjae Cho, David Brooks, Vikas Chandra, Utku Diril, Amin Firoozshahian, Kim Hazelwood, Bill Jia, Hsien-Hsin S. Lee, Meng Li, Bert Maher, Dheevatsa Mudigere, Maxim Naumov, Martin Schatz, Mikhail Smelyanskiy, Xiaodong Wang, Brandon Reagen, Carole-Jean Wu, Mark Hemp-stead, and Xuan Zhang. 2020. RecNMP: Accelerating Personalized Recommenda-tion with Near-Memory Processing. In 2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA) . 790–803. https://doi.org/10.1109/ ISCA45697.2020.00070 [19] Liu Ke, Xuan Zhang, Jinin So, Jong-Geon Lee, Shin-Haeng Kang, Sukhan Lee, Songyi Han, YeonGon Cho, Jin Hyun Kim, Yongsuk Kwon, KyungSoo Kim, Jin Jung, Ilkwon Yun, Sung Joo Park, Hyunsun Park, Joonho Song, Jeonghyeon Cho, Kyomin Sohn, Nam Sung Kim, and Hsien-Hsin S. Lee. 2022. Near-Memory Pro-cessing in Action: Accelerating Personalized Recommendation With AxDIMM. 
+
+IEEE Micro 42, 1 (2022), 116–127. https://doi.org/10.1109/MM.2021.3097700 [20] Duckhwan Kim, Jaeha Kung, Sek Chai, Sudhakar Yalamanchili, and Saibal Mukhopadhyay. 2016. Neurocube: A Programmable Digital Neuromorphic Ar-chitecture with High-Density 3D Memory. In 2016 ACM/IEEE 43rd Annual Inter-national Symposium on Computer Architecture (ISCA) . 380–392. https://doi.org/ 10.1109/ISCA.2016.41 [21] Jin Hyun Kim, Yuhwan Ro, Jinin So, Sukhan Lee, Shin-haeng Kang, YeonGon Cho, Hyeonsu Kim, Byeongho Kim, Kyungsoo Kim, Sangsoo Park, Jin-Seong Kim, Sanghoon Cha, Won-Jo Lee, Jin Jung, Jong-Geon Lee, Jieun Lee, JoonHo Song, Seungwon Lee, Jeonghyeon Cho, Jaehoon Yu, and Kyomin Sohn. 2023. Samsung PIM/PNM for Transfmer Based AI : Energy Efficiency on PIM/PNM Cluster. In 2023 IEEE Hot Chips 35 Symposium (HCS) . 1–31. https://doi.org/10. 1109/HCS59251.2023.10254711 [22] Taehyun Kim, Kwanseok Choi, Youngmock Cho, Jaehoon Cho, Hyuk-Jae Lee, and Jaewoong Sim. 2024. MoNDE: Mixture of Near-Data Experts for Large-Scale Sparse Models. arXiv:2405.18832 [cs.LG] https://arxiv.org/abs/2405.18832 [23] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Mem-ory Management for Large Language Model Serving with PagedAttention. In 
+
+Proceedings of the 29th Symposium on Operating Systems Principles (Koblenz, Ger-many) (SOSP ’23) . Association for Computing Machinery, New York, NY, USA, 611–626. https://doi.org/10.1145/3600006.3613165 [24] Youngeun Kwon, Yunjae Lee, and Minsoo Rhu. 2019. TensorDIMM: A Practi-cal Near-Memory Processing Architecture for Embeddings and Tensor Oper-ations in Deep Learning. In Proceedings of the 52nd Annual IEEE/ACM Inter-national Symposium on Microarchitecture (Columbus, OH, USA) (MICRO ’52) .Association for Computing Machinery, New York, NY, USA, 740–753. https: //doi.org/10.1145/3352460.3358284 [25] Yongkee Kwon, Kornijcuk Vladimir, Nahsung Kim, Woojae Shin, Jongsoon Won, Minkyu Lee, Hyunha Joo, Haerang Choi, Guhyun Kim, Byeongju An, Jeongbin Kim, Jaewook Lee, Ilkon Kim, Jaehan Park, Chanwook Park, Yosub Song, Byeongsu Yang, Hyungdeok Lee, Seho Kim, Daehan Kwon, Seongju Lee, Kyuyoung Kim, Sanghoon Oh, Joonhong Park, Gimoon Hong, Dongyoon Ka, Kyudong Hwang, Jeongje Park, Kyeongpil Kang, Jungyeon Kim, Junyeol Jeon, Myeongjun Lee, Minyoung Shin, Minhwan Shin, Jaekyung Cha, Changson Jung, Kijoon Chang, Chunseok Jeong, Euicheol Lim, Il Park, Junhyun Chun, and Sk Hynix. 2022. System Architecture and Software Stack for GDDR6-AiM. In 2022 IEEE Hot Chips 34 Symposium (HCS) . 1–25. https://doi.org/10.1109/HCS55958. 2022.9895629 [26] Young-Cheon Kwon, Suk Han Lee, Jaehoon Lee, Sang-Hyuk Kwon, Je Min Ryu, Jong-Pil Son, O Seongil, Hak-Soo Yu, Haesuk Lee, Soo Young Kim, Youngmin Cho, Jin Guk Kim, Jongyoon Choi, Hyun-Sung Shin, Jin Kim, BengSeng Phuah, HyoungMin Kim, Myeong Jun Song, Ahn Choi, Daeho Kim, SooYoung Kim, Eun-Bong Kim, David Wang, Shinhaeng Kang, Yuhwan Ro, Seungwoo Seo, JoonHo Song, Jaeyoun Youn, Kyomin Sohn, and Nam Sung Kim. 2021. 25.4 A 20nm 6GB Function-In-Memory DRAM, Based on HBM2 with a 1.2TFLOPS Programmable Computing Unit Using Bank-Level Parallelism, for Machine Learning Applica-tions. In 2021 IEEE International Solid-State Circuits Conference (ISSCC) , Vol. 64. 350–352. https://doi.org/10.1109/ISSCC42613.2021.9365862 [27] S. Lee et al. 2022. A 192-Gb 12-High 896-GB/s HBM3 DRAM with a TSV Auto-Calibration Scheme and Machine-Learning-Based Layout Optimization. In Proc. IEEE International Solid-State Circuits Conference (ISSCC) . 176–178. https://doi. org/10.1109/ISSCC42614.2022.9731562 [28] Cong Li, Zhe Zhou, Yang Wang, Fan Yang, Ting Cao, Mao Yang, Yun Liang, and Guangyu Sun. 2024. PIM-DL: Expanding the Applicability of Commod-ity DRAM-PIMs for Deep Learning via Algorithm-System Co-Optimization. In 
+
+Proceedings of the 29th ACM International Conference on Architectural Support 
+
+13 Conference’17, July 2017, Washington, DC, USA Zhuoran Li, Zhuohang Bian, Zihao Huang, Guangyu Sun, Yun Liang, and Youwei Zhuo 
+
+for Programming Languages and Operating Systems, Volume 2 (La Jolla, CA, USA) (ASPLOS ’24) . Association for Computing Machinery, New York, NY, USA, 879–896. https://doi.org/10.1145/3620665.3640376 [29] Cong Li, Zhe Zhou, Size Zheng, Jiaxi Zhang, Yun Liang, and Guangyu Sun. 2024. SpecPIM: Accelerating Speculative Inference on PIM-Enabled System via Architecture-Dataflow Co-Exploration. In Proceedings of the 29th ACM In-ternational Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 (La Jolla, CA, USA) (ASPLOS ’24) . Association for Computing Machinery, New York, NY, USA, 950–965. https://doi.org/10.1145/ 3620666.3651352 [30] Haifeng Liu, Long Zheng, Yu Huang, Chaoqiang Liu, Xiangyu Ye, Jingrui Yuan, Xiaofei Liao, Hai Jin, and Jingling Xue. 2023. Accelerating Personalized Recom-mendation with Cross-level Near-Memory Processing. In Proceedings of the 50th Annual International Symposium on Computer Architecture (Orlando, FL, USA) 
+
+(ISCA ’23) . Association for Computing Machinery, New York, NY, USA, Article 66, 13 pages. https://doi.org/10.1145/3579371.3589101 [31] Liu Liu, Jilan Lin, Zheng Qu, Yufei Ding, and Yuan Xie. 2021. ENMC: Ex-treme Near-Memory Classification via Approximate Screening. In MICRO-54: 54th Annual IEEE/ACM International Symposium on Microarchitecture (Virtual Event, Greece) (MICRO ’21) . Association for Computing Machinery, New York, NY, USA, 1309–1322. https://doi.org/10.1145/3466752.3480090 [32] Lian Liu, Shixin Zhao, Yutian Zhou, Yintao He, Mengdi Wang, Yinhe Han, and Ying Wang. 2026. PAM: Processing Across Memory Hierarchy for Efficient KV-centric LLM Serving System. arXiv:2602.11521 [cs.AR] https://arxiv.org/abs/ 2602.11521 [33] Qingyuan Liu, Liyan Chen, Yanning Yang, Haocheng Wang, Dong Du, Zhigang Mao, Naifeng Jing, Yubin Xia, and Haibo Chen. 2025. L3: DIMM-PIM Inte-grated Architecture and Coordination for Scalable Long-Context LLM Inference. arXiv:2504.17584 [cs.AR] https://arxiv.org/abs/2504.17584 [34] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache. In Proceedings of the 41st International Confer-ence on Machine Learning (ICML) .[35] Haocong Luo, Yahya Can Tuğrul, F. Nisa Bostancı, Ataberk Olgun, A. Giray Yağlıkçı, and Onur Mutlu. 2024. Ramulator 2.0: A Modern, Modular, and Exten-sible DRAM Simulator. IEEE Computer Architecture Letters 23, 1 (2024), 112–116. https://doi.org/10.1109/LCA.2023.3333759 [36] Jaehyun Park, Jaewan Choi, Kwanhee Kyung, Michael Jaemin Kim, Yongsuk Kwon, Nam Sung Kim, and Jung Ho Ahn. 2024. AttAcc! Unleashing the Power of PIM for Batched Transformer-based Generative Model Inference. In Proceed-ings of the 29th ACM International Conference on Architectural Support for Pro-gramming Languages and Operating Systems, Volume 2 (La Jolla, CA, USA) (AS-PLOS ’24) . Association for Computing Machinery, New York, NY, USA, 103–119. https://doi.org/10.1145/3620665.3640422 [37] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yong-wei Wu, Weimin Zheng, and Xinran Xu. 2025. MOONCAKE: trading more stor-age for less computation — a KVCache-centric architecture for serving LLM chat-bot. In Proceedings of the 23rd USENIX Conference on File and Storage Technolo-gies (Santa Clara, CA, USA) (FAST ’25) . USENIX Association, USA, Article 10, 16 pages. [38] Minseok Seo, Xuan Truong Nguyen, Seok Joong Hwang, Yongkee Kwon, Guhyun Kim, Chanwook Park, Ilkon Kim, Jaehan Park, Jeongbin Kim, Woojae Shin, Jongsoon Won, Haerang Choi, Kyuyoung Kim, Daehan Kwon, Chunseok Jeong, Sangheon Lee, Yongseok Choi, Wooseok Byun, Seungcheol Baek, Hyuk-Jae Lee, and John Kim. 2024. IANUS: Integrated Accelerator based on NPU-PIM Unified Memory System. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Vol-ume 3 (La Jolla, CA, USA) (ASPLOS ’24) . Association for Computing Machinery, New York, NY, USA, 545–560. https://doi.org/10.1145/3620666.3651324 [39] Linghao Song, Youwei Zhuo, Xuehai Qian, Hai Li, and Yiran Chen. 2018. GraphR: Accelerating Graph Processing Using ReRAM. In 2018 IEEE International Sym-posium on High Performance Computer Architecture (HPCA) . 531–543. https: //doi.org/10.1109/HPCA.2018.00052 [40] Boyu Tian, Qihang Chen, and Mingyu Gao. 2023. ABNDP: Co-optimizing Data Access and Load Balance in Near-Data Processing. In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 (Vancouver, BC, Canada) (ASP-LOS 2023) . Association for Computing Machinery, New York, NY, USA, 3–17. https://doi.org/10.1145/3582016.3582026 [41] Boyu Tian, Yiwei Li, Li Jiang, Shuangyu Cai, and Mingyu Gao. 2024. NDPBridge: Enabling Cross-Bank Coordination in Near-DRAM-Bank Processing Architec-tures. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Ar-chitecture (ISCA) . 628–643. https://doi.org/10.1109/ISCA59077.2024.00052 [42] Jiahao Wang, Jinbo Han, Xingda Wei, Sijie Shen, Dingyan Zhang, Chenguang Fang, Rong Chen, Wenyuan Yu, and Haibo Chen. 2025. KVCache Cache in the Wild: Characterizing and Optimizing KVCache Cache at a Large Cloud Provider. In Proceedings of the 2025 USENIX Annual Technical Conference . USENIX Associ-ation, 465–480. https://www.usenix.org/conference/atc25/presentation/wang-jiahao [43] Sungmin Yun, Kwanhee Kyung, Juhwan Cho, Jaewan Choi, Jongmin Kim, Byeongho Kim, Sukhan Lee, Kyomin Sohn, and Jung Ho Ahn. 2024. Duplex: A Device for Large Language Models with Mixture of Experts, Grouped Query Attention, and Continuous Batching. arXiv:2409.01141 [cs.AR] https://arxiv. org/abs/2409.01141 [44] Mingxing Zhang, Youwei Zhuo, Chao Wang, Mingyu Gao, Yongwei Wu, Kang Chen, Christos Kozyrakis, and Xuehai Qian. 2018. GraphP: Reducing Com-munication for PIM-Based Graph Processing with Efficient Data Partition. In 
+
+2018 IEEE International Symposium on High Performance Computer Architecture (HPCA) . 544–557. https://doi.org/10.1109/HPCA.2018.00053 [45] Yanqi Zhang, Yuwei Hu, Runyuan Zhao, John C.S. Lui, and Haibo Chen. 2025. DiffKV: Differentiated Memory Management for Large Language Models with Parallel KV Compaction. In Proceedings of the 19th USENIX Symposium on Oper-ating Systems Design and Implementation (OSDI) . USENIX Association. [46] Minxuan Zhou, Weihong Xu, Jaeyoung Kang, and Tajana Rosing. 2022. Tran-sPIM: A Memory-based Acceleration via Software-Hardware Co-Design for Transformer. In 2022 IEEE International Symposium on High-Performance Com-puter Architecture (HPCA) . 1071–1085. https://doi.org/10.1109/HPCA53966.2022. 00082 [47] Zhe Zhou, Cong Li, Xuechao Wei, Xiaoyang Wang, and Guangyu Sun. 2022. GN-Near: Accelerating Full-Batch Training of Graph Neural Networks with Near-Memory Processing. arXiv:2111.00680 [cs.LG] https://arxiv.org/abs/2111.00680 [48] Youwei Zhuo, Jingji Chen, Gengyu Rao, Qinyi Luo, Yanzhi Wang, Hailong Yang, Depei Qian, and Xuehai Qian. 2021. Distributed Graph Processing System and Processing-in-memory Architecture with Precise Loop-carried Dependency Guarantee. ACM Trans. Comput. Syst. 37, 1–4, Article 5 (July 2021), 37 pages. https://doi.org/10.1145/3453681 [49] Youwei Zhuo, Chao Wang, Mingxing Zhang, Rui Wang, Dimin Niu, Yanzhi Wang, and Xuehai Qian. 2019. GraphQ: Scalable PIM-Based Graph Processing. In 
+
+Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microar-chitecture (Columbus, OH, USA) (MICRO ’52) . Association for Computing Ma-chinery, New York, NY, USA, 712–725. https://doi.org/10.1145/3352460.3358256 14
