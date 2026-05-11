@@ -6,38 +6,43 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-10
-- 运行时间：2026-05-10 20:34:08 UTC
+- 最新运行日期：2026-05-11
+- 运行时间：2026-05-11 21:08:27 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：3
-- 速读区：3
+- 本次总论文数：7
+- 精读区：5
+- 速读区：2
 
 ### 今日简报（AI）
-今日聚焦大模型长文本推理瓶颈，深度探讨了 KV Cache 的异构存储优化与内存受限下的稀疏注意力
-- 详情：[/202605/10/README](/202605/10/README)
+今日聚焦 KV Cache 极致压缩与推理加速，深度解析 7 篇显存优化前沿进展。
+重点推荐将稀疏注意力转化为范围搜索的索引技术，以及 RL 训练后的阴影掩码蒸馏压缩方案。
+建议开发者优先研读两篇 8.0 分论文，掌握在大模型对齐与长文本推理中平衡显存与性能的最新策略。
+- 详情：[/202605/11/README](/202605/11/README)
 
 ### 精读区论文标签
-1. [StreamIndex: Memory-Bounded Compressed Sparse Attention via Streaming Top-k](/202605/10/2605.02568v1-streamindex-memory-bounded-compressed-sparse-attention-via-streaming-top-k)  
+1. [Sparse Attention as a Range Searching Problem: Towards an Inference-Efficient Index for KV Cache](/202605/11/2605.06763v1-sparse-attention-as-a-range-searching-problem-towards-an-inference-efficient-index-for-kv-cache)  
    标签：评分：8.0/10、query:llm
-   evidence：通过压缩稀疏注意力实现高效注意力机制
-2. [Tutti: Making SSD-Backed KV Cache Practical for Long-Context LLM Serving](/202605/10/2605.03375v1-tutti-making-ssd-backed-kv-cache-practical-for-long-context-llm-serving)  
+   evidence：使用稀疏注意力的KV缓存推理高效索引
+2. [How to Compress KV Cache in RL Post-Training? Shadow Mask Distillation for Memory-Efficient Alignment](/202605/11/2605.06850v1-how-to-compress-kv-cache-in-rl-post-training-shadow-mask-distillation-for-memory-efficient-alignment)  
    标签：评分：8.0/10、query:kvcache-survey
-   evidence：基于 SSD 的 KV 缓存优化与管理
-3. [Shallow Prefill, Deep Decoding: Efficient Long-Context Inference via Layer-Asymmetric KV Visibility](/202605/10/2605.06105v1-shallow-prefill-deep-decoding-efficient-long-context-inference-via-layer-asymmetric-kv-visibility)  
+   evidence：强化学习后训练中的KV缓存压缩以实现内存高效对齐
+3. [Echo: KV-Cache-Free Associative Recall with Spectral Koopman Operators](/202605/11/2605.06997v1-echo-kv-cache-free-associative-recall-with-spectral-koopman-operators)  
    标签：评分：8.0/10、query:llm
-   evidence：通过 KV 可见性策略实现高效长文本推理
+   evidence：用于长文本LLM推理的无KV缓存架构
+4. [Reformulating KV Cache Eviction Problem for Long-Context LLM Inference](/202605/11/2605.07234v1-reformulating-kv-cache-eviction-problem-for-long-context-llm-inference)  
+   标签：评分：8.0/10、query:llm
+   evidence：长文本大模型推理中的KV缓存剔除
+5. [An Efficient Hybrid Sparse Attention with CPU-GPU Parallelism for Long-Context Inference](/202605/11/2605.07719v1-an-efficient-hybrid-sparse-attention-with-cpu-gpu-parallelism-for-long-context-inference)  
+   标签：评分：8.0/10、query:llm
+   evidence：针对KV缓存的CPU-GPU并行混合稀疏注意力
 
 ### 速读区论文标签
-1. [Decouple and Cache: KV Cache Construction for Streaming Video Understanding](/202605/10/2605.01858v1-decouple-and-cache-kv-cache-construction-for-streaming-video-understanding)  
+1. [CSR: Infinite-Horizon Real-Time Policies with Massive Cached State Representations](/202605/11/2605.07325v1-csr-infinite-horizon-real-time-policies-with-massive-cached-state-representations)  
    标签：评分：7.0/10、query:llm
-   evidence：流式视频理解中的 KV 缓存构建与管理
-2. [TokenStack: A Heterogeneous HBM-PIM Architecture and Runtime for Efficient LLM Inference](/202605/10/2605.05639v1-tokenstack-a-heterogeneous-hbm-pim-architecture-and-runtime-for-efficient-llm-inference)  
-   标签：评分：7.0/10、query:llm-ef
-   evidence：针对高效LLM服务和KV缓存管理的软硬件协同设计
-3. [Quantizing With Randomized Hadamard Transforms: Efficient Heuristic Now Proven](/202605/10/2605.06014v1-quantizing-with-randomized-hadamard-transforms-efficient-heuristic-now-proven)  
-   标签：评分：6.0/10、query:kvcache-survey
-   evidence：KV 缓存压缩中随机哈达玛变换的理论证明
+   evidence：实时策略中的最优KV缓存复用
+2. [Memory-Efficient Looped Transformer: Decoupling Compute from Memory in Looped Language Models](/202605/11/2605.07721v1-memory-efficient-looped-transformer-decoupling-compute-from-memory-in-looped-language-models)  
+   标签：评分：7.0/10、query:llm
+   evidence：解耦计算与KV缓存的内存高效Transformer
 
 
 <div class="dpr-home-promo-card">
