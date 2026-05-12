@@ -1,0 +1,695 @@
+Title: KV-RM: Regularizing KV-Cache Movement for Static-Graph LLM Serving
+
+URL Source: https://arxiv.org/pdf/2605.09735v1
+
+Published Time: Tue, 12 May 2026 02:18:51 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# KV-RM: Regularizing KV-Cache Movement for Static-Graph LLM Serving 
+
+Zhiqing Zhong 
+
+zzhong9@stevens.edu 
+
+Stevens Institute of Technology Hoboken, New Jersey, USA 
+
+Zhijing Ye 
+
+zye25@stevens.edu 
+
+Stevens Institute of Technology Hoboken, New Jersey, USA 
+
+Jian Zhang 
+
+jianz@hkust-gz.edu.cn 
+
+The Hong Kong University of Science and Technology (Guangzhou) Guangzhou, Guangdong, China 
+
+Weijian Zheng 
+
+wzheng@anl.gov 
+
+Argonne National Laboratory Lemont, Illinois, USA 
+
+Bolun Sun 
+
+bolun.sun@kellogg.northwestern.edu 
+
+Northwestern University Evanston, Illinois, USA 
+
+Xiaodong Yu 
+
+xyu38@stevens.edu 
+
+Stevens Institute of Technology Hoboken, New Jersey, USA 
+
+Abstract 
+
+Static-graph LLM decoders provide predictable launches, fixed tensor shapes, and low submission overhead, but on-line decoding exposes highly irregular KV-cache behavior: request lengths differ, EOS events arrive asynchronously, and logical histories fragment over time. Dynamic runtimes recover flexibility through paged KV management and step-level scheduling, while static-graph executors often over-reserve memory and suffer burst-time latency outliers. This paper studies whether much of this variability can be absorbed below a fixed decode interface. We present KV-RM, a runtime design that regularizes KV-cache movement beneath a static-graph LLM decoder. KV-RM stands for KV-cache Movement Regularization. KV-RM decouples logical KV histories from physical storage, tracks active KV state through a block pager, and materializes each decode step through a single committed descriptor. A merge-staged trans-port path coalesces non-contiguous KV mappings into a small number of large transfer groups before a fixed-shape at-tention kernel consumes them. Optional bounded far-history summaries can be enabled under the same interface, but the core design does not depend on them. On a 2 × NVIDIA A100 node, KV-RM improves mixed-length decoding throughput and tail latency relative to a static-graph baseline, reduces reserved KV memory across workload families, and removes severe burst-time latency spikes under production-trace replay. These results suggest that KV-cache movement, rather than kernel shape, can be an effective boundary for recovering runtime flexibility in static-graph LLM serving. 
+
+CCS Concepts: • Computing methodologies → Natural language processing ; • Computer systems organization 
+
+→ Embedded systems .
+
+Keywords: large language model serving, static-graph exe-cution, KV-cache management, descriptor transport, GPU inference 
+
+1 Introduction 
+
+Modern GPU serving stacks still expose a structural ten-sion under irregular online decoding. Under identical dense-attention semantics, static-graph paths preserve fixed-shape replay and low submission overhead, but retain large after-idle process-resident footprints and become fragile under bursty mixed-length arrivals. Dynamic runtimes recover mul-tiplexing headroom through paged KV management and run-time indirection, but pay in fragmented accesses and more irregular host/runtime interaction [19]. Across the GPU characterization points in Figure 1(a), the static-graph path retains a substantially larger after-idle process-resident footprint than a paged runtime, leaving ma-terially less multiplexing headroom. Under production-trace replay, our static-graph baseline also exhibits burst-time la-tency spikes and lower replay-window throughput over the same window [ 27 , 29 ]. Taken together, these observations point to two missing capabilities under static-graph replay: active-set tracking and burst-robust transport. Existing systems usually resolve this tension at one of two boundaries. Dynamic runtimes host flexibility inside the runtime and attention path through block-level paging and stepwise scheduling, thereby avoiding worst-case padding but accepting fragmented accesses and burst-time jitter [ 19 ]. Static-graph executors keep the decode path highly reg-ular, but over-reserve memory, amplify outliers through padding, and bind execution width to the longest request in the batch [ 11 , 28 ]. For deployments that require shape-stable replay, neither boundary is satisfactory. We present KV-RM, a runtime design that regularizes KV-cache movement beneath a static-graph LLM decoder. KV-RM stands for KV-cache Movement Regularization. It keeps the decode kernel shape-stable while relocating flexibility below the kernel through a descriptor transport interface. The interface enforces four invariants: fixed execution shape, single per-step descriptor commit, bounded control-plane overhead, and a small constant number of merged transport groups. KV-RM realizes this interface with a shape-stable 
+
+> 1
+> arXiv:2605.09735v1 [cs.AR] 10 May 2026
+
+sliding decoder, a KV pager that remaps logical history onto page-aligned physical storage, and a merge-staged transport pipeline that turns fragmented mappings into burst-friendly DMA trains. Far-view summarization remains optional: it provides a bounded-budget far-history view under the same interface, but the core KV-RM result does not depend on it. Conceptually, the boundary works because pager-based map-ping edits restore working-set tracking and EOS reclamation without changing executable shape, single-commit updates absorb per-step variability without profile proliferation, and descriptor merging prevents the resulting non-contiguous views from turning into transport jitter. This paper makes the following contributions: 
+
+• GPU-grounded characterization of the static-graph/dynamic gap. Under identical dense-attention semantics on a 2 × A100-40GB PCIe node, we isolate four recurring frictions in mixed-length online decoding: idle memory floor, bandwidth wall, profile fragility, and width penalty. 
+
+• A descriptor transport interface for static-graph decoding. We design KV-RM around fixed-shape ex-ecution, single-commit-per-step descriptor commits, a KV pager with RESERVE/ALIAS/TRIM/FRAME se-mantics, and a merge-staged transport pipeline that preserves bounded control-plane overhead and near-constant DMA complexity. 
+
+• GPU-first end-to-end evidence and dense-core attribution. On a 2 × A100-40GB PCIe node, KV-RM improves mixed-length throughput and p99 relative to a static-graph baseline by 1.25 × and 30%, respec-tively, and reduces reserved KV memory from 36.9 GiB to 21.0–27.0 GiB across workload families. At a representative dense-semantic operating point, Pager+descriptor merging alone explains 73% of the full throughput gain and 72% of the p99 reduction. Under a 60-second Azure replay window on the same node, KV-RM reaches 0.95 ×–0.98 × of the dynamic-runtime baselines (vLLM/SGLang) while tightening p99/p99.9 to 18.8/22.9 ms. We use Graphcore IPUs only as a carry-over validation of the same interface on a stricter executor [11, 16]. The remainder of this paper proceeds as follows. Section 2 provides brief background on online LLM decoding and static-graph execution. Section 3 characterizes the static-graph/dynamic gap on GPUs. Section 4 presents the KV-RM interface and mechanisms. Section 5 evaluates the system on GPUs first and then revisits the same interface on IPUs as a stricter executor. 
+
+2 Background 
+
+Online LLM inference has two phases. A prefill phase pro-cesses the input prompt and instantiates the key-value (KV) cache, while the subsequent decoding phase reuses and ex-tends that cache token by token [ 1 , 29 , 43 ]. This paper focuses on decoding, where steady-state token latency, KV traffic, EOS churn, and mixed-length arrivals interact most strongly with the execution model. Modern serving paths diverge in how they handle this irregularity. Static-graph executors preserve fixed-shape re-play and low submission overhead, but accommodate vari-able sequence lengths through padding or a small number of pre-built profiles, creating idle memory floors, width mis-match, and burst fragility [ 11 , 28 ]. Dynamic runtimes in-stead push flexibility into kernel/runtime indirection and paged KV management, recovering working-set efficiency at the cost of more fragmented accesses and more irregu-lar host/runtime interaction [ 19 ]. Section 3 quantifies this static-graph/dynamic gap on GPUs. Section 4 then presents KV-RM, which keeps the decode kernel shape-stable while relocating flexibility to the logical-view and transport path. 
+
+3 Characterizing the Static-Graph/Dynamic Gap on GPUs 
+
+In this section, we ground the paper’s problem statement on GPUs first. Using production inference stacks on NVIDIA A100 under a common dense-attention setup, we isolate execution-model effects and characterize four recurring fric-tions in irregular online decoding: idle memory floor, band-width wall, profile fragility, and width penalty. Together, these frictions explain why static-graph/dynamic stacks fail to converge under mixed-length serving workloads. 
+
+3.1 Setup and Production-Trace Variability 
+
+To isolate execution-model effects rather than attention se-mantics, we compare a static-graph graph executor and a dynamic paging runtime under identical dense self-attention, identical model weights, and identical prompt/generation regimes. All A100 characterization results in Figure 1 use the same 2 × A100-40GB PCIe node unless noted otherwise. The static-graph path uses contiguous KV arenas and CUDA-graph replay, whereas the dynamic path uses non-contiguous KV regions and stepwise scheduling [ 19 , 28 ]. Figure 1(b) is a separate internal diagnostic sweep: it keeps the operator dense while varying visible width to show the O(T) band-width wall and the effect of a capped working set. It is there-fore diagnostic rather than part of the static-graph/dynamic apples-to-apples comparison. Real replay traces show that this regime is not a corner case. In the Azure windows used later in Section 5.2, output lengths are heavy-tailed, active live width fluctuates sub-stantially over short windows, and EOS completions arrive in bursts rather than at a steady rate. Table 1 summarizes these properties. The point of this summary is not a particu-lar dataset-specific number, but an operational pattern: the             
+
+> 2Metric Summary statistic Result Why it matters
+> Generated length p50 / p90 / p99 tokens 96 / 384 / 1024 heavy tail makes static width choices brittle Active live width mean / CV / max-to-mean 43 / 0.34 / 1.86 ×live width fluctuates within a single replay window EOS completions p50 / p90 / p99 per 100 ms window 1 / 5 / 11 reclaim opportunities arrive in bursts Arrival concentration top-10% windows share of arrivals 31% burstiness amplifies tail sensitivity
+
+Table 1. Production-trace heterogeneity summary. Real replay windows show heavy-tailed output lengths, fluctuat-ing live width, and bursty EOS churn; irregular online decode is therefore a first-class serving regime rather than a corner case. decode working set, reclaim opportunities, and longest-live-sequence pressure vary continuously within the same run. This is precisely the regime in which compile-time shape choices become brittle and in which a new transport bound-ary becomes necessary. 
+
+3.2 Friction I: Idle Memory Floor 
+
+Idle memory floor is the after-idle process-resident footprint retained when no requests are active. On A100, the static-graph path stays near 37.8–49.0 GiB after idle, whereas a paged runtime converges to 24.4–35.6 GiB, leaving about 13 GiB of multiplexing headroom (Figure 1(a)). This moti-vates an explicit KV pager if static-graph execution is to track the active working set rather than a worst-case con-tiguous arena. These values are after-idle process-resident footprints, not the workload-family reserved-KV measure-ments reported later in Figure 5(a). The nearly constant 13.4 GiB gap across 7B/8B/13B is expected: the compared runs use the same node-level reservation envelope, so model weights shift the common floor while the static-graph-versus-paged delta is dominated by the extra contiguous KV arena. 
+
+3.3 Friction II: The Bandwidth Wall 
+
+The bandwidth wall is the 𝑂 (𝑇 ) throughput collapse that appears once per-token KV traffic scales with visible history length 𝑇 . Under dense attention [ 8], for a decoder-only Trans-former with 𝐿 layers, KV head dimension 𝑑 𝑘𝑣 , and element size 𝑏 , the KV traffic per token is approximately: 
+
+KV _bytes /token dense (𝑇 ) ≈ 2 𝐿 𝑑 𝑘𝑣 𝑏 · 𝑇 , 
+
+where the factor of 2 accounts for both keys and values. In our dense-attention sweep, throughput drops roughly inversely with 𝑇 , whereas a capped working set flattens once 
+
+𝑇 > 𝑊 ∗ (Figure 1(b)). The implication is not yet far-view summarization itself; it is that a static-graph path needs an explicit working-set boundary and a transport substrate that can realize that boundary without giving up fixed-shape replay. 7B 8B 13B       
+
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> Process-resident memory (GiB)
+> 37.8 39.7
+> 49.0
+> 24.4 26.3
+> 35.6
+> (a) Idle memory floor
+> Static (TRT-style)
+> Dynamic (vLLM-style)
+> 256 512 1024 1536 2048
+> Context length
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> 1200
+> 1400
+> Throughput (tok/s)
+> (b) Bandwidth wall
+> Dense (internal)
+> Sliding W=256 (internal)
+> Sliding W=512 (internal)
+
+Figure 1. GPU-side structural limits of static-graph decoding. (a) Under identical dense-attention semantics, static-graph execution retains a large idle memory floor compared with a paged runtime. In panel (a), after-idle process-resident foot-print is reported as the aggregate across the two active GPUs of the 2 × A100-40GB PCIe node used by the run. (b) A sepa-rate internal sweep shows the O(T) bandwidth wall under dense attention and how a capped working set flattens the curve once T > W*. This panel is diagnostic rather than part of the static-graph/dynamic apples-to-apples comparison. The last two frictions are best read together: both are symptoms of the same deeper issue, namely that compile-time shape choices become brittle once live width, EOS churn, and arrivals fluctuate within a single run. 
+
+3.4 Friction III: Profile Fragility 
+
+Profile fragility is the brittleness of compile-time static pro-files under mixed-length, EOS-heavy, and jittery traffic. Un-der a mixed-length workload with roughly 50% EOS, the dynamic path remains relatively flat with tighter p95/p99 tails as concurrency rises, whereas the static-graph path collapses much earlier under the same heterogeneity. The implication is that per-step adaptability should be absorbed by logical-view construction and mapping edits, not by re-building or selecting among many static profiles. 
+
+3.5 Friction IV: Width Penalty and Operational Cost 
+
+Width penalty is the cost of binding runtime context vari-ation to a compile-time maximum-length choice. On the same GPU and model, builds optimized for longer contexts perform better once runtime context moves beyond the short-context regime, but a single wide build wastes memory and bandwidth outside the tail regime while multiple builds shift complexity to operations. The implication is that width vari-ability should be decoupled from compile-time shape choices rather than absorbed through profile proliferation. Taken together, these frictions do not argue that static-graph execution is always inferior. They show something narrower but more important for this paper: once online de-code becomes irregular, compile-time shape choices become too brittle to absorb runtime variability by themselves. 
+
+> 3
+
+These frictions also define what a solution must satisfy. It must preserve fixed-shape replay and single-commit-per-step submission, recover working-set tracking and EOS recla-mation, and keep transport from becoming the new source of jitter. Recovering working-set flexibility beneath a fixed-shape decoder introduces a secondary data-plane challenge: once logical views become non-contiguous, the resulting de-scriptor stream can fragment transport even if kernel shape remains fixed. KV-RM therefore treats transport regulariza-tion as part of the interface, not as an afterthought to paging. Section 4 operationalizes these requirements by keeping the decode kernel shape-stable while moving adaptability into paging, logical-view construction, and merge-staged trans-port regularization beneath that kernel. 
+
+4 Design: KV-RM Architecture 
+
+KV-RM centers on a descriptor transport interface: a shape-stable sliding kernel with KV paging and merge-staged trans-port absorbs runtime variability beneath a fixed execution in-terface. Far-view summarization is an independent optional policy layer that can be enabled when the system chooses to trade bandwidth for quality under the same interface. 
+
+4.1 Design Overview and System Invariants 
+
+Section 3 showed that mixed-length online decoding stresses static-graph executors through four recurring frictions: idle memory floor, bandwidth wall, profile fragility, and width penalty. KV-RM narrows this static-graph/dynamic gap with-out reintroducing kernel-level dynamism. Its central idea is to keep the decode kernel shape-stable while relocating run-time variability to a descriptor transport interface beneath that kernel. We enforce four system invariants throughout the design. First, KV-RM preserves a fixed execution shape: the decode kernel is instantiated once with a fixed near-window width 
+
+𝑊 ∗ and does not change shape at runtime. Second, the de-vice consumes exactly single per-step descriptor commit, so the host changes mappings rather than executable structure and does not trigger graph recapture or recompilation after warm-up. Third, KV-RM maintains a bounded control-plane budget: host-side submit and commit overhead must remain a small fraction of per-step latency. Fourth, the transport path aims for near-constant DMA complexity: descriptors are merged into a small number of trains, typically a near-window train and, when needed, one far-view train. Figure 2 summarizes the resulting descriptor-oriented architecture. The control plane maintains abstract state— logical views, page mappings, sharing state, and lookahead placement—using a small set of primitives that modify map-pings only. The data plane follows these committed map-pings: KV pages are materialized through paging and op-tional bounded-budget view construction, and the merge-staged transport path converts the resulting descriptors into              
+
+> Friction Naive response Why insufficient under static-graph replay KV-RM mecha-nism
+> Idle memory floor wider contiguous reservation / delayed reclaim still tracks worst-case footprint pager Bandwidth wall wider static window / naive truncation either 𝑂 (𝑇 )traffic or semantic loss pager + optional bounded-budget view Profile fragility multiple static profiles rebuild + selection complexity; mis-match under jitter pager + one-frame commit Width penalty one wide build wastes bandwidth and memory outside the tail regime logical-view decoupling Transport fragmentation ad hoc coalescing unstable under irregular mappings descriptor merging
+
+Table 2. Why simpler fixes are insufficient under a static-graph interface. 
+
+train-like transfers suitable for a fixed-shape attention ker-nel. Figure 3 makes the interface concrete at step granularity: each decode step is expressed as mapping edits sealed by a single Frame commit before descriptor merging materializes a near-window train and, when needed, one far-view train. The core dense-semantic KV-RM path consists of three mechanisms: the static sliding kernel, the KV pager, and merge-staged transport. In this core path, the system pre-serves dense/sliding semantics while restoring working-set tracking and regularizing transport beneath a fixed kernel interface. Optional bounded-budget policies such as far-view summarization can further limit the kernel-visible working set to 𝑂 (𝑊 ∗ + cap ), but this is not required for the core KV-RM interface. Accordingly, claims about bounded visible width apply only when optional bounded-budget policies are enabled. Un-der dense semantics, the core KV-RM claim is narrower: fixed-shape execution can recover substantial flexibility through pager-based working-set tracking and transport regulariza-tion. Table 2 maps each friction from Section 3 to the simplest plausible response and explains why that response remains insufficient under a static-graph interface. The point is oper-ational: none resolves all four frictions simultaneously while preserving fixed-shape replay, single-commit-per-step sub-mission, and bounded control cost. KV-RM therefore makes a boundary choice. Working-set tracking and transport reg-ularization move beneath the decoder, where runtime vari-ability can be absorbed without reintroducing kernel-level dynamism. 
+
+4.2 Static Sliding Kernel and KV Pager 
+
+The first core mechanism is a shape-stable sliding decoder. The kernel is compiled once with near-window width 𝑊 ∗; at decoding step 𝑡 , it consumes a dense slice of the most recent 
+
+𝑊 ∗ KV states, performs exact attention on that slice, and writes back updated KV entries. Loop bounds, tensor shapes, and launch protocol are unchanged across steps, so the host 
+
+> 4
+
+Figure 2. KV-RM architecture and invariants. The con-trol plane (left) shapes a logical KV view using a fixed-shape near-window decoder, a KV pager, an optional far-view policy, and lookahead placement/prefetch. The merge-staged transport pipeline (right) bridges the control plane and the DMA engine, turning these mappings into coalesced DMA trains that feed the static attention kernel. Across all mechanisms, the kernel shape and per-step interface remain fixed: single per-step descriptor commit, a ≈1–2% command-submission share, average merged DMA size near 128 KiB, and a small constant number of DMA groups per step, typi-cally a near-window train and, when needed, one far-view train in the main operating regime. 
+
+Figure 3. One decode step under the KV-RM contract. Run-time variability is expressed as mapping edits (Alias, Trim, Reserve) and sealed by a single Frame commit via shadow-to-active descriptor swap. Descriptor merging then converts fragmented page descriptors into a small constant number of trains, typically a near-window train and, when needed, one far-view train in the main operating regime, that feed the same fixed-shape kernel-visible interface. What changes per step is the mapping; what stays fixed is the executable shape and per-step interface. still issues one engine call and single per-step descriptor commit. What this static kernel does not provide by itself is working-set tracking. A contiguous static arena follows worst-case reservation rather than the active set, reproduc-ing the idle-memory floor identified in Section 3.2. KV-RM therefore introduces paging below the fixed kernel interface rather than dynamicity inside it. This use of paging differs from systems such as vLLM. There, the attention runtime directly consumes paged, non-contiguous KV through PagedAttention. Here, paging sits beneath a fixed-shape decoder: page mappings and logical views vary at runtime, while the kernel-visible interface remains unchanged. The KV pager virtualizes memory as page-aligned objects and maintains per-session view descriptors that map logical token ranges to physical page blocks. The device always sees the same near-window-shaped kernel, while the host remaps which logical tokens occupy that window at each step. This separation is the key interface boundary: execution shape remains fixed, while the logical KV view becomes movable. The pager exposes four verbs. Reserve allocates page-aligned spans for upcoming writes. Alias shares prefixes across sessions with copy-on-write semantics. Trim reclaims EOS or cold page blocks back to the free pool. Frame batches all view edits for step 𝑡 and commits them as one atomic descriptor update. In effect, prefix sharing, EOS reclamation, and next-step allocation all become mapping edits rather than kernel-structure edits. Frame uses a session-local double buffer with an epoch counter: edits are applied to a shadow descriptor and atom-ically swapped into the active slot. This gives linearizable, idempotent commits under retries, keeps per-step edit com-plexity at 𝑂 (| Δ𝑡 |) , and keeps allocator-side Reserve/Trim operations in 𝑂 (1) via size-partitioned page-block free lists. At each step, the scheduler proposes a lookahead set 𝑆 𝑡 +1
+
+and a cold set 𝐶 𝑡 . The pager applies Alias, performs Re-serve on BLOCKALIGN (𝑆 𝑡 +1), executes Trim on 𝐶 𝑡 ∪ EOS ,and seals the result with one Frame commit. The result is that KV-RM restores working-set tracking and EOS recla-mation through mapping edits rather than kernel-level dy-namism, while preserving the fixed-shape execution inter-face required by the rest of the system. 
+
+4.3 Placement, Prefetch, and Merge-Staged Descriptor Transport 
+
+Paging alone does not solve the transport problem. Even with page-aligned mappings, descriptors can still be emitted as short back-to-back DMAs, reintroducing transport jitter, poor burst utilization, and tail amplification. Placement and prefetch are therefore necessary but not sufficient. Descriptor merging is the impedance matcher between a flexible control plane and a rigid data plane. At step 𝑡 , the scheduler scores lookahead candidates 𝐶 𝑡 +1,selects a bounded set 𝑆 𝑡 +1, aligns it to page blocks, and plans prefetches so that transfer units are burst-friendly rather than descriptor-fragmented. The default scorer uses an EMA of recent aggregated attention utility, but the interface is 
+
+> 5
+
+Algorithm 1: Merge-Staged Descriptor Transport with Uninterrupted Trains                                           
+
+> Input: Merge threshold 𝜏 ≈128 KiB, Max hold 𝛿
+> 1: while Serving () do
+> /* Phase 1: Shift (View Management) */
+> 2: Shift () ⊲advance view; retire EOS /* Phase 2: Stage (Descriptor Prep) */
+> 3: R ← BlockAlign ( S 𝑡 +1)⊲from placement policy
+> 4: Stage (R)⊲prefetch-1 descriptor /* Phase 3: Reduce (Train Merging) */
+> 5: while Bytes (train) <𝜏 and Age (train) <𝛿 do
+> 6: AppendNext (train )⊲greedy merge
+> 7: Issue (train )⊲burst-friendly DMA train
+> 8: Reduce (MergedDMA →Attention )
+
+policy-agnostic: KV-RM requires only that the control plane emit mappings. Algorithm 1 summarizes the merge-staged transport path. 
+
+Shift advances the near window and applies alias/COW/EOS edits from the pager. Stage materializes page descriptors for lookahead and executes prefetch-1. Reduce then greedily merges adjacent descriptors into trains until either the size threshold 𝜏 ≈ 128 KiB or the age cutoff 𝛿 is reached, and issues a near-window train and, when needed, one far-view train to the fixed-shape kernel. The 𝛿 guard is chosen within existing compute slack, so staged descriptors are never held long enough to extend the steady-state critical path. The key point is that Placement, prefetch, and descriptor merging operate only on descriptors and mappings. They do not change loop bounds, tensor shapes, or the single-commit-per-step interface. KV-RM therefore regularizes transport beneath a fixed-shape kernel rather than recovering flexibil-ity by reintroducing kernel-level dynamism. 
+
+4.4 Far-View Summarization: Optional Bounded-Budget View Policy 
+
+Far-view summarization is not required for KV-RM’s core interface. It is an optional view policy that exposes a bounded far-history summary under a fixed KV budget when the system chooses to trade bandwidth for quality. For each active sequence, KV-RM always retains an exact dense near window [𝑏..𝑡 ] of width 𝑊 ∗, where 𝑏 = 𝑡 −𝑊 ∗ + 1.far-view summarization then summarizes the distant history 
+
+[0..𝑏 − 1] by selecting up to cap representative far blocks and concatenating their summaries with the near window, so the kernel still sees a fixed (𝑊 ∗ + cap ) × 𝑑 𝑘𝑣 input width. The representative block set can reuse placement scores, such as EMA attention utility, but the policy remains a logical-view choice rather than a kernel rewrite. Within each selected block 𝑗 of size sv _chunk , KV-RM uses uniform aggregation to construct summarized K/V representatives. This keeps per-block construction cost 𝑂 (1), avoids extra scoring kernels, and preserves stable control-plane overhead. Choosing moderately coarse chunks keeps allocator be-havior stable; in practice, sv _chunk ≥ 64 balances semantic fidelity and allocator headroom. far-view edits are commit-ted through the same pager/frame path, so kernel shape and single-commit-per-step invariants remain unchanged. The core claims of KV-RM do not depend on far-view sum-marization. Pager plus descriptor merging already address idle memory floors, transport fragmentation, and interface-preserving dynamicity under dense semantics. Far-view sum-marization is therefore an optional bandwidth–quality knob, not the core mechanism enabling the descriptor transport interface. 
+
+5 Evaluation 
+
+We present the results in this order so that the main GPU evidence appears before bounded-budget and portability results. Our evaluation asks seven questions: 
+
+Q1. Do production traces on GPUs exhibit the heterogene-ity that motivates a new boundary, and is KV-RM competitive against strong dynamic baselines in that regime? 
+
+Q2. In predictable homogeneous regimes where static-graph execution should already be strong, does KV-RM stay near the static-graph frontier? 
+
+Q3. Are KV-RM’s core gains present even without far-view summarization? 
+
+Q4. Does KV-RM remain stable under long contexts and tight KV budgets? 
+
+Q5. Does the optional far-view summarization policy pre-serve useful long-context information under bounded budgets, including representative downstream tasks? 
+
+Q6. Do the single-commit-per-step interface and the trans-port path remain stable under higher concurrency and harsher fragmentation? 
+
+Q7. Does the same interface carry over to stricter execu-tors? We answer these questions in the same order so that GPU evidence precedes IPU portability evidence, dense-equivalent evidence precedes bounded-budget evidence, and mainline results precede boundary stress checks. 
+
+5.1 Experimental Setup and Fairness 
+
+GPU-first setup. Unless otherwise noted, the main A100 evaluation uses a 2 × A100-40GB PCIe node and Qwen2.5-7B-Instruct in BF16, with BF16 KV cache. All A100 results in Sections 5.2–5.7 use this same node configuration. We use Graphcore Bow-2000 only in Section 5.8 as a carry-over validation on a stricter static executor. 
+
+System classes and baselines. We compare (i) a static-graph baseline, implemented with a TensorRT-LLM-derived internal fixed-shape executor from the 0.11.x line [ 28 ] with CUDA Graph replay and no kernel-level paging; (ii) KV-RM on the same executor; and (iii) strong dynamic baselines drawn from the public vLLM 0.6.x [ 19 ] and SGLang 0.3.x [ 42 ]release lines with paged-KV serving, continuous batching,                 
+
+> 6Item Setting
+> Primary platform 2×A100-40GB PCIe node Model Qwen2.5-7B-Instruct, BF16 weights, BF16 KV cache Static-graph baseline TensorRT-LLM-derived internal fixed-shape executor from the 0.11.x line; CUDA Graph enabled; no kernel-level paging Strong dynamic baselines vLLM 0.6.x and SGLang 0.3.x public release lines; paged-KV enabled; continuous batching enabled; vLLM prefix cache on; SGLang radix/prefix reuse on; identical weights and decoding parameters Main mixed-length workload trace-derived mixed-length decode; prompt lengths fol-low the replay-derived empirical mixture; generation p50/p90/p99 ≈96/384/1024; EOS-heavy; fixed seed; main concurrency B=64 Trace replay AzureLLMInferenceDataset2023; contiguous 60-s highest-arrival window after preprocessing Budget definitions full-budget = default reserved-KV budget at the main 2 ×
+> A100-40GB PCIe node operating point; tight-20% = 0.8 ×
+> full-budget under the same kernel shape, workload, and scheduler Default far-view summarization setting
+> 𝑊 ∗=512 , cap=64, sv_chunk=128 Metric definitions throughput = aggregate emitted tok/s across the 2-GPU run; p99/p99.9 over steady-state decode steps; reserved KV = aggregate device-reserved KV bytes across the 2-GPU run; active KV = aggregate live mapped KV bytes across the 2-GPU run Invariant audit no graph recapture after warm-up; a single committed descriptor per step; submit share = (host submit + frame commit) / per-step wall time; DMA statistics measured after descriptor merging
+
+Table 3. Experimental setup and fairness summary for Sec-tion 5. All A100 end-to-end results use the same 2 × A100-40GB PCIe node, the same model weights, and the same decoding parameters; dense-equivalent comparisons keep attention semantics fixed. and prefix reuse enabled where available. All systems use identical model weights and decoding parameters, and exact runtime flags are logged for all runs. This static-graph base-line is used to pin the fixed-shape replay interface explicitly; KV-RM runs on the same executor and leaves the device-side attention kernel and its compiled shape unchanged. 
+
+Fairness controls and metrics. Across the characteri-zation and dense-equivalent experiments, we keep model weights and dense-attention semantics fixed, so differences are attributable to execution model, working-set manage-ment, and transport behavior rather than to a different atten-tion operator. We report throughput as aggregate emitted tok/s across the 2-GPU run. Unless otherwise noted, p99 and p99.9 are computed over steady-state decode steps; reserved and active KV memory denote aggregate device-reserved and live-mapped bytes across the same 2-GPU run; and command-submission share denotes (host submit + frame commit) / per-step wall time. Transport-level statistics, in-cluding DMA groups per step and average DMA size, are measured after descriptor merging. 
+
+Invariant audit. Across A100 end-to-end runs, KV-RM preserves fixed-shape replay with no graph recapture after warm-up, keeps command-submission share in the low sin-gle digits, around 1–2% at the main operating point and only modestly higher under boundary stress, and commits exactly single per-step descriptor commit. 
+
+Implementation scope. KV-RM modifies the host/runtime control plane, KV-page metadata, descriptor-commit materialization, and the descriptor staging path, but leaves the device-side attention kernel and its compiled shape unchanged. After warm-up, all steady-state A100 runs execute without graph recapture or recompilation and commit exactly single per-step descriptor commit. The current implementation adds roughly 5 KLoC of host/runtime code across pager, frame materialization, descriptor staging, and supporting runtime infrastructure. 
+
+5.2 Main GPU Result 
+
+We first evaluate a 60-second AzureLLMInference-Dataset2023 replay window selected as the highest-arrival contiguous segment after preprocessing. Figure 4(a–b) shows the hardest operational regime: burst clusters, mixed-length heterogeneity, and tight tail sensitivity. The static-graph baseline shows head-of-line spikes above 75 ms, averages 420 tok/s, and reaches 82/110 ms p99/p99.9. KV-RM reaches 552 tok/s while tightening p99/p99.9 to 18.8/22.9 ms. Relative to the strong dynamic baselines, KV-RM remains close in throughput to vLLM and SGLang (565 and 578 tok/s, respectively) while delivering the tightest tail latency among the compared systems. This throughput-versus-tail split is consistent with KV-RM’s interface decomposition: relative to the dynamic-runtime baselines, KV-RM trades a small amount of throughput headroom for a more regular control and transport path under bursty replay. Figure 4(c–d) shows the same pattern under controlled mixed-length serving. KV-RM reaches 1200 tok/s and 24.5 ms p99, compared with 960 tok/s and 35.0 ms for the static-graph baseline, 1260 tok/s and 29.0 ms for vLLM, and 1235 tok/s and 31.0 ms for SGLang. Relative to static-graph, this corresponds to 1.25 × higher throughput and a 30% p99 re-duction. Relative to the dynamic-runtime baselines, KV-RM reaches 0.95 × throughput while reducing p99 to 0.84 × of the frontier tail. Together, these results establish the main GPU result: KV-RM removes the >75 ms replay-window spikes observed under the static-graph baseline and stays close to the dynamic-runtime throughput frontier under both replay and controlled mixed-length regimes. 
+
+5.3 Predictable-Regime Sanity 
+
+For balance, we also evaluate a predictable homogeneous regime in which requests have a narrow length spread, low EOS churn, and steady batch width. This is where static-graph execution should already be strongest or near-strongest. Table 4 confirms exactly that pattern: static-graph leads, and KV-RM remains within a small margin of the static-graph throughput/p99 frontier. This sanity check bounds the claim more precisely. In static-friendly regimes, conventional static-graph execution remains an excellent fit. KV-RM matters when online decode becomes irregular and the missing flexibility must be recovered           
+
+> 7p99 p99.9
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> Latency (ms)
+> 82
+> 110
+> 28
+> 41
+> 25
+> 38
+> 18.8 22.9
+> (a) Trace Replay: Tail Latency
+> Strict-static
+> vLLM
+> SGLang
+> KV-RM
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> 600
+> 700
+> Throughput (tok/s)
+> 420
+> 565 578 552
+> (b) Trace Replay: Throughput
+> Strict-static
+> vLLM
+> SGLang
+> KV-RM
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> 1200
+> 1400
+> Throughput (tok/s)
+> 960
+> 1260 1235 1200
+> (c) Mixed-length: Throughput
+> Strict-static
+> vLLM
+> SGLang
+> KV-RM
+> 0
+> 10
+> 20
+> 30
+> 40
+> p99 Latency (ms)  35
+> 29 31
+> 24.5
+> (d) Mixed-length: p99 Latency
+> Strict-static vLLM SGLang KV-RM
+
+Figure 4. GPU main end-to-end behavior on a 2 × A100-40GB PCIe node. (a,b) Under a 60-second high-load Azure replay window, KV-RM approaches the dynamic-runtime baselines while tightening replay-window p99/p99.9 latency relative to the static-graph baseline. (c,d) Under controlled mixed-length serving, KV-RM improves throughput and p99 relative to the static-graph baseline and remains close to the dynamic-runtime baselines. beneath a fixed-shape kernel through paging and transport regularization. 
+
+5.4 Core-Path Attribution Under Dense Semantics 
+
+To separate KV-RM’s core systems effect from the optional bounded-budget policy, we evaluate four cumulative con-figurations at the same 2 × A100-40GB PCIe node mixed-length operating point: the static-graph baseline, +Pager, +Pager+descriptor merging, and full KV-RM. Rows 1–3 pre-serve dense semantics; only the last row enables far-view summarization. Table 5 reports throughput, p99 latency, re-served KV memory, and DMA groups per step. Relative to the static-graph baseline, the dense-semantic core path (+Pager+descriptor merging) already recovers 175 of the full 240 tok/s throughput gain (73%), 7.6 of the full 10.5 ms p99 reduction (72%), and 10.6 of the full 13.1 GiB reserved KV memory reduction (81%). It also reduces DMA groups from 3.8 to 2.1, accounting for 94% of the transport regularization visible in the full system. The attribution is structurally clean. Pager captures most of the reserved KV memory benefit, reducing reserved KV memory from 36.9 GiB to 26.8 GiB, but yields only modest throughput and tail improvement because transport remains fragmented. Descriptor merging leaves memory nearly un-changed yet reduces DMA groups per step from 3.6 to 2.1 and recovers most of the remaining p99 improvement, showing that the core gain lies in transport regularization under the same fixed-shape interface. These numbers locate the core gain in pager-based working-set tracking plus transport reg-ularization under dense semantics; far-view summarization contributes the final bounded-budget increment. Figure 6(a–b) gives the endpoint transport audit at the same operating point: DMA groups fall from 3.8 to 2.0 while average DMA size rises from 46 KiB to about 132 KiB, close to the configured ≈128 KiB merge threshold, with modest overshoot from greedy train merging, without changing kernel shape or reintroducing extra descriptor commits. This attribution also clarifies KV-RM’s relationship to paged-runtime systems. If KV-RM were merely dynamic-style paging transplanted into a static-graph stack, pager-only should explain most of the end-to-end gain. It does not: paging primarily restores working-set tracking, while descriptor merging is required to recover transport regular-ity and burst-tail stability under the single-commit-per-step interface. This decomposition also shows that KV-RM’s reserved KV memory benefit is not solely a prefix-sharing artifact. Recy-cling remains material across uniform and mixed workloads, while aliasing becomes first-order only when shared-prefix reuse is actually present. The remaining savings come from the paging substrate itself, i.e., allowing reserved bytes to track the active working set rather than a worst-case con-tiguous arena. 
+
+5.5 Long-Context Scaling Under Tight KV Budgets 
+
+We then test context growth and budget pressure. Figure 5(a) reports a workload-family reserved KV memory measure-ment at the main 2 × A100-40GB PCIe node operating point, rather than the after-idle process-resident footprint charac-terization from Section 3.2. Here, full-budget denotes the default reserved-KV budget at the main 2 × A100-40GB PCIe node operating point, and tight-20% denotes 0.8 × of that budget under the same kernel shape, workload, and sched-uler. The rigid static-graph baseline remains at 36.9 GiB of reserved KV memory across R1–R3, whereas KV-RM tracks the active set more closely at 27.0 GiB (R1), 23.8 GiB (R2), and 21.0 GiB (R3). This confirms that the paged KV substrate re-stores working-set tracking without relaxing the fixed-shape interface. Figure 5(b–d) then reports 8k–32k long-context behavior under fixed-shape execution. Under full budgets, KV-RM keeps throughput nearly flat, with less than 10% degrada-tion from 8k to 32k; under tight-20% budgets, throughput remains within about 15% of the 8k point. Tail behavior re-mains controlled as well: p99 grows by about 12% under full budgets and about 19% under tight-20% budgets, while re-served KV memory under tight-20% at 32k remains around 16.2 GiB. The bounded-budget path therefore keeps visible width and transport regularity under control even as to-tal context length grows. Across the same 8k–32k sweep, 
+
+> 8
+
+System Throughput (tok/s) p99 latency (ms) Interpretation 
+
+Static-graph 1320 21.0 expected best or near-best in predictable regime vLLM 1265 24.0 dynamic overhead remains visible SGLang 1248 24.6 similar to vLLM KV-RM 1295 21.6 stays close to static-graph frontier 
+
+Table 4. Predictable-regime sanity check. This table acknowledges static-friendly regimes where static-graph execution is expected to be strongest or near-strongest.                       
+
+> Configuration Semantics Throughput (tok/s) p99 (ms) Reserved KV (GiB) DMA groups /step
+> Static-graph baseline Dense 960 35.0 36.9 3.8 + Pager Dense 1045 32.1 26.8 3.6
+> + Pager + descriptor merging (core path) Dense 1135 27.4 26.3 2.1
+> — optional bounded-budget extension —
+> + Pager + descriptor merging + far-view summarization Bounded-budget 1200 24.5 23.8 2.0
+
+Table 5. Core-path attribution at a representative 2 × A100-40GB PCIe node mixed-length operating point. Rows 1–3 preserve dense semantics; the last row adds the optional bounded-budget policy. Pager contributes most of the reserved KV memory reduction, descriptor merging contributes most of the transport/tail improvement, and far-view summarization provides the final operating-point increment. the control interface remains bounded as well: command-submission share stays below 1.9%, frame-commit cost re-mains around 79 us/step, and transport regularity remains stable at about 2.1 DMA groups per step with average merged DMA size above 110 KiB under both full-budget and tight-20% settings. All control-path statistics in this paragraph are averaged over steady-state decode steps of the same 2-GPU run. Command-submission share counts host submit plus frame commit divided by per-step wall time, frame-commit cost is measured per committed step, and average DMA size is computed after descriptor merging. 
+
+5.6 Bounded-Budget Quality Envelope 
+
+Protocol. For WikiText-103 [ 26 ], we report perplexity using the same model and tokenizer as in the systems experiments. For Passkey and NIAH [ 15 ], we evaluate 200 prompts per {context length, cap} setting with answer placement swept over the context. The default far-view summarization con-figuration uses 𝑊 ∗ = 512 , cap=64, and sv_chunk=128. For Qasper [ 9 ] and HotpotQA [ 37 ], each example is packed into a single long-context input, decoded with the same infer-ence settings as the main system, and scored with the task-standard F1 metric. Quality under bounded budgets should be read as an explicit envelope rather than as a single scalar. On WikiText-103, the default far-view summarization setting remains close to dense perplexity (6.85 versus 6.82), whereas naive near-only truncation degrades sharply. Figure 6(c–d) reports direct retrieval correctness. At cap=64, NIAH remains above 95% and Passkey reaches roughly 94–95%; at cap=128, NIAH rises above 98% and Passkey reaches roughly 98–99%. The same monotonic trend appears at both 32k and 64k contexts. far-view sum-marization therefore exposes a visible bandwidth–quality knob rather than hiding a semantic change. Retrieval probes are only a first check, so Table 6 adds two representative long-context QA tasks. The trend matches the retrieval results: cap=64 stays close to dense, cap=128 is closer still, and naive near-only truncation degrades more substantially. We use Table 6 only to bound the downstream envelope, showing that the bounded-budget quality fron-tier remains visible beyond proxy perplexity and synthetic retrieval.          
+
+> Task cap=64 cap=128 Near-only
+> Single-doc QA (Qasper) 0.96 0.99 0.88 Multi-hop QA (HotpotQA) 0.97 0.99 0.90
+
+Table 6. Representative long-context task envelope. All scores are normalized to the dense configuration on the same task. 
+
+5.7 Boundary Stress 
+
+Beyond the main 2 × A100-40GB PCIe node operating point, we stress two failure modes most likely to challenge the interface: higher concurrency, which could stress the single-commit-per-step invariant, and harsher view fragmentation,         
+
+> 9R1
+> (Uniform)
+> R2
+> (Mixed)
+> R3
+> (Shared)
+> 0
+> 10
+> 20
+> 30
+> 40
+> Reserved memory (GiB)  36.9 36.9 36.9
+> 27.0
+> 23.8
+> 21.0
+> (a) Memory across Workloads
+> 8K 16K 32K
+> Context Length
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> 1200
+> Throughput (tok/s)
+> (b) Long-context Throughput
+> 8K 16K 32K
+> Context Length
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> p99 Latency (ms)
+> (c) Long-context p99 Latency
+> 8K 16K 32K
+> Context Length
+> 0
+> 10
+> 20
+> 30
+> 40
+> Reserved memory (GiB)
+> (d) Long-context Memory
+> Strict-static
+> vLLM
+> SGLang
+> KV-RM
+> Full Budget
+> Tight-20% Budget
+
+Figure 5. Working-set tracking and long-context behav-ior on a 2 × A100-40GB PCIe node. Panel (a) reports aggre-gate reserved KV memory across the same 2-GPU run and is distinct from the after-idle process-resident footprint shown in Figure 1(a). Across workload families, KV-RM’s paged KV substrate tracks the active working set more closely than the rigid static-graph baseline. Across 8k–32k contexts, KV-RM preserves stable throughput and tail behavior together with a bounded control/transport envelope under both full-budget and tight-20% settings. which could stress descriptor merging’s near-constant DMA complexity. These are boundary checks rather than new headline comparisons. 
+
+5.7.1 High-concurrency interface stress. We sweep batch concurrency from 16 to 128 under the same mixed-length decode setup and report throughput, p99, command-submission share, and frame-commit cost. Across the B=16–128 sweep, no multi-frame fallbacks were observed over 6000 post-warmup decode steps; every measured step used exactly one committed descriptor, and no recompiles occurred. Command-submission share remains in the low single digits and frame-commit cost stays well below the steady-state step budget. Performance also degrades gracefully: KV-RM preserves its advantage over the static-graph baseline as concurrency rises, without any sign that the control path becomes the new bottleneck. 
+
+5.7.2 Fragmentation stress for descriptor merging. 
+
+A second natural concern is whether descriptor merging regularizes transport only in benign cases. We therefore con-struct a synthetic fragmentation sweep with four regimes: contiguous, mildly fragmented, strongly fragmented, and adversarial-random. For each regime, Figure 7(d–f) reports DMA groups per step, average DMA size, and Strict-static KV-RM 
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> DMA groups / step  3.8
+> 2.0
+
+(a) DMA groups / step  
+
+> Strict-static KV-RM
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> 140
+> Average DMA size (KiB)
+> 46.0
+> 132.0
+
+(b) Average DMA size   
+
+> 16 64 128
+> Cap
+> 0.70
+> 0.75
+> 0.80
+> 0.85
+> 0.90
+> 0.95
+> 1.00
+> 1.05
+> Success Rate
+
+(c) Passkey Success Rate   
+
+> 32K Context
+> 64K Context
+> 16 64 128
+> Cap
+> 0.70
+> 0.75
+> 0.80
+> 0.85
+> 0.90
+> 0.95
+> 1.00
+> 1.05
+> Success Rate
+
+(d) NIAH Success Rate 
+
+> 32K Context
+> 64K Context
+
+Figure 6. Mechanism audit and bounded-budget qual-ity envelope. (a–b) At the representative 2 × A100-40GB PCIe node mixed-length operating point, KV-RM reduces DMA groups per step from 3.8 to 2.0 and raises average merged DMA size from 46 KiB to about 132 KiB, indicat-ing that fragmented descriptors are regularized into larger trains while preserving the static-graph interface. (c–d) The optional far-view summarization policy exposes an explicit bandwidth–quality knob across 32k and 64k contexts. 16 32 64 128                       
+
+> Concurrency B
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> 1200
+> 1400
+> Throughput (tok/s)
+> (a) Throughput vs Concurrency
+> 16 32 64 128
+> Concurrency B
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> p99 Latency (ms)
+> (b) p99 vs Concurrency
+> 16 32 64 128
+> Concurrency B
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> Submit share (%)
+> (c) KV-RM Overheads
+> Contig. Mild Strong Adv.
+> Fragmentation Regime
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Groups / step
+> 2.4
+> 3.1
+> 4.5
+> 5.7
+> 2.0 2.2 2.5
+> 2.9
+> (d) DMA groups / step
+> Contig. Mild Strong Adv.
+> Fragmentation Regime
+> 0
+> 25
+> 50
+> 75
+> 100
+> 125
+> 150
+> Size (KiB)  112
+> 79
+> 54
+> 41
+> 132
+> 118
+> 102
+> 88
+> (e) Average DMA size
+> Contig. Mild Strong Adv.
+> Fragmentation Regime
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> p99 Latency (ms)
+> 26.8
+> 31.2
+> 38.9
+> 50.7
+> 24.5 25.9 28.7
+> 33.4
+> (f) p99 Latency under Fragmentation
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Frame-commit cost (  s)
+> Baseline (Strict-static / No-SSR) KV-RM (+SSR) Submit Share (Panel c) Commit Cost (Panel c)
+
+Figure 7. Boundary stress at the main 2 × A100-40GB PCIe node operating point. (a–c) Under a concurrency sweep, KV-RM preserves a single committed descriptor per step, bounded control-plane cost, and competitive through-put/tail behavior as concurrency rises. In panel (c), submit share denotes host submit plus frame commit divided by per-step wall time, and commit cost is measured per commit-ted step. (d–f) Under harsher view fragmentation, descriptor merging degrades gracefully: DMA complexity and latency rise, but substantially less than without descriptor merging. p99 latency with and without descriptor merging. These synthetic regimes should be read for relative fragmentation 
+
+10 trends rather than as absolute reproductions of the Table 5 end-to-end operating point. Descriptor merging therefore degrades gracefully under harsher fragmentation. Even in the adversarial regime, DMA complexity stays far below the path without descriptor merging, average transfer size remains substantially larger, and p99 rises more slowly, so transport does not collapse into a cascade of short DMAs. 
+
+5.8 Carry-Over to a Stricter Static Executor 
+
+Finally, we ask a narrower carry-over question: does the same interface remain beneficial on a stricter static execu-tor? On Graphcore Bow-2000, relative to the IPU baseline, KV-RM improves normalized throughput by 1.14 × and re-duces normalized p99 latency to 0.78 × while preserving a static graph schedule, zero recompiles after warm-up, and command-submission share near 1.3% [16].     
+
+> Metric Relative to IPU baseline
+> Throughput 1.14 ×
+> p99 latency 0.78 ×
+> Interface invariants ~1.3% submit share, 0 recompiles
+
+Table 7. Brief carry-over summary on a stricter static executor. Values are normalized relative to the IPU baseline. We do not use this result to establish the paper’s main claim. Its role is narrower: it shows that the same interface-level mechanisms continue to help even when the executor is less tolerant of kernel-level dynamism than the GPU stack. 
+
+6 Related Work 
+
+We organize prior work by where flexibility is introduced into the serving stack: inside the runtime and scheduler, in-side the KV memory system, inside the attention/view policy, or inside the compiler/runtime interface. KV-RM is closest in spirit to efforts that preserve deterministic execution while accommodating irregular workloads, but its contribution is neither a new compiler nor a new attention operator. Instead, it identifies a descriptor transport interface for static-graph decoding. 
+
+Dynamic Serving Runtimes. Modern GPU serving sys-tems improve utilization through continuous batching, paged KV, prefix caching, and structured step-level scheduling [ 2 ,19 , 40 , 42 ]. Recent runtime lines also emphasize preemp-tive/statistical multiplexing and dynamic rescheduling un-der heterogeneous arrivals [ 13 , 21 , 33 , 35 ]. Prefill-decode disaggregation systems such as DistServe and Splitwise opti-mize phase placement and cluster-level interference [ 29 , 43 ]. Systems such as vLLM host flexibility inside the runtime itself through PagedAttention and block-level memory man-agement, while systems such as SGLang combine paged attention, prefix reuse, and structured runtime scheduling. KV-RM is orthogonal: it targets decode-step flexibility within a single static-graph execution path. KV-RM starts from a dif-ferent constraint: the decode kernel must stay shape-stable. Our contribution is therefore not paged KV by itself, but a descriptor transport interface that embeds paging beneath a fixed-shape decoder and regularizes the resulting mappings into bounded DMA trains. 
+
+KV Cache and Memory Systems. Prior KV systems study tiered storage, remote/local cache hierarchies, and disaggre-gated serving paths [ 5 , 6, 23 , 31 , 38 ]. These systems primarily target capacity, placement, and data movement across mem-ory levels. LMCache-style systems optimize where KV state is stored and transferred across engines and memory tiers. Feature support for KV reuse or offloading is not yet a de-scriptor transport interface: KV-RM’s claim is about how variability is committed and transported under one fixed-shape decode step. KV-RM instead studies how KV state is exposed to a fixed-shape decoder at decode-step granular-ity. Our focus is narrower and more interface-driven: we study how to preserve fixed-shape decoding while restor-ing working-set tracking, EOS reclamation, and predictable transfers under static-graph executors. In that sense, KV-RM is less a new cache hierarchy than a transport boundary for how KV bytes are exposed to a rigid decoder. 
+
+Attention, Sparsity, and Compression. IO-aware atten-tion kernels, sparse selection, and compression methods re-duce long-context bandwidth pressure [ 3 , 7, 8 , 10 , 12 , 20 ,22 , 24 , 25 , 34 , 36 , 39 , 41 ]. Fixed-budget and layer-wise KV compression lines such as Scissorhands and PyramidKV are especially relevant to bounded-budget view policies. These works typically modify the operator itself or the visible his-tory in order to reduce KV traffic. KV-RM is orthogonal in its core path: pager plus descriptor merging already address idle memory floors and transport fragmentation under dense semantics. Our far-view module is not the paper’s main contribution; it is an optional bounded-budget policy that demonstrates how the same descriptor transport interface can host approximate far-history views. 
+
+Compiler-Driven Static Architectures. Accelerator stacks increasingly favor compiler-driven determinism, including TPU-like systems and static software stacks such as Poplar, TVM, and XLA [ 4, 11 , 14 , 17 , 18 , 28 , 30 , 32 ]. These environments benefit from fixed-shape replay, stable schedules, and low control overhead, but are less forgiving of runtime irregularity. We do not propose a new compiler or graph optimizer. Instead, we show how runtime flexibility can be recovered on a static-graph decode path through a descriptor transport interface that leaves the kernel and compiled shape intact. Across these lines of work, KV-RM’s contribution is a boundary choice: it places adaptability beneath a shape-stable decode kernel, rather than primarily inside the kernel, 
+
+> 11
+
+inside the compiler, or inside an approximate attention oper-ator. These distinctions also clarify what KV-RM is not. It is not a new KV cache hierarchy whose main question is where state lives across tiers, nor is it primarily an operator-level sparsity or compression method that changes the visible his-tory inside attention. Instead, KV-RM studies how a logically dynamic KV view is committed and transported to a fixed-shape decoder at decode-step granularity. In that sense, its contribution is best understood as a transport boundary for static-graph decoding. 
+
+7 Limitations 
+
+KV-RM targets executors that benefit from shape-stable de-code kernels; it is not a claim that all GPU serving should forgo kernel-level dynamism. If a dynamic runtime already meets a deployment’s throughput, tail, and memory targets, the value of a descriptor transport interface is correspond-ingly smaller. Our current evaluation focuses on single-node decoding and bounded-view interfaces. We do not study multi-node disaggregation, remote KV fabrics, cross-device placement, or recovery/fault-tolerance mechanisms in this paper. Those settings may introduce coordination and transport effects beyond the single-commit-per-step interface studied here. Far-view summarization is optional and intentionally exposed as a workload-dependent quality trade-off rather than hidden inside the core system claim. The dense-semantic path already provides the main system result; bounded-budget policies simply extend the same interface to a different bandwidth–quality operating point. Our goal is therefore not to replace all dynamic serving stacks, but to make static-graph decoding meaningfully more viable on irregular online workloads. 
+
+8 Conclusion 
+
+Online LLM decoding on modern accelerators still exposes a practical static-graph/dynamic split: dynamic runtimes recover flexibility through runtime indirection and paged memory management, while static-graph paths preserve de-terministic execution but remain fragile under irregular on-line workloads. For executors that must keep decode kernels shape-stable, our results suggest that much of the missing flexibility can be recovered below the kernel through a de-scriptor transport interface. KV-RM instantiates this interface with a fixed-shape sliding decoder, a KV pager that restores working-set tracking through mapping edits, and a merge-staged transport pipeline that regularizes fragmented mappings into a small number of burst-friendly DMA trains. Optional bounded-budget policies such as far-view summarization can be hosted by the same interface, but the main KV-RM result does not depend on them. On the workloads studied here, KV-RM improves mixed-length throughput and tail latency over a static-graph base-line, reduces reserved KV memory, and removes the >75 ms replay-window spikes observed under static-graph trace replay while preserving single per-step descriptor commit, bounded control-plane overhead, and near-constant DMA complexity. The IPU results serve only as a brief carry-over validation that the same interface remains useful on a stricter static executor [16]. 
+
+References                             
+
+> [1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ram-jee. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. In Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Associ-ation, Berkeley, CA, USA, 103–120. https://www.usenix.org/confere nce/osdi24/presentation/agrawal
+> [2] Reza Yazdani Aminabadi, Samyam Rajbhandari, Ammar Ahmad Awan, Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Min-jia Zhang, Jeff Rasley, and Yuxiong He. 2022. DeepSpeed-inference: enabling efficient inference of transformer models at unprecedented scale. In Proceedings of the International Conference on High Perfor-mance Computing, Networking, Storage and Analysis (Dallas, Texas)
+> (SC ’22) . IEEE Press, Los Alamitos, CA, USA, Article 46, 15 pages. doi: 10.1109/SC41404.2022.00051
+> [3] Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao. 2024. PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information Funneling. arXiv preprint arXiv:2406.02069. https://arxiv.org/abs/24 06.02069
+> [4] Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin Zheng, Eddie Yan, Haichen Shen, Meghan Cowan, Leyuan Wang, Yu Hu, Luis Ceze, et al .2018. TVM: An automated end-to-end optimizing compiler for deep learning. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 578–594. https://www.usenix.org/conference/osdi18/presentation/ch en
+> [5] Yihua Cheng, Kuntai Du, Jiayi Yao, and Junchen Jiang. 2024. Do Large Language Models Need a Content Delivery Network? arXiv preprint arXiv:2409.13761. https://arxiv.org/abs/2409.13761
+> [6] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv preprint arXiv:2510.09665. https://arxiv.org/ab s/2510.09665
+> [7] Tri Dao. 2024. FlashAttention-2: Faster Attention with Better Paral-lelism and Work Partitioning. International Conference on Learning Representations (ICLR). https://arxiv.org/abs/2307.08691
+> [8] Tri Dao, Daniel Y Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems (NeurIPS) , Vol. 35. Curran Associates, Inc., Red Hook, NY, USA, 16344– 16359. https://arxiv.org/abs/2205.14135
+> [9] Pradeep Dasigi, Kyle Lo, Iz Beltagy, Arman Cohan, Noah A. Smith, and Matt Gardner. 2021. A Dataset of Information-Seeking Ques-tions and Answers Anchored in Research Papers. arXiv preprint arXiv:2105.03011. https://arxiv.org/abs/2105.03011
+> [10] Hao Geng, Phitchaya Mangpo Phothilimthana, et al .2024. vAttention: Dynamic Memory Management for Serving LLMs without PagedAt-tention. arXiv preprint arXiv:2405.04437. https://arxiv.org/abs/2405.0 4437
+> 12
+
+[11] Graphcore. 2023. Poplar SDK Documentation. https://docs.graphcore .ai/ .[12] Graphcore Research. 2024. SparQ Attention: Speed up LLM inference with top-k Value reads. https://graphcore-research.github.io/posts/s parq/ .[13] Arpan Gujarati, Reza Karrell, Seth Ganesan, Avinash Vachharajani, H Ramachandran, et al . 2020. Serving DNNs like Clockwork: Perfor-mance Predictability from the Bottom Up. In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX As-sociation, Berkeley, CA, USA, 443–462. https://www.usenix.org/con ference/osdi20/presentation/gujarati 
+
+[14] Huanle He, Lin Jin, Yizhe Cai, Jeeyong Kim, Taejoon Kang, Simin Chen, Ran Tian, Yifeng Zhang, Sizhe Zheng, Yi Yang, et al . 2025. WaferLLM: Large Language Model Inference at Wafer Scale. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . USENIX Association, Berkeley, CA, USA, 41–57. https: //www.usenix.org/conference/osdi25/presentation/he 
+
+[15] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. RULER: What’s the Real Context Size of Your Long-Context Language Models? arXiv preprint arXiv:2404.06654. https://arxiv.org/abs/2404.06654 
+
+[16] Ziyu Hu, Zhiqing Zhong, Weijian Zheng, Zhijing Ye, Xuwei Tan, Xueru Zhang, Zheng Xie, Rajkumar Kettimuthu, and Xiaodong Yu. 2025. DABench-LLM: Standardized and In-Depth Benchmarking of Post-Moore Dataflow AI Accelerators for LLMs . In 2025 IEEE International Symposium on Workload Characterization (IISWC) . IEEE Computer Society, Los Alamitos, CA, USA, 127–141. doi: 10.1109/IISWC66894.2 025.00020 
+
+[17] Zhe Jia, Blake Tillman, Marco Maggioni, and Daniele P Scarpazza. 2019. Dissecting the Graphcore IPU architecture via microbenchmarking. arXiv preprint arXiv:1912.03413. https://arxiv.org/abs/1912.03413 
+
+[18] Norm Jouppi, George Kurian, Sheng Li, Peter Ma, Rahul Nagarajan, Lifeng Nai, Nishant Patil, Suvinay Subramanian, Andy Swing, Brian Towles, et al . 2023. TPU v4: An optically reconfigurable supercom-puter for machine learning with hardware support for embeddings. In 
+
+Proceedings of the 50th Annual International Symposium on Computer Architecture (ISCA) . Association for Computing Machinery, New York, NY, USA, 1–14. doi: 10.1145/3579371.3589350 
+
+[19] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) . Association for Computing Machinery, New York, NY, USA, 611–626. https://arxiv.org/abs/2309 .06180 
+
+[20] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM knows what you are looking for before gener-ation. In Proceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) .Curran Associates Inc., Red Hook, NY, USA, Article 722, 24 pages. 
+
+https://arxiv.org/abs/2404.14469 
+
+[21] Zhuohan Li, Lianmin Zheng, Yinmin Zhong, Vincent Liu, Ying Sheng, Xin Jin, Yanping Huang, Zhifeng Chen, Hao Zhang, Joseph E Gonzalez, and Ion Stoica. 2023. AlpaServe: Statistical Multiplexing with Model Parallelism for Deep Learning Serving. 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI). https: //www.usenix.org/conference/osdi23/presentation/li-zhouhan 
+
+USENIX Association. [22] Haotian Liu, Hanchen Li, Qing Yang, and Yongqiang Wang. 2023. Scissorhands: Exploiting the Persistence of Importance Hypothe-sis for LLM KV Cache Compression at Test Time. arXiv preprint arXiv:2305.17118. https://arxiv.org/abs/2305.17118 
+
+[23] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Anantha-narayanan, et al . 2024. Cachegen: Kv cache compression and stream-ing for fast large language model serving. In Proceedings of the ACM SIGCOMM 2024 Conference . Association for Computing Machinery, New York, NY, USA, 38–56. doi: 10.1145/3651890.3672274 
+
+[24] Zichang Liu, Jue Wang, Tri Dao, Tianyi Zhou, Binhang Yuan, Zhao Song, Anshumali Shrivastava, Luis Ceze, Alex Beutel, and Christopher Ré. 2023. Deja Vu: Contextual sparsity for efficient LLMs at inference time. In International Conference on Machine Learning (ICML) . PMLR, PMLR, Honolulu, HI, USA, 22137–22176. https://arxiv.org/abs/2310.1 7157 
+
+[25] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen (Henry) Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. KIVI: a tuning-free asymmetric 2bit quantization for KV cache. In Proceedings of the 41st International Conference on Machine Learning (Vienna, Austria) 
+
+(ICML’24) . JMLR.org, Cambridge, MA, USA, Article 1311, 13 pages. 
+
+https://arxiv.org/abs/2402.02750 
+
+[26] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. 2017. Pointer Sentinel Mixture Models. International Conference on Learning Representations (ICLR). https://arxiv.org/abs/1609.07843 
+
+[27] Microsoft. 2023. AzureLLMInferenceDataset2023. https://github.com /Azure/AzurePublicDataset/blob/master/AzureLLMInferenceDatas et2023.md .[28] NVIDIA. 2023. TensorRT-LLM: A High-Performance Library for LLM Inference. https://github.com/NVIDIA/TensorRT-LLM .[29] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aagan Shah, Iñigo Goiri Wisniewski, David Koufaty, et al . 2024. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. In Proceedings of the 51st Annual International Symposium on Computer Architecture (ISCA) . IEEE, Los Alamitos, CA, USA, 211–224. doi: 10.1109/ISCA59077.2024.00019 
+
+[30] Raghu Prabhakar, Ram Sivaramakrishnan, Darshan Gandhi, Yun Du, Mingran Wang, Xiangyu Song, Kejie Zhang, Tianren Gao, Angela Wang, Xiaoyan Li, Yongning Sheng, Joshua Brot, Denis Sokolov, Apurv Vivek, Calvin Leung, Arjun Sabnis, Jiayu Bai, Tuowen Zhao, Mark Gottscho, David Jackson, Mark Luttrell, Manish K. Shah, Zhengyu Chen, Kaizhao Liang, Swayambhoo Jain, Urmish Thakker, Dawei Huang, Sumti Jairath, Kevin J. Brown, and Kunle Olukotun. 2024. SambaNova SN40L: Scaling the AI Memory Wall with Dataflow and Composition of Experts. In 2024 57th IEEE/ACM International Sym-posium on Microarchitecture (MICRO) . IEEE, Los Alamitos, CA, USA, 1353–1366. doi: 10.1109/micro61859.2024.00100 
+
+[31] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake: Trading More Storage for Less Computation — A KVCache-centric Architecture for Serving LLM Chatbot. In 23rd USENIX Conference on File and Storage Technologies (FAST 25) . USENIX Association, Santa Clara, CA, 155–170. https://www.usenix.org/conference/fast25/prese ntation/qin 
+
+[32] Amit Sabne. 2020. XLA: Compiling machine learning for peak per-formance. Proceedings of the 3rd Conference on Machine Learning and Systems (MLSys). https://research.google/pubs/xla-compiling-machine-learning-for-peak-performance/ 
+
+[33] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang, Yong Li, and Wei Lin. 2024. Llumnix: Dynamic Scheduling for Large Language Model Serving. 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI). https://www.usenix.org /conference/osdi24/presentation/sun-biao USENIX Association. [34] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. QUEST: query-aware sparsity for efficient long-context LLM inference. In Proceedings of the 41st International Con-ference on Machine Learning (Vienna, Austria) (ICML’24) . JMLR.org, Cambridge, MA, USA, Article 1955, 11 pages. https://arxiv.org/abs/24 06.10774 
+
+> 13
+
+[35] Bingyang Wu, Yinmin Zhong, Zizheng Gupta, Whan Huang, Christo-pher Ré, DA Ce, and Kai Li. 2023. FastServe: Lean-quanta imple-mentation of preemptive scheduling for distributed LLM serving. In 
+
+Proceedings of the 17th USENIX Symposium on Operating Systems De-sign and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 1197–1213. https://arxiv.org/abs/2305.05920 
+
+[36] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. https://arxiv.org/abs/2309.17453 
+
+[37] Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William Cohen, Ruslan Salakhutdinov, and Christopher D. Manning. 2018. HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering. Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing (EMNLP). https://arxiv.org/abs/1809.09600 
+
+[38] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowledge Fusion. In Proceedings of the Twentieth European Conference on Com-puter Systems . Association for Computing Machinery, New York, NY, USA, 94–109. doi: 10.1145/3689031.3696098 
+
+[39] Lu Ye, Ze Tao, Yong Huang, and Yang Li. 2024. ChunkAttention: Efficient Self-Attention with Prefix-Aware KV Cache and Two-Phase Partition. arXiv:2402.15220 [cs.LG] https://arxiv.org/abs/2402.15220 
+
+[40] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A distributed serving system for Transformer-based generative models. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Associ-ation, Berkeley, CA, USA, 521–538. https://www.usenix.org/confere nce/osdi22/presentation/yu 
+
+[41] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, et al. 2024. H2O: Heavy-hitter oracle for efficient generative inference of large language models. Advances in Neural Information Processing Systems (NeurIPS). https://arxiv.org/abs/2306.14048 
+
+[42] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: efficient execution of structured language model programs. In Pro-ceedings of the 38th International Conference on Neural Information Processing Systems (Vancouver, BC, Canada) (NIPS ’24) . Curran As-sociates Inc., Red Hook, NY, USA, Article 2000, 27 pages. https: //arxiv.org/abs/2312.07104 
+
+[43] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI). https://www.usenix.org/conference/osdi24 /presentation/zhong-yinmin USENIX Association.
