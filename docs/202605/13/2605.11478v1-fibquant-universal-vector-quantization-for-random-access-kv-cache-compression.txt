@@ -1,0 +1,690 @@
+Title: FibQuant: Universal Vector Quantization for Random-Access KV-Cache Compression
+
+URL Source: https://arxiv.org/pdf/2605.11478v1
+
+Published Time: Wed, 13 May 2026 00:40:38 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+## FibQuant: Universal Vector Quantization for Random-Access KV-Cache Compression 
+
+Namyoon Lee 
+
+POSTECH 
+
+nylee@postech.ac.kr 
+
+Yongjune Kim 
+
+POSTECH 
+
+yongjune@postech.ac.kr 
+
+Abstract 
+
+Long-context inference is increasingly a memory-traffic problem. The culprit is the key–value (KV) cache: it grows with context length, batch size, layers, and heads, and it is read at every decoding step. A useful cache codec is therefore not merely a quantizer. It is also a data structure: every cached key and value must occupy a fixed address and be reconstructed independently, so decompres-sion can be fused with attention. Rotation-based scalar codecs meet this systems constraint by storing a norm, applying a shared random rotation, and quantizing one coordinate at a time. They are universal and random-access, but they discard the geometry created by the normalization step. After a Haar rotation, a block of 
+
+k consecutive coordinates is not a product source; it is a spherical-Beta source on the unit ball. We introduce F IB QUANT , a universal fixed-rate vector quantizer that keeps the same normalize–rotate–store interface while replacing scalar tables by a shared radial–angular codebook matched to this canonical source. The codebook combines Beta-quantile radii, Fibonacci / Roberts–Kronecker quasi-uniform di-rections, and multi-restart Lloyd–Max refinement. We prove that the resulting vec-tor code strictly improves on its scalar product specialization at matched rate, with a high-rate gain that separates into a cell-shaping factor and a density-matching factor. The same construction gives a dense rate axis, including fractional-bit and sub-one-bit operating points, without calibration or variable-length addresses. On GPT-2 small KV caches, F IB QUANT traces a memory–fidelity frontier from 5×
+
+compression at 0.99 attention cosine similarity to 34 × at 0.95 . End-to-end on TinyLlama-1.1B, it is within 0.10 perplexity of fp16 at 4× compression and has 
+
+3.6× lower perplexity than scalar T URBO QUANT at b = 2 (8× compression), where scalar random-access quantization begins to fail. 
+
+1 Introduction 
+
+The key–value (KV) cache is the state carried by an autoregressive transformer. Its size grows linearly with context length, batch size, layer count, and head count; its contents are accessed at every decoding step. In long-context serving, the cache is therefore not an auxiliary buffer. It is often the object that determines memory bandwidth, batch size, and latency, and in extreme regimes it can exceed the model weights itself [1]. This pressure has led to two-bit and lower-precision cache quantization methods such as KIVI and KVQ UANT [2, 3]. The cache, however, imposes a constraint that is absent from ordinary source coding. A deployable cache codec must be random-access : the representation of token t must live at a fixed address, and the corresponding key or value must be decoded independently by simple address arithmetic. Oth-erwise decompression cannot be fused with the attention kernel [1]. This single constraint explains why fixed-rate quantizers dominate the source-coding layer of KV-cache compression [2, 3, 6, 7]. It rules out many statistically attractive variable-length or context-dependent representations before one even asks about distortion. 1
+
+> arXiv:2605.11478v1 [cs.AI] 12 May 2026
+
+The cleanest representative of this random-access family is T URBO QUANT [6]. It stores the vector norm, applies a shared random orthogonal rotation, and quantizes each rotated coordinate with the same scalar Lloyd–Max table. This is the right interface : source-agnostic, fixed-rate, and easy to fuse. But it is the wrong geometry . Once a vector has been normalized and Haar-rotated, a block of k consecutive coordinates lies on the unit ball with a specific radial law and a uniform angular component. The coordinates are not an independent product of shifted-Beta marginals. A scalar code sees one coordinate at a time; the source seen by the cache is intrinsically vectorial. 
+
+The sub-one-bit gap. In production, the admissible cache rate is not chosen by an elegant integer-bit quantizer. It is set by VRAM, latency, context length, and batch size. When this budget falls below roughly one bit per coordinate, current universal, calibration-free, random-access codecs cease to operate: T URBO QUANT bottoms out at one bit, R ABIT Q [7] is a one-bit signed code, and KIVI / KVQ UANT primarily target two bits or above. The remaining alternatives either rely on calibration, as in low-rank projection methods such as P ALU [13], or alter the sequence itself through eviction or retention policies such as S TREAMING LLM and H2O [10, 9]. The missing object is a fixed-rate, calibration-free, random-access codec with a continuously tunable rate axis below one bit per coordinate. 
+
+Contribution. We ask a simple question: what is the canonical source induced by the random-access normalize–rotate interface? The answer is the spherical-Beta law fd,k on the unit ball Bk.Once this law is identified, the rest of the codec is classical. The radius is matched by Bennett– Gersho companding, the direction by quasi-uniform spherical point sets, and the finite-rate codebook by Lloyd–Max refinement. The result is F IB QUANT : a vector quantizer that keeps the serving interface of scalar rotation codes but recovers the shaping and density-matching gains that scalar products leave on the table. Our contributions are as follows. • Canonical source. We prove that norm-then-Haar-rotation maps every nonzero input dis-tribution to the same k-block marginal fd,k on Bk (Theorem 1). Thus one shared offline codebook is the correct universal object for layers, heads, prompts, and models. • Vector advantage. We show that the best k-vector code strictly dominates the scalar prod-uct specialization at matched rate, and that the high-rate gain factors into a cell-shaping term and a density-matching term (Theorem 2). • Dense rate axis. Because the rate is b = (log 2 N )/k , F IB QUANT realizes fractional-bit and sub-one-bit operating points while preserving fixed addresses and independent decod-ing (Figure 3). • KV-cache evidence. On GPT-2 small, F IB QUANT reaches 34 .1× compression at 0.946 
+
+attention-output cosine similarity, the only universal random-access method in our com-parison beyond 10 × compression (Figure 4). On TinyLlama-1.1B, it strictly dominates per-token I NT and scalar T URBO QUANT at matched integer rates on WikiText-103 per-plexity and HellaSwag accuracy (Sec. 5.3). 
+
+2 Background and Related Work 
+
+FIB QUANT is a source-coding layer for a specific systems interface: fixed-rate random access to cached keys and values. It is therefore complementary to eviction, low-rank projection, and fused-kernel systems work. We separate the related work according to this role. 
+
+KV-cache compression. Existing approaches reduce the KV cache along different axes. Quan-tizers reduce precision, from outlier-aware matrix quantization such as LLM. INT 8() [14] to cache-specific methods such as KIVI, KVQ UANT , G EAR , and Q JL [2, 3, 4, 5]. Token-selection methods reduce the sequence dimension by keeping attention sinks or heavy hitters [10, 9, 11, 12]. Low-rank methods such as P ALU exploit calibrated head-specific subspaces [13]. System frameworks such as KVC OMP focus on making compression compatible with the memory hierarchy and the attention kernel [1]. These methods attack different bottlenecks. Our question is narrower and more primitive: 
+
+given a random-access fixed-rate cache slot, what source code should occupy it? 
+
+2Random 
+
+rotation 
+
+> …
+> …
+
+<latexit sha1_base64="Ku0R1Uglnl7MKGwQO4vZ65sgHCs=">AAACBnicbVDLSsNAFJ34rPUVdSnCYBHcWBKR6kYounFZ0T6giWUymbZDJ5MwMxFDyMqNv+LGhSJu/QZ3/o2TNgttPXDhcM693HuPFzEqlWV9G3PzC4tLy6WV8ura+samubXdkmEsMGnikIWi4yFJGOWkqahipBMJggKPkbY3usz99j0Rkob8ViURcQM04LRPMVJa6pl7yTl0GhQ+QIdy6ARIDT0vvcnuUv/IznpmxapaY8BZYhekAgo0euaX44c4DghXmCEpu7YVKTdFQlHMSFZ2YkkihEdoQLqachQQ6abjNzJ4oBUf9kOhiys4Vn9PpCiQMgk83ZnfKae9XPzP68aqf+amlEexIhxPFvVjBlUI80ygTwXBiiWaICyovhXiIRIIK51cWYdgT788S1rHVbtWrV2fVOoXRRwlsAv2wSGwwSmogyvQAE2AwSN4Bq/gzXgyXox342PSOmcUMzvgD4zPH57Zl/s=</latexit> 
+
+y = !x → Sd→1
+
+<latexit sha1_base64="gqMm7WOG6F08nfiQAJdpzKZ1p0o=">AAACB3icbVDLSsNAFJ3UV62vqEtBBovgqiQi1WXRjcsq9gFNLJPJpB06mYSZG6GE7tz4K25cKOLWX3Dn3zh9LLT1wIXDOfdy7z1BKrgGx/m2CkvLK6trxfXSxubW9o69u9fUSaYoa9BEJKodEM0El6wBHARrp4qROBCsFQyuxn7rgSnNE3kHw5T5MelJHnFKwEhd+9Crc+xxib2YQD8I8tvRfR56wGOmcTjq2mWn4kyAF4k7I2U0Q71rf3lhQrOYSaCCaN1xnRT8nCjgVLBRycs0SwkdkB7rGCqJ2ePnkz9G+NgoIY4SZUoCnqi/J3ISaz2MA9M5vlbPe2PxP6+TQXTh51ymGTBJp4uiTGBI8DgUHHLFKIihIYQqbm7FtE8UoWCiK5kQ3PmXF0nztOJWK9Wbs3LtchZHER2gI3SCXHSOauga1VEDUfSIntErerOerBfr3fqYthas2cw++gPr8wevkZk6</latexit> 
+
+! → Rd→d
+
+Inverse 
+
+rotation 
+
+KV cash 
+
+memory 
+
+<latexit sha1_base64="OtWMXsbJBG2ZasMWLBN391afjvY=">AAACAnicbVDLSsNAFJ3UV62vqCtxM1gEN5ZEpLoRim5cVrAPaGKZTCft0MmDmRuxhODGX3HjQhG3foU7/8Zpm4W2HrhwOOde7r3HiwVXYFnfRmFhcWl5pbhaWlvf2Nwyt3eaKkokZQ0aiUi2PaKY4CFrAAfB2rFkJPAEa3nDq7HfumdS8Si8hVHM3ID0Q+5zSkBLXXMvdQYE8EN24dT5XXpsZ1NhlHXNslWxJsDzxM5JGeWod80vpxfRJGAhUEGU6thWDG5KJHAqWFZyEsViQoekzzqahiRgyk0nL2T4UCs97EdSVwh4ov6eSEmg1CjwdGdAYKBmvbH4n9dJwD93Ux7GCbCQThf5icAQ4XEeuMcloyBGmhAqub4V0wGRhIJOraRDsGdfnifNk4pdrVRvTsu1yzyOItpHB+gI2egM1dA1qqMGougRPaNX9GY8GS/Gu/ExbS0Y+cwu+gPj8wfAUZcJ</latexit> 
+
+ˆx = !→1 ˆy
+
+<latexit sha1_base64="wlPkebfpfzezm9v6e2Ca5H22a9M=">AAACH3icbVDLSgMxFM34rPVVdekmWARdWGaKVDeCKIIboT5qhWYsmTTTBjMPkjvSMs6fuPFX3LhQRNz1b0xrF1o9EDiccy8353ixFBpsu29NTE5Nz8zm5vLzC4tLy4WV1WsdJYrxGotkpG48qrkUIa+BAMlvYsVp4Ele9+6OB379nistovAKejF3A9oOhS8YBSM1C5WUaB+fXZ5kWxfbBySg0PG89CQjkvvQIA/dnZR0KOBuRh6a5dsyUaLdAbdZKNolewj8lzgjUkQjVJuFT9KKWBLwEJikWjccOwY3pQoEkzzLk0TzmLI72uYNQ0MacO2mw3wZ3jRKC/uRMi8EPFR/bqQ00LoXeGZyEECPewPxP6+RgL/vpiKME+Ah+z7kJxJDhAdl4ZZQnIHsGUKZEuavmHWoogxMpXlTgjMe+S+5LpecSqlyvls8PBrVkUPraANtIQftoUN0iqqohhh6RM/oFb1ZT9aL9W59fI9OWKOdNfQLVv8Lnmyiww==</latexit> 
+
+MSE (R) = E [→x ↑ ˆx→2
+
+2
+
+]
+
+<latexit sha1_base64="EHef6kDXacgzu8QJpgyi6NkJJbs=">AAACDXicbVDLSsNAFJ3UV62vqks3g1VwUUoiUt0IRTcuK9gHNDFMptN26CQTZm6EEPoDbvwVNy4UcevenX/j9LHQ1gMXDufcy733BLHgGmz728otLa+sruXXCxubW9s7xd29ppaJoqxBpZCqHRDNBI9YAzgI1o4VI2EgWCsYXo/91gNTmsvoDtKYeSHpR7zHKQEj+cWjzA2IwunId/BlJ/Wdsiu6EnQZp/7Qu89ckPHIL5bsij0BXiTOjJTQDHW/+OV2JU1CFgEVROuOY8fgZUQBp4KNCm6iWUzokPRZx9CIhEx72eSbET42Shf3pDIVAZ6ovycyEmqdhoHpDAkM9Lw3Fv/zOgn0LryMR3ECLKLTRb1EYJB4HA3ucsUoiNQQQhU3t2I6IIpQMAEWTAjO/MuLpHlacaqV6u1ZqXY1iyOPDtAhOkEOOkc1dIPqqIEoekTP6BW9WU/Wi/VufUxbc9ZsZh/9gfX5A2t/mzA=</latexit> 
+
+¯y1 = [ y1, . . . , y k]→
+
+<latexit sha1_base64="szrPLzZ/hkKnEDTsgMwWQpFkY3E=">AAAB8HicbVBNSwMxEM36WetX1aOXYBHqpeyKVI9FLx5bsB/SLiWbzbah2WRJZoWy9Fd48aCIV3+ON/+NabsHbX0w8Hhvhpl5QSK4Adf9dtbWNza3tgs7xd29/YPD0tFx26hUU9aiSijdDYhhgkvWAg6CdRPNSBwI1gnGdzO/88S04Uo+wCRhfkyGkkecErDSY7tZ6dNQwcWgVHar7hx4lXg5KaMcjUHpqx8qmsZMAhXEmJ7nJuBnRAOngk2L/dSwhNAxGbKepZLEzPjZ/OApPrdKiCOlbUnAc/X3REZiYyZxYDtjAiOz7M3E/7xeCtGNn3GZpMAkXSyKUoFB4dn3OOSaURATSwjV3N6K6YhoQsFmVLQheMsvr5L2ZdWrVWvNq3L9No+jgE7RGaogD12jOrpHDdRCFMXoGb2iN0c7L86787FoXXPymRP0B87nD/Azj90=</latexit> 
+
+V Q (·)
+
+<latexit sha1_base64="szrPLzZ/hkKnEDTsgMwWQpFkY3E=">AAAB8HicbVBNSwMxEM36WetX1aOXYBHqpeyKVI9FLx5bsB/SLiWbzbah2WRJZoWy9Fd48aCIV3+ON/+NabsHbX0w8Hhvhpl5QSK4Adf9dtbWNza3tgs7xd29/YPD0tFx26hUU9aiSijdDYhhgkvWAg6CdRPNSBwI1gnGdzO/88S04Uo+wCRhfkyGkkecErDSY7tZ6dNQwcWgVHar7hx4lXg5KaMcjUHpqx8qmsZMAhXEmJ7nJuBnRAOngk2L/dSwhNAxGbKepZLEzPjZ/OApPrdKiCOlbUnAc/X3REZiYyZxYDtjAiOz7M3E/7xeCtGNn3GZpMAkXSyKUoFB4dn3OOSaURATSwjV3N6K6YhoQsFmVLQheMsvr5L2ZdWrVWvNq3L9No+jgE7RGaogD12jOrpHDdRCFMXoGb2iN0c7L86787FoXXPymRP0B87nD/Azj90=</latexit> 
+
+V Q (·)
+
+<latexit sha1_base64="VWwfIu7SvPPs8I9nayqQ8PglFjQ=">AAACInicbZDLSgMxFIYzXmu9VV26CRbBRSkzIlUXQtGNywr2Ap2xZNK0Dc1MhuSMMAzzLG58FTcuFHUl+DCmF0Rbfwj8+c45JOf3I8E12PantbC4tLyymlvLr29sbm0XdnYbWsaKsjqVQqqWTzQTPGR14CBYK1KMBL5gTX94Nao375nSXIa3kETMC0g/5D1OCRjUKZyn7oAATl2fKJxkWcfBF+0JS8yl5IquBF3CP2jo3aUuyCjrFIp22R4Lzxtnaopoqlqn8O52JY0DFgIVROu2Y0fgpUQBp4JleTfWLCJ0SPqsbWxIAqa9dLxihg8N6eKeVOaEgMf090RKAq2TwDedAYGBnq2N4H+1dgy9My/lYRQDC+nkoV4sMEg8ygt3uWIURGIMoYqbv2I6IIpQMKnmTQjO7MrzpnFcdirlys1JsXo5jSOH9tEBOkIOOkVVdI1qqI4oekBP6AW9Wo/Ws/VmfUxaF6zpzB76I+vrGyFUpBU=</latexit> 
+
+ˆ¯y1 = [ˆ y1, . . . , ˆyk]→
+
+<latexit sha1_base64="k+A8402gNSlde2no8dEPJjXEFiM=">AAACKnicbVDLSsNAFJ34rPVVdelmsAiCtSQi1Y1QdeOygrVCE8tkMm2HTjJh5kYIId/jxl9x04VS3PohTh+IrwMXzpxzL3Pv8WPBNdj2yJqbX1hcWi6sFFfX1jc2S1vbd1omirImlUKqe59oJnjEmsBBsPtYMRL6grX8wdXYbz0ypbmMbiGNmReSXsS7nBIwUqd0kbl9AjhzfaJwmuedLMzxeXuqpuYZHA0OnbziikCCruAvI/AeMhdknHdKZbtqT4D/EmdGymiGRqc0dANJk5BFQAXRuu3YMXgZUcCpYHnRTTSLCR2QHmsbGpGQaS+bnJrjfaMEuCuVqQjwRP0+kZFQ6zT0TWdIoK9/e2PxP6+dQPfMy3gUJ8AiOv2omwgMEo9zwwFXjIJIDSFUcbMrpn2iCAWTbtGE4Pw++S+5O646tWrt5qRcv5zFUUC7aA8dIAedojq6Rg3URBQ9oRf0it6sZ2tojaz3aeucNZvZQT9gfXwCEhOnsQ==</latexit> 
+
+ˆ¯ym = [ˆ yd→k+1 , . . . , ˆyd]↑
+
+> …
+
+<latexit sha1_base64="iw91SRIj6yDMqZsQddtTB8kzex4=">AAAB9HicbVBNSwMxEJ2tX7V+VT16CRbBU9kVqV6EohePFewHtEvJptk2NMmuSbZQlv0dXjwo4tUf481/Y9ruQVsfDDzem2FmXhBzpo3rfjuFtfWNza3idmlnd2//oHx41NJRoghtkohHqhNgTTmTtGmY4bQTK4pFwGk7GN/N/PaEKs0i+WimMfUFHkoWMoKNlXxx0wsVJukgS8dZv1xxq+4caJV4OalAjka//NUbRCQRVBrCsdZdz42Nn2JlGOE0K/USTWNMxnhIu5ZKLKj20/nRGTqzygCFkbIlDZqrvydSLLSeisB2CmxGetmbif953cSE137KZJwYKsliUZhwZCI0SwANmKLE8KklmChmb0VkhG0KxuZUsiF4yy+vktZF1atVaw+XlfptHkcRTuAUzsGDK6jDPTSgCQSe4Ble4c2ZOC/Ou/OxaC04+cwx/IHz+QM0+pJo</latexit> 
+
+m = d
+
+k
+
+> …
+
+<latexit sha1_base64="5BIUi3T9IYIA81uip/g0iVqghZY=">AAAB/3icbVDLSsNAFJ3UV62vqODGzWAR6qYkRaoboejGlVSxD2hCmEwn7dBJJsxMhBKz8FfcuFDErb/hzr9x2mahrQcuHM65l3vv8WNGpbKsb6OwtLyyulZcL21sbm3vmLt7bckTgUkLc8ZF10eSMBqRlqKKkW4sCAp9Rjr+6Gridx6IkJRH92ocEzdEg4gGFCOlJc88uLtwAoFw2s/SUeYwPvBqlZsTzyxbVWsKuEjsnJRBjqZnfjl9jpOQRAozJGXPtmLlpkgoihnJSk4iSYzwCA1IT9MIhUS66fT+DB5rpQ8DLnRFCk7V3xMpCqUch77uDJEaynlvIv7n9RIVnLspjeJEkQjPFgUJg4rDSRiwTwXBio01QVhQfSvEQ6TjUDqykg7Bnn95kbRrVbterd+elhuXeRxFcAiOQAXY4Aw0wDVoghbA4BE8g1fwZjwZL8a78TFrLRj5zD74A+PzB02llaY=</latexit> 
+
+R = d
+
+k log 2(N ) -bits 
+
+<latexit sha1_base64="7kQxPAKjt2p3Xb01p2BAPxYcMJ8=">AAACHnicbZDLSgMxFIYz3q23qks3wSII1jIj3jZC0Y3LCtYKnXHIZFINzUyG5IxQwjyJG1/FjQtFBFf6NqaXhVp/CHz85xxOzh9lgmtw3S9nYnJqemZ2br60sLi0vFJeXbvSMleUNakUUl1HRDPBU9YEDoJdZ4qRJBKsFXXP+vXWPVOay/QSehkLEnKb8g6nBKwVlg8MNn5EFO4VRWiSAp+0jeXQxLvdHa+o+iKWoKt4YMbBjfFBZkVYrrg1dyA8Dt4IKmikRlj+8GNJ84SlQAXRuu25GQSGKOBUsKLk55plhHbJLWtbTEnCdGAG5xV4yzox7khlXwp44P6cMCTRupdEtjMhcKf/1vrmf7V2Dp3jwPA0y4GldLiokwsMEvezwjFXjILoWSBUcftXTO+IIhRsoiUbgvf35HG42qt5h7XDi/1K/XQUxxzaQJtoG3noCNXROWqgJqLoAT2hF/TqPDrPzpvzPmydcEYz6+iXnM9v+7iibg==</latexit> 
+
+¯ym = [ yd→k+1 , . . . , y d]↑
+
+-bits 
+
+<latexit sha1_base64="J4mUuBcWT+dsMZrEOvf/nD1qEq4=">AAAB8HicbVBNSwMxEJ2tX7V+VT16CRahXspukeqx6MWTVLAf0i4lm2bb0CS7JFmhLP0VXjwo4tWf481/Y9ruQVsfDDzem2FmXhBzpo3rfju5tfWNza38dmFnd2//oHh41NJRoghtkohHqhNgTTmTtGmY4bQTK4pFwGk7GN/M/PYTVZpF8sFMYuoLPJQsZAQbKz32eDTsV8t35/1iya24c6BV4mWkBBka/eJXbxCRRFBpCMdadz03Nn6KlWGE02mhl2gaYzLGQ9q1VGJBtZ/OD56iM6sMUBgpW9Kgufp7IsVC64kIbKfAZqSXvZn4n9dNTHjlp0zGiaGSLBaFCUcmQrPv0YApSgyfWIKJYvZWREZYYWJsRgUbgrf88ippVSterVK7vyjVr7M48nACp1AGDy6hDrfQgCYQEPAMr/DmKOfFeXc+Fq05J5s5hj9wPn8AqOePrQ==</latexit> 
+
+log 2(N )
+
+-bits 
+
+<latexit sha1_base64="J4mUuBcWT+dsMZrEOvf/nD1qEq4=">AAAB8HicbVBNSwMxEJ2tX7V+VT16CRahXspukeqx6MWTVLAf0i4lm2bb0CS7JFmhLP0VXjwo4tWf481/Y9ruQVsfDDzem2FmXhBzpo3rfju5tfWNza38dmFnd2//oHh41NJRoghtkohHqhNgTTmTtGmY4bQTK4pFwGk7GN/M/PYTVZpF8sFMYuoLPJQsZAQbKz32eDTsV8t35/1iya24c6BV4mWkBBka/eJXbxCRRFBpCMdadz03Nn6KlWGE02mhl2gaYzLGQ9q1VGJBtZ/OD56iM6sMUBgpW9Kgufp7IsVC64kIbKfAZqSXvZn4n9dNTHjlp0zGiaGSLBaFCUcmQrPv0YApSgyfWIKJYvZWREZYYWJsRgUbgrf88ippVSterVK7vyjVr7M48nACp1AGDy6hDrfQgCYQEPAMr/DmKOfFeXc+Fq05J5s5hj9wPn8AqOePrQ==</latexit> 
+
+log 2(N )
+
+> …
+
+<latexit sha1_base64="szrPLzZ/hkKnEDTsgMwWQpFkY3E=">AAAB8HicbVBNSwMxEM36WetX1aOXYBHqpeyKVI9FLx5bsB/SLiWbzbah2WRJZoWy9Fd48aCIV3+ON/+NabsHbX0w8Hhvhpl5QSK4Adf9dtbWNza3tgs7xd29/YPD0tFx26hUU9aiSijdDYhhgkvWAg6CdRPNSBwI1gnGdzO/88S04Uo+wCRhfkyGkkecErDSY7tZ6dNQwcWgVHar7hx4lXg5KaMcjUHpqx8qmsZMAhXEmJ7nJuBnRAOngk2L/dSwhNAxGbKepZLEzPjZ/OApPrdKiCOlbUnAc/X3REZiYyZxYDtjAiOz7M3E/7xeCtGNn3GZpMAkXSyKUoFB4dn3OOSaURATSwjV3N6K6YhoQsFmVLQheMsvr5L2ZdWrVWvNq3L9No+jgE7RGaogD12jOrpHDdRCFMXoGb2iN0c7L86787FoXXPymRP0B87nD/Azj90=</latexit> 
+
+V Q (·)
+
+<latexit sha1_base64="szrPLzZ/hkKnEDTsgMwWQpFkY3E=">AAAB8HicbVBNSwMxEM36WetX1aOXYBHqpeyKVI9FLx5bsB/SLiWbzbah2WRJZoWy9Fd48aCIV3+ON/+NabsHbX0w8Hhvhpl5QSK4Adf9dtbWNza3tgs7xd29/YPD0tFx26hUU9aiSijdDYhhgkvWAg6CdRPNSBwI1gnGdzO/88S04Uo+wCRhfkyGkkecErDSY7tZ6dNQwcWgVHar7hx4lXg5KaMcjUHpqx8qmsZMAhXEmJ7nJuBnRAOngk2L/dSwhNAxGbKepZLEzPjZ/OApPrdKiCOlbUnAc/X3REZiYyZxYDtjAiOz7M3E/7xeCtGNn3GZpMAkXSyKUoFB4dn3OOSaURATSwjV3N6K6YhoQsFmVLQheMsvr5L2ZdWrVWvNq3L9No+jgE7RGaogD12jOrpHDdRCFMXoGb2iN0c7L86787FoXXPymRP0B87nD/Azj90=</latexit> 
+
+V Q (·)
+
+-bits 
+
+<latexit sha1_base64="J4mUuBcWT+dsMZrEOvf/nD1qEq4=">AAAB8HicbVBNSwMxEJ2tX7V+VT16CRahXspukeqx6MWTVLAf0i4lm2bb0CS7JFmhLP0VXjwo4tWf481/Y9ruQVsfDDzem2FmXhBzpo3rfju5tfWNza38dmFnd2//oHh41NJRoghtkohHqhNgTTmTtGmY4bQTK4pFwGk7GN/M/PYTVZpF8sFMYuoLPJQsZAQbKz32eDTsV8t35/1iya24c6BV4mWkBBka/eJXbxCRRFBpCMdadz03Nn6KlWGE02mhl2gaYzLGQ9q1VGJBtZ/OD56iM6sMUBgpW9Kgufp7IsVC64kIbKfAZqSXvZn4n9dNTHjlp0zGiaGSLBaFCUcmQrPv0YApSgyfWIKJYvZWREZYYWJsRgUbgrf88ippVSterVK7vyjVr7M48nACp1AGDy6hDrfQgCYQEPAMr/DmKOfFeXc+Fq05J5s5hj9wPn8AqOePrQ==</latexit> 
+
+log 2(N )
+
+-bits 
+
+<latexit sha1_base64="J4mUuBcWT+dsMZrEOvf/nD1qEq4=">AAAB8HicbVBNSwMxEJ2tX7V+VT16CRahXspukeqx6MWTVLAf0i4lm2bb0CS7JFmhLP0VXjwo4tWf481/Y9ruQVsfDDzem2FmXhBzpo3rfju5tfWNza38dmFnd2//oHh41NJRoghtkohHqhNgTTmTtGmY4bQTK4pFwGk7GN/M/PYTVZpF8sFMYuoLPJQsZAQbKz32eDTsV8t35/1iya24c6BV4mWkBBka/eJXbxCRRFBpCMdadz03Nn6KlWGE02mhl2gaYzLGQ9q1VGJBtZ/OD56iM6sMUBgpW9Kgufp7IsVC64kIbKfAZqSXvZn4n9dNTHjlp0zGiaGSLBaFCUcmQrPv0YApSgyfWIKJYvZWREZYYWJsRgUbgrf88ippVSterVK7vyjVr7M48nACp1AGDy6hDrfQgCYQEPAMr/DmKOfFeXc+Fq05J5s5hj9wPn8AqOePrQ==</latexit> 
+
+log 2(N )
+
+> … …
+> …
+> ……
+
+Figure 1: FIB QUANT encoder–decoder pipeline. A cached vector x ∈ Rd is split into a scalar norm header ν = ∥x∥2 and a unit direction Πx/ν , where Π ∈ Rd×d is a single Haar-random or-thogonal matrix shared across layers, heads, prompts and tokens. The unit direction is partitioned into d/k blocks of k consecutive coordinates, each falling on the unit ball Bk with marginal density 
+
+fd,k (Lemma 1). Each block is encoded to one of N indices by nearest-codeword lookup against the shared offline codebook C = {cn}Nn=1 (Eq. (1)); the decoder reverses the lookup and the ro-tation to recover ˆx. The output bitstream is a fixed-rate (d log 2 N )/k -bit payload plus one fp16 norm per cached vector, so token slots are at affine offsets and any past key/value can be recovered independently—the random-access requirement that distinguishes deployable cache codecs from variable-length alternatives. The only change from T URBO QUANT ’s pipeline is the replacement of the per-coordinate scalar table by one k-dimensional vector quantizer. 
+
+Rotation-then-quantize codes. The closest prior art is the family of source-agnostic rotation codes. TURBO QUANT stores a norm, applies a shared random rotation, and quantizes each ro-tated coordinate using a Lloyd–Max table matched to the shifted-Beta scalar marginal [6]. R ABIT Qreaches an analogous universality principle for approximate nearest-neighbor search through a one-bit signed code with a sharp distance bound [7]; a recent comparison studies these two views side by side [8]. These methods identify the correct deployment interface. The difference is that they stop at scalar marginals. F IB QUANT applies the same interface to k-blocks, where the induced law is the spherical-Beta vector distribution rather than a product of scalar marginals. This single change yields a dense rate axis and the vector-quantization gains proved in Sec. 4. 
+
+Spherical vector quantization. The codebook geometry uses classical ingredients. The planar Fibonacci spiral at k = 2 is related to the Golden Quantizer for a complex Gaussian source [26], Fibonacci-lattice color quantization [27], and sunflower antenna arrays [28]. Higher-dimensional directions use Fibonacci-sphere and Roberts–Kronecker low-discrepancy constructions [22, 23, 24, 20, 21], and the refinement step is the Lloyd–Max / Gersho theory of vector quantization [15, 16, 17, 18, 19]. What is new here is not any one geometric primitive. It is the matching of those primitives to the spherical-Beta source forced by random-access KV-cache compression. 
+
+3 Model and Codec 
+
+Overview. The codec has three parts. First, every cached vector is normalized and rotated by a shared Haar-random orthogonal matrix. This is the same random-access interface used by scalar rotation codes: the norm is a small side header, the payload is fixed length, and every token can be decoded independently. Second, the rotated unit vector is partitioned into k-dimensional blocks. Lemma 1 shows that each block has the same spherical-Beta density fd,k on the unit ball, indepen-dent of the original KV distribution. Third, a shared offline codebook C = {rnun}Nn=1 is built for this density: Beta-quantile radii rn, quasi-uniform directions un, and a multi-restart Lloyd–Max pol-ish. The encoder performs nearest-codeword lookup per block; the decoder performs table lookup and inverse rotation. 3The point is deliberately conservative. F IB QUANT changes the statistical object being quantized, not the serving contract. The bitstream remains fixed-rate and randomly addressable; only the scalar coordinate table is replaced by a vector codebook matched to the law that the interface itself creates. The section proceeds in three steps: the encoder–decoder pair (Sec. 3.1), the canonical source law (Sec. 3.2), and the radial–angular codebook construction (Sec. 3.3). 
+
+3.1 Random-access vector encoding 
+
+Fix one attention head of width d, a shared orthogonal matrix Π ∈ Rd×d, and a codebook C =
+
+{c1, . . . , c N } ⊂ Bk with k | d. For a nonzero cached vector x ∈ Rd, the encoder stores the fp16 norm header ν = ∥x∥2 and quantizes the rotated unit vector Πx/ν . Write its block decomposition as Πx/ν = ( y(1) , . . . , y (d/k )), with y(m) ∈ Bk. The stored index for block m is 
+
+im = arg min  
+
+> 1≤j≤N
+
+∥y(m) − cj ∥22, m = 1 , . . . , d/k. (1) The decoder sets ˆy(m) = cim and returns ˆx = νΠ⊤ ˆy. The payload rate is b = (log 2 N )/k bits per coordinate, identical for every vector and every token. Hence token addresses are affine in the time index, and random access is preserved by construction. 
+
+Loss functions. We track two losses. The intrinsic source-coding loss is 
+
+Lmse (C) = E
+
+> d/k
+
+X
+
+> m=1
+
+min  
+
+> j
+
+∥Y (m) − cj ∥22, (2) where Y (m) is distributed according to the canonical law fd,k derived in Sec. 3.2. The downstream metric is attention-output cosine similarity, 
+
+Lattn (C) = Eℓ,h,q 
+
+⟨oℓ,h (q), ˆoℓ,h (q)⟩∥oℓ,h (q)∥ ∥ ˆoℓ,h (q)∥ , oℓ,h (q) = softmax 
+
+ qK ⊤
+
+> ℓ,h
+> √d
+
+
+
+Vℓ,h , (3) with ˆoℓ,h computed from the reconstructed ˆKℓ,h , ˆVℓ,h . A task-weighted or Mahalanobis Lloyd ob-jective can be used offline by replacing ∥x − c∥22 with (x − c)⊤Mh(x − c); the random-access bitstream and decoder are unchanged. 
+
+3.2 The canonical vector source 
+
+The normalization removes scale; the Haar rotation removes orientation. Consequently the distribu-tion seen by the block quantizer is universal. Let ¯x = x/ ∥x∥. Conditional on any fixed direction 
+
+¯x = v, Πv is Haar-uniform on the unit sphere Sd−1 by rotational invariance. Averaging over v does not change this law. Thus every input distribution with Pr( X = 0) = 0 induces the same rotated unit-vector law. The k-block marginal is the following spherical-Beta density. 
+
+Lemma 1 (Spherical-Beta vector marginal) . Let U ∼ Unif( Sd−1) and X = U1: k for 1 ≤ k < d .Then X has density fd,k (x) = Cd,k (1 − ∥ x∥2)(d−k−2) /2 1{∥ x∥ ≤ 1} on Bk, with 
+
+R2 ∼ Beta( k/ 2, (d − k)/2) , ER2 = k/d, Var( R2) = 2k(d − k)
+
+d2(d + 2) , (4) 
+
+and X/R uniform on Sk−1, independent of R.
+
+At k = 1 , Lemma 1 reduces to the shifted-Beta scalar marginal used by scalar T URBO QUANT . For 
+
+k > 1, however, the joint law is not the product of those marginals. This distinction is the whole source of the vector gain: scalar quantization is matched to one-coordinate projections, while the cache interface naturally exposes blocks with radial–angular structure. Two consequences guide the design. 
+
+(P1) Stationarity after rotation. Every block Y (m) has density fd,k on Bk, independent of layer, head, prompt, token, and the original KV distribution. A single shared codebook is there-fore a universal offline object. 4(P2) Concentration on a shell. Since Var( R2) = O(d−2), high-dimensional mass concentrates near ¯R = pk/d . At large d, the problem becomes primarily one of placing directions on 
+
+Sk−1; at moderate d, the residual radial spread is captured by Beta-quantile radii. 
+
+3.3 Radial–angular codebook construction 
+
+Lemma 1 factorizes the design problem. Each codeword is written as cn = rnun, with radius 
+
+rn ∈ [0 , 1] and direction un ∈ Sk−1. The radii match the radial density of the spherical-Beta source; the directions approximate a uniform spherical packing; Lloyd–Max refinement then adapts the deterministic initialization to the finite value of N .
+
+Radii. Bennett’s high-rate companding rule, in its vector-quantization form due to Gersho [17], places codewords with density proportional to f k/ (k+2)  
+
+> d,k
+
+for MSE. Specializing this rule to the radius gives a Beta law with shape (k/ 2, β d,k ). Midpoint quantiles qn = ( n − 12 )/N yield 
+
+rn =
+
+q
+
+BetaInv  qn; k 
+
+> 2
+
+, β d,k 
+
+, βd,k = kk + 2 · d − k − 22 + 1 . (5) For k = 2 , this inverse is closed form: 
+
+rn =
+
+q
+
+1 − (1 − qn)4/d . (6) 
+
+Directions. The direction set {un}Nn=1 ⊂ Sk−1 is chosen by geometry, not by calibration data: • k = 2 : a planar Fibonacci spiral, un = (cos θn, sin θn) with θn = 2 π(n − 1) θg and 
+
+θg = 1 − 1/φ .• k = 3 : a Fibonacci sphere with equal-area latitude bands and golden-angle azimuth; the multi-shell variant is given in Appendix E. • k ≥ 4: a Roberts–Kronecker rank-one sequence ξn,j = {(n − 12 ) ϕ−jk }, where ϕk is the positive root of ϕk+1 = ϕ + 1 , mapped through Φ−1 and projected onto Sk−1.
+
+Lloyd–Max refinement. The deterministic initialization c(0)  
+
+> n
+
+= rnun is refined on samples from 
+
+fd,k . Each restart applies a random orthogonal rotation to the initial codebook, alternates nearest-neighbor assignment and centroid update, repairs empty cells by splitting high-distortion cells, and keeps the codebook with the lowest training MSE. The full procedure is specified in Appendix A, Table 2. This refinement is offline metadata: it does not alter the fixed-rate payload or the random-access decoder. 
+
+3.4 Example: k = 2 
+
+The two-dimensional case shows the construction in closed form. Here βd, 2 = d/ 4, so (5) becomes (6). Combining these radii with the golden-angle sequence gives the sunflower initialization c(0)  
+
+> n
+
+=
+
+rn(cos θn, sin θn), n = 1 , . . . , N , followed by the same Lloyd–Max polish used in all dimensions. Figure 2 shows the result for N ∈ { 8, 16 , 32 , 64 } and d ∈ { 16 , 128 }. At d = 16 , the spherical-Beta density has visible radial spread, and the codewords use several radii. At d = 128 , the mass has nearly collapsed onto the shell ¯R = p2/d ≈ 0.125 , and the problem becomes mostly angular. Along that shell, the Lloyd-polished cells approach the hexagonal geometry expected of an efficient two-dimensional vector quantizer. This picture is the finite-dimensional version of Theorem 2: a scalar product code can tile the plane by rectangles, but it cannot recover the shaping gain of these cells. The same effect appears quantitatively in Figure 3. At integer rates, the k = 2 branch lies below scalar T URBO QUANT ; at fractional rates, the same codebook family gives operating points that scalar Lloyd–Max cannot realize at all. 5Figure 2: F IB QUANT k = 2 codebooks and their Voronoi cells on B2 at d = 16 (top row) and 
+
+d = 128 (bottom row), for N ∈ { 8, 16 , 32 , 64 }. Open markers: Beta-quantile + Fibonacci init. Solid markers: codewords after Lloyd–Max. Background heat-map: spherical-Beta source density 
+
+fd, 2. Discussion in Sec. 3.4. 
+
+4 Analysis 
+
+The analysis formalizes the message of the construction. Random access fixes the source; the source fixes the correct codebook; vector quantization then improves on the scalar product restriction. 
+
+Theorem 1 (Source-agnostic universality) . Let X be any random vector in Rd with Pr( X = 0) = 0 ,independent of a Haar-uniform orthogonal Π, and let Y = Π X/ ∥X∥. Then Y is Haar-uniform on 
+
+Sd−1, and every k-coordinate vector of Y has marginal density fd,k .Proof. Condition on X/ ∥X∥ = v. By invariance of Haar measure, Πv is uniform on Sd−1. Aver-aging over v leaves the Haar law unchanged. Lemma 1 gives the k-coordinate marginal. The theorem is the universality statement. It says that the shared codebook is not a heuristic trained on a convenient model; it is the canonical source codebook induced by the serving interface itself. 
+
+Theorem 2 (Strict matched-rate dominance) . Let Dsc (d, b ) be the per-coordinate distortion of scalar Lloyd–Max quantization of the shifted-Beta marginal fd, 1 at b bits per coordinate, and let 
+
+D⋆
+
+> FQ
+
+(d, k, b ) be the per-coordinate MSE of the best k-vector code with N = 2 bk codewords for 
+
+fd,k . Then 
+
+D⋆
+
+> FQ
+
+(d, k, b ) < D sc (d, b ), k > 1, b > 0, (7) 
+
+with equality only in the scalar case k = 1 . At high rate, 
+
+Dsc (d, b )
+
+D⋆
+
+> FQ
+
+(d, k, b ) ≃ k G 1
+
+G⋆k
+
+| {z }   
+
+> γcell (k)≥1
+
+· Id, 1(1/3)3
+
+Id,k (k/k+2 )(k+2) /k 
+
+| {z }  
+
+> γdens (d,k )≥1
+
+, (8) 
+
+where G1 = 1 /12 , G⋆k is the optimal k-cell normalized second moment, and Id,k (s) = R 
+
+> Bk
+
+f sd,k dx .The cell factor is strict for k ≥ 2 [19, 17]. 
+
+A scalar product code is a feasible k-vector code whose codebook is a Cartesian product of one-dimensional levels. The unrestricted vector code optimizes over a larger class of tessellations, and therefore cannot be worse. Equation (8) separates the gain into two terms. The first is geomet-ric: efficient vector cells beat rectangular boxes. The second is statistical: matching the spherical-Beta density beats matching only its scalar marginals. Numerically, the cell-shaping term alone gives approximately 0.17 dB at k = 2 , 0.66 dB at k = 3 , 1.42 dB at k = 8 , and approaches 
+
+10 log 10 (πe/ 6) ≈ 1.53 dB as k → ∞ . The density-matching term supplies the additional gain observed in Fig. 3. 6bits per coordinate b
+
+1 2 3 4
+
+> per-coordinate MSE
+
+0
+
+0.002 
+
+0.004 
+
+0.006 
+
+0.008 
+
+0.01 
+
+0.012 
+
+0.014 
+
+0.016 
+
+0.018 TurboQuant (scalar Lloyd--Max) 
+
+> FibQuant k = 2
+> FibQuant k = 4
+> FibQuant k = 8
+> FibQuant k = 16
+> FibQuant k = 32
+
+Figure 3: Per-coordinate MSE versus rate b = (log 2 N )/k on the canonical spherical-Beta source fd,k at d = 64 . Scalar T URBO QUANT (+) contributes only the four integer-bit operating points b ∈ { 1, 2, 3, 4}, whereas F IB QUANT for k ∈ { 2, 4, 8, 16 , 32 } traces a continuum across the rate axis. Three features are visible. (i) Strict matched-rate dominance. At every integer rate the FIB QUANT curve lies strictly below the scalar curve; the vertical gap is the γcell (k) · γdens (d, k )
+
+factorization of Theorem 2, Eq. (8). (ii) Fractional-integer-bit coverage. Between every pair of adjacent integer scalar points F IB QUANT fills the band b ∈ { 1.25 , 1.5, . . . , 3.5} (annotated arrows) — operating points that no scalar product code can reach. (iii) Sub-one-bit regime. Below b = 1 
+
+FIB QUANT alone operates, all the way down to b ≈ 0.19 at (k, N ) = (32 , 64) . The d = 256 check (omitted here for space) confirms the 1/d source-variance scaling of Appendix D. Full details, including the proof of Lemma 1 and a finite-rate large-d characterization, are given in Appendices B–C. 
+
+Rate granularity. Scalar Lloyd–Max tables offer integer-bit operating points. In contrast, 
+
+BFQ = {(log 2 N )/k : k, N ∈ Z} (9) is dense in (0 , ∞). Thus the rate can be selected after the serving budget is known, including sub-one-bit and fractional-bit regimes, without changing the random-access interface. 
+
+5 Experiments 
+
+The experiments test three questions. First, does the vector geometry predicted by Theorem 2 reduce source distortion on the canonical spherical-Beta law? Second, does this reduction survive in a real KV cache, where the relevant metric is attention-output fidelity rather than raw MSE? Third, does it improve end-to-end language-model performance at matched cache rates? 
+
+5.1 Per-coordinate MSE on the canonical source 
+
+We sample from fd,k for d ∈ { 64 , 256 } and k ∈ { 2, 4, 8, 16 , 32 }. Each F IB QUANT codebook is built by Table 2 with M = 30 N training samples, R = 4 random restarts, and TLM = 25 
+
+Lloyd–Max iterations per restart. The scalar baseline is Lloyd–Max quantization of the shifted-Beta marginal with L = 2 b levels. Figure 3 shows the expected separation. At the integer rates where scalar T URBO QUANT exists, FIB QUANT lies below it. Between those integer rates, F IB QUANT fills the missing fractional-bit operating points. Below one bit per coordinate, scalar random-access quantization has no corre-710 0 10 1  
+
+> Compression ratio = fp16 baseline MB / per-sequence MB (higher is better)
+> 0.5
+> 0.55
+> 0.6
+> 0.65
+> 0.7
+> 0.75
+> 0.8
+> 0.85
+> 0.9
+> 0.95
+> 1
+> Attention-output cosine similarity vs full precision
+> fp16 baseline
+> (ratio = 1)
+> INT (per-token)
+> KIVI
+> StreamingLLM
+> H2O
+> Low-rank SVD
+> TurboQuant
+> FibQuant
+> 1~2 bit per
+> coordinate Sub-1 bit regime
+> 15.1x compression
+> 23.3x compression
+> 34.1x compression
+
+Figure 4: Memory–fidelity Pareto on the real GPT-2 small KV cache (one sequence, Tseq = 512 ). Horizontal axis: compression ratio = (fp16 MB)/(per-seq MB) on a log scale, higher is better. Three guideline ratios are marked: 1× (fp16 baseline), 10 .7× (last sub-2-MB scalar-equivalent point), and 
+
+34 .1× (F IB QUANT ’s extreme point at k = 64 , N = 16384 ). Above ∼ 5×, F IB QUANT , T UR -
+
+> BO
+
+QUANT and KIVI sit on top of one another. Above 10 ×, every non-rotation universal method drops out, and the curve splits into low-rank SVD (calibrated, per-(layer, head)) and F IB QUANT 
+
+(universal, calibration-free). sponding point, while vector blocks continue to trade codebook size against rate. Repeating the experiment at d = 256 shifts the curves down by the predicted 1/d variance scaling. 
+
+5.2 Real GPT-2 KV cache 
+
+We next evaluate the full KV cache of GPT-2 small ( L = 12 , H = 12 , Tseq = 512 , d =64 ; 18 .87 MB per sequence at fp16) on 16 WikiText prompts. The comparison includes per-token I NT {2, 4, 8}, KIVI, S TREAMING LLM, H2O, low-rank SVD, scalar T URBO QUANT , and FIB QUANT . For each reconstructed cache ˆK, ˆV , we run the original softmax attention using 32 ran-dom queries and average the per-head output cosine similarity. Memory counts charge all per-vector side information, such as norms and KIVI scales, but amortize shared codebooks and rotations across cached sequences. Figure 4 has three regimes. Up to about 7× compression, F IB QUANT , T URBO QUANT , and KIVI all preserve attention outputs well; the choice is mainly systems-driven. Between 10 × and 25 ×,the non-rotation universal baselines either have no operating point or lose fidelity rapidly, while FIB QUANT continues along a dense curve. Beyond 20 ×, only low-rank SVD and F IB QUANT re-main competitive; the distinction is that SVD is calibrated per layer and head, whereas F IB QUANT 
+
+is universal and fixed-rate. The most compressed F IB QUANT point, (k, N ) = (64 , 16384) , reaches 
+
+34 .1× compression at 0.946 attention cosine similarity. 
+
+Why a full-vector code can win at a lower rate. At N = 16384 , the k = d = 64 point com-presses harder than the k = d/ 2 = 32 point ( 34 .1× versus 23 .3×) and nevertheless has higher attention fidelity ( 0.946 versus 0.931 ). The reason is geometric. With k = d, the normalized vector lies exactly on Sd−1, so all bits are spent on angular packing—the same quantity read by attention inner products. With k = d/ 2, the reconstruction is a product of two independently quantized halves and must also spend resolution on radial fluctuations that are less aligned with attention fidelity. The per-vector reconstruction table in Appendix G shows the corresponding cosine improvement, which the softmax amplifies at the attention-output level. 
+
+5.3 End-to-end LLM rate–distortion 
+
+Finally, we replace the runtime KV cache of TinyLlama-1.1B-Chat-v1.0 (Apache 2.0; L = 22 ,
+
+Hkv = 4 , d = 64 ) by x 7 → decode(encode( x)) . The model therefore uses exactly the recon-structed cache that would be stored in memory. We report sliding-window WikiText-103-raw per-8plexity ( Tseq = 8192 , window 2048 , stride 512 ) and zero-shot HellaSwag accuracy on 200 items. FIB QUANT is evaluated at b ∈ { 2, 2.5, 3, 3.5, 4}; I NT and T URBO QUANT at b ∈ { 2, 3, 4}.Table 1: End-to-end rate–distortion on TinyLlama-1.1B ( 524 ,288 WikiText-103 tokens, sliding win-dow 2048 / stride 512 ; 200 HellaSwag items, log-likelihood ranking). At every matched integer rate FIB QUANT (bold) strictly dominates both per-token I NT and rotated-scalar T URBO QUANT ; at frac-tional rates only F IB QUANT operates. fp16 reference: ppl = 8 .619 , HellaSwag = 49 .5% .                                                                       
+
+> Codec b(bits/coord) Compression WikiText-103 PPL ↓HellaSwag (%) ↑
+> fp16 baseline —1×8.619 49 .5
+> INT b=4 4.00 4×9.244 47 .5
+> INT b=3 3.00 5.3×36 .940 37 .0
+> INT b=2 2.00 8×4450 .506 22 .5
+> TURBO QUANT b=4 4.00 4×9.220 45 .5
+> TURBO QUANT b=3 3.00 5.3×11 .413 46 .5
+> TURBO QUANT b=2 2.00 8×56 .717 33 .5
+> FIB QUANT k=2 , N =256 4.00 4×8.715 47 .5
+> FIB QUANT k=2 , N =128 3.50 4.6×8.881 48 .0
+> FIB QUANT k=2 , N =64 3.00 5.3×9.248 47 .5
+> FIB QUANT k=4 , N =1024 2.50 6.4×10 .219 44 .0
+> FIB QUANT k=4 , N =256 2.00 8×15 .879 41 .5
+
+Table 1 shows the same pattern end-to-end. At matched integer rates, F IB QUANT improves both perplexity and HellaSwag. The gap is modest at b = 4 , larger at b = 3 , and decisive at b = 2 :FIB QUANT obtains 15 .88 perplexity, whereas scalar T URBO QUANT reaches 56 .72 and per-token INT collapses. The fractional points are equally important. At b = 3 .5, F IB QUANT is within 0.27 
+
+perplexity of fp16; at b = 2 .5, it provides an intermediate operating point unavailable to scalar fixed-bit codecs. This is the practical value of the dense rate axis: the cache budget can be chosen first, and the codec can be placed exactly on it. 
+
+6 Discussion and conclusion 
+
+Operating point and implementation. The encoder is a batched nearest-codeword search and the decoder is a table lookup followed by inverse rotation. The shared Pareto library is small—about 
+
+5 MB in our implementation—and is amortized across cached sequences. The useful operating regions are clear from Figure 4: full-vector or large-block codes are most attractive in the sub-one-bit regime; k ∈ { 4, 8} is effective around one to two bits per coordinate; and k = 2 is already sufficient in the higher-rate regime. If strict random access is relaxed, the emitted indices could be entropy-coded using a hyperprior [29]; that extension trades addressability for additional rate reduction and is therefore separate from the fixed-rate codec studied here. 
+
+Limitations. The theory identifies the canonical source and the high-rate vector gain, but finite-rate Lloyd–Max optimality for every practical (d, k, N ) is not characterized in closed form. The largest end-to-end experiment here uses TinyLlama-1.1B, and the GPT-2 study reports attention-output fidelity rather than full generation quality. Larger models, longer contexts, bootstrap confi-dence intervals over rotations and prompts, and fused-kernel implementations are natural next steps. 
+
+Conclusion. The random-access constraint looks like an engineering detail, but it has a mathemat-ical consequence: after normalization and Haar rotation, every cache block has the spherical-Beta law fd,k . Once that source is named, the design becomes classical. Use companding for the ra-dius, quasi-uniform spherical points for the direction, and Lloyd–Max to polish the finite-rate cells. The result keeps the fixed-address interface of scalar rotation codes, recovers vector shaping and density-matching gains, and opens the sub-one-bit regime without calibration. Random access does not preclude good source coding; it tells us which source to code. 9References 
+
+[1] B. Jiang, T. Yang, Y. Liu, C. Zhang, X. He, S. Jin. KVComp: A high-performance, LLM-aware, lossy compression framework for KV cache. arXiv:2509.00579 , 2025. [2] Z. Liu, J. Yuan, H. Jin, S. Zhong, Z. Xu, V. Braverman, B. Chen, X. Hu. KIVI: A tuning-free asymmetric 2-bit quantization for KV cache. In ICML , 2024. [3] C. Hooper, S. Kim, H. Mohammadzadeh, M. W. Mahoney, Y. S. Shao, K. Keutzer, A. Gholami. KVQuant: Towards 10 million context length LLM inference with KV cache quantization. In NeurIPS , 2024. [4] H. Kang, Q. Zhang, S. Kundu, G. Jeong, Z. Liu, T. Krishna, T. Zhao. GEAR: An efficient KV cache compression recipe for near-lossless generative inference of LLM. arXiv:2403.05527 , 2024. [5] A. Zandieh, M. Daliri, I. Han. QJL: 1-bit quantized JL transform for KV cache quantization with zero overhead. In AAAI , 2025. [6] A. Zandieh, M. Daliri, M. Hadian, V. Mirrokni. TurboQuant: Online vector quantization with near-optimal distortion rate. In ICLR , 2026. [7] J. Gao, X. Long, B. Hua, B. Cui, R. Cheng. RaBitQ: Quantizing high-dimensional vectors with a theoret-ical error bound for approximate nearest neighbor search. In SIGMOD , 2024. [8] J. Gao, Y. Gou, Y. Xu, J. Shi, Y. Yang, S. Li, R. C.-W. Wong, C. Long. Revisiting RaBitQ and TurboQuant: A symmetric comparison of methods, theory, and experiments. arXiv:2604.19528 , 2026. [9] Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian, C. Ré, C. Barrett, Z. Wang, B. Chen. H2O: Heavy-hitter oracle for efficient generative inference of large language models. In 
+
+NeurIPS , 2023. [10] G. Xiao, Y. Tian, B. Chen, S. Han, M. Lewis. Efficient streaming language models with attention sinks. In ICLR , 2024. [11] Y. Li, Y. Huang, B. Yang, B. Venkitesh, A. Locatelli, H. Ye, T. Cai, P. Lewis, D. Chen. SnapKV: LLM knows what you are looking for before generation. In NeurIPS , 2024. [12] Z. Cai, Y. Zhang, B. Gao, Y. Liu, Y. Li, T. Liu, K. Lu, W. Xiong, Y. Dong, J. Hu, W. Xiao. PyramidKV: Dynamic KV cache compression based on pyramidal information funneling. arXiv:2406.02069 , 2024. [13] C.-C. Chang, W.-C. Lin, C.-Y. Lin, C.-Y. Chen, Y.-F. Hu, P.-S. Wang, N.-C. Huang, L. Ceze, M. S. Ab-delfattah, K.-C. Wu. Palu: Compressing KV cache with low-rank projection. In ICLR , 2025. [14] T. Dettmers, M. Lewis, Y. Belkada, L. Zettlemoyer. LLM.int8(): 8-bit matrix multiplication for trans-formers at scale. In NeurIPS , 2022. [15] J. Max. Quantizing for minimum distortion. IRE Trans. Information Theory , 6(1):7–12, 1960. [16] S. P. Lloyd. Least squares quantization in PCM. IEEE Trans. Information Theory , 28(2):129–137, 1982. [17] A. Gersho. Asymptotically optimal block quantization. IEEE Trans. Information Theory , 25(4):373–380, 1979. [18] R. M. Gray, D. L. Neuhoff. Quantization. IEEE Trans. Information Theory , 44(6):2325–2383, 1998. [19] J. H. Conway, N. J. A. Sloane. Sphere Packings, Lattices and Groups . Springer, 3rd ed., 1999. [20] L. Kuipers, H. Niederreiter. Uniform Distribution of Sequences . Wiley, 1974. [21] H. Niederreiter. Random Number Generation and Quasi-Monte Carlo Methods . SIAM, 1992. [22] A. González. Measurement of areas on a sphere using Fibonacci and latitude–longitude lattices. Mathe-matical Geosciences , 42(1):49–64, 2010. [23] E. B. Saff, A. B. J. Kuijlaars. Distributing many points on a sphere. The Mathematical Intelligencer ,19(1):5–11, 1997. [24] M. Roberts. The unreasonable effectiveness of quasirandom sequences. Online article, 2018. [25] A. Sander. Fibonacci lattices. Online interactive notebook, https://observablehq.com/ @meetamit/fibonacci-lattices , 2018. [26] P. Larsson, L. K. Rasmussen, M. Skoglund. The Golden Quantizer: The complex Gaussian random variable case. IEEE Wireless Communications Letters , 7(3):312–315, 2018. [27] A. Mojsilovi´ c, E. Soljanin. Color quantization and processing by Fibonacci lattices. IEEE Trans. Image Processing , 10(11):1712–1725, 2001. [28] M. C. Viganó, G. Toso, G. Caille, C. Mangenot, I. E. Lager. Sunflower array antenna with adjustable density taper. International Journal of Antennas and Propagation , vol. 2009, Article ID 624035, 2009. [29] J. Ballé, D. Minnen, S. Singh, S. J. Hwang, N. Johnston. Variational image compression with a scale hyperprior. In ICLR , 2018. 
+
+10 A Codebook construction algorithm 
+
+Table 2 gives the full pseudocode for the F IB QUANT codebook construction described in Sec. 3.3: Beta-quantile radii, quasi-uniform directions, and multi-restart Lloyd–Max polish, together with the large-d shortcut from Appendix D that replaces the radial law by the typical shell. Table 2: F IB QUANT codebook construction (Beta-quantile radii, quasi-uniform directions, Lloyd– Max polish). 
+
+Input: block size k, codebook size N , ambient dimension d,training set size M , restarts R, Lloyd–Max iterations TLM .
+
+Output: refined codebook C⋆ ⊂ Bk .1: Set βd,k ← kk+2 · d−k−22 + 1 .2: for n = 1 , . . . , N do 
+
+3: qn ← (n − 12 )/N .4: if k = 2 then rn ← p1 − (1 − qn)4/d // closed form 5: else rn ← pBetaInv( qn; k/ 2, β d,k ).6: end for 
+
+7: Generate quasi-uniform directions {un}Nn=1 on Sk−1
+
+(Fibonacci spiral, Fibonacci sphere, or Roberts–Kronecker). 8: Initialize C(0) ← { rnun}Nn=1 .9: Sample X = {xi}Mi=1 from fd,k (or collect calibrated rotated KV blocks). 10: C⋆ ← C (0) , D⋆ ← ∞ .11: for j = 1 , . . . , R do // multi-restart 12: Rotate C(0) by a random orthogonal Ωj ∈ Rk×k to get C.13: for t = 1 , . . . , T LM do 
+
+14: Assign each xi to its nearest codeword in C;15: update each occupied codeword to the assigned centroid; 16: repair empty cells by splitting a high-distortion donor. 17: end for 
+
+18: if D(C) < D ⋆ then C⋆ ← C , D ⋆ ← D(C).19: end for 
+
+20: return C⋆.
+
+Large-d shortcut (Appendix D): replace lines 1–6 by 
+
+rn ← ¯R = pk/d for all n, then continue from line 7. 
+
+B Proof of Lemma 1 and Theorem 2 
+
+Spherical-Beta vector marginal (Lemma 1). Let G ∼ N (0 , I d) and U = G/ ∥G∥, Haar-uniform on Sd−1. At any x ∈ Bk, the remaining d − k coordinates lie on a sphere of radius p1 − ∥ x∥2 in dimension d − k − 1, with surface area ∝ (1 − ∥ x∥2)(d−k−2) /2. The polar normalization R 
+
+> Bk
+
+(1 −∥x∥2)α dx = πk/ 2 Γ( α+1) /Γ( α+k/ 2+1) with α = ( d−k−2) /2 gives the constant Cd,k . In polar coordinates x = ru the angular measure factors out and r has density ∝ rk−1(1 − r2)(d−k)/2−1; the change of variables z = r2 yields R2 ∼ Beta( k/ 2, (d − k)/2) . Specializing to k = 1 recovers the shifted-Beta coordinate marginal fd, 1(x) ∝ (1 − x2)(d−3) /2 used by scalar T URBO QUANT , with 
+
+EX = 0 and Var( X) = 1 /d .
+
+Vector-code dominance (Theorem 2). A scalar product code on k coordinates is a k-vector quan-tizer whose codebook is the Cartesian product Ak of Lsc scalar levels; the optimal k-vector quan-tizer minimizes MSE over a strictly larger class, so D⋆ 
+
+> FQ
+
+≤ Dsc , with equality iff the optimum 
+
+is a product (only at k = 1 ). For the high-rate decomposition, Bennett’s distortion integral gives 
+
+Dsc (d, b ) ∼ G1 2−2b Id, 1(1/3)3 per coordinate, hence k G 1 2−2b Id, 1(1/3)3 for k coordinates. Ger-sho’s high-rate VQ result [17] gives Dvec FQ (d, k, b ) ∼ G⋆k 2−2b Id,k (k/k+2 )(k+2) /k per vector; divid-ing by k and taking the ratio yields (8). Both factors are ≥ 1.11 C Large-d finite-rate behavior 
+
+The high-rate decomposition takes N → ∞ with (d, k ) fixed; in serving, d is also large. 
+
+Theorem 3 (Large-d finite-rate RD) . Let X = R U as in Lemma 1. (i) Fixed k, d → ∞:√d X ⇒ Z ∼ N (0 , I k), and for every fixed N , d · D⋆d,k,N → inf |C|≤ N EZ min c∈C ∥Z − c∥2.(ii) Proportional regime, k/d → ρ ∈ (0 , 1) : R2 → ρ in probability, and for the fixed-shell code-book CN = {√ρ v i}Ni=1 with directions vi ∈ Sk−1, Dd,k,N (CN ) = 2 ρ EU [1 − max v ⟨U, v ⟩] + o(1) .Under the equal-cap heuristic with N = 2 bk and tb = √1 − 2−2b, the asymptotic shell distortion is 
+
+2ρ(1 − tb) for fixed-radius caps and ρ 2−2b for Lloyd-centroid caps. 
+
+The proof reduces to the central limit theorem in (i) and to weak convergence of the radial CDF plus an equal-cap measure argument in (ii). Regime (i) cautions against asymptotic intuition for the small vector sizes used in KV caches; regime (ii) confirms that once k scales with d, the only design problem is angular packing on Sk−1, where Fibonacci-type direction sets are natural. 
+
+D Large-d simplification of the radial design 
+
+The radial spread of fd,k has standard deviation sd( R) ≈ (2 √d)−1 around the typical radius 
+
+¯R = pk/d . As d grows the source concentrates on an ever-thinner shell, and the Beta-quantile radial design collapses to a single-radius design: the Lloyd-polished single-shell codebook Cshell  
+
+> d
+
+=
+
+{ ¯R u n}Nn=1 has the same finite-rate optimum as the Beta-quantile codebook CBeta  
+
+> d
+
+, with the differ-ence vanishing at O(1 /d ) in normalized MSE. Use (5) at moderate d; use the single-shell init at large d with the same Lloyd polish. 
+
+E Fibonacci sphere and the multi-shell codebook at k = 3 
+
+This appendix gives the angular construction at k = 3 in two stages: single-shell (uniform angular quantization at one fixed radius) and multi-shell (composing several Beta-quantile radii with one Fibonacci-sphere direction set per shell). Together they specify the deterministic 3D codebook that FIB QUANT Lloyd-polishes before deployment. 
+
+Single-shell Fibonacci sphere: uniform angular quantization. On the unit sphere S2 the Fi-bonacci sphere places Ma codewords at equal-area latitude bands times golden-angle azimuth [25, 22]: 
+
+zn = 1 − 2n−1 
+
+> Ma
+
+, θn = 2 π(n−1)(1 −1/φ ), un =  p 1 − z2 
+
+> n
+
+cos θn, p1 − z2 
+
+> n
+
+sin θn, z n
+
+,
+
+(10) where φ = (1 + √5) /2 is the golden ratio. The latitude choice zn = 1 − (2 n − 1) /M a gives bands of equal area 4π/M a, and the golden-angle azimuth ensures the in-band azimuthal positions form a low-discrepancy 1D sequence (the fractional parts of n/φ have discrepancy O(log Ma/M a), the optimal rate among 1D sequences). The result is a tessellation of S2 in which every Voronoi cell has area ≈ 4π/M a and aspect ratio close to one — the geometric property that makes (10) the right deterministic init for any single-shell angular code on S2. Figure 5 visualizes the codewords on S2
+
+for Ma ∈ { 32 , 64 , 128 , 256 }.
+
+Multi-shell extension: composing radii with directions. The construction in Sec. 3.3 places every codeword on its own Beta-quantile radius — that is, N distinct shells with one direction per shell. At k = 3 this is wasteful because directional packing on S2 has its own resolution limit: the single-shell Fibonacci sphere of (10) already tiles S2 with angular spacing ≈ 1/√Ma. We therefore parameterize the codebook as a multi-shell construction 
+
+C(S, M a) = 
+
+> S
+
+[
+
+> s=1
+
+ ˜rs u(s) 
+
+> n
+
+: n = 1 , . . . , M a , N = S · Ma, (11) with ˜rs = pBetaInv( qs; k/ 2, β d,k ) at qs = ( s − 12 )/S and {u(s) 
+
+> n
+
+}Ma 
+
+> n=1
+
+a fresh Fibonacci-sphere direction set per shell. At fixed budget N = S ·Ma the design problem reduces to a one-dimensional 12 Figure 5: Fibonacci sphere of Ma codewords on S2 for Ma ∈ { 32 , 64 , 128 , 256 }, shown in ortho-graphic projection from a fixed viewpoint. Equal-area latitude bands times golden-angle azimuth give Voronoi cells of area ≈ 4π/M a and unit aspect ratio. search over the integer factorization (S, M a) that minimizes training MSE. In practice the optimum lies at S ≈ O (d1/3) for k = 3 and is found by exhaustive enumeration of all factor pairs in O(√N )
+
+time before the Lloyd–Max polish. At moderate d this yields up to 0.3 dB lower training MSE at 
+
+k = 3 for the rate range studied here. At k ≥ 4 the same multi-shell template is used with the single-shell direction set replaced by the Roberts–Kronecker rank-one sequence ξn,j = {(n − 12 ) ϕ−jk }
+
+where ϕk is the positive real root of ϕk+1 = ϕ + 1 . Figure 6 visualizes the construction explicitly at 
+
+d = 64 , L = 4 , Ma = 32 (N = 128 ): each individual shell is shown alone in the top row, and the combined codebook is shown in 3D below. 
+
+Figure 6: F IB QUANT k = 3 Lloyd-refined multi-shell codebook (11) at d = 64 , L = 4 shells, 
+
+Ma = 32 codewords per shell ( Ncw = 128 ). Top row: each shell ℓ = 1 , . . . , 4 shown alone as 
+
+Ma = 32 Fibonacci-sphere codewords scaled by the per-shell Beta-quantile radius rℓ and Lloyd-polished against Haar samples on that shell. Bottom: all four shells overlaid in 3D, with a faint wireframe at the outermost shell radius for context. Per-shell radii are r1 ≈ 0.117 , r2 ≈ 0.201 ,
+
+r3 ≈ 0.265 , r4 ≈ 0.330 , sorted from inside to outside. The “separate” Lloyd polish — each shell refined independently against samples on its own typical shell — recovers most of the multi-shell gain at a fraction of the cost of joint Lloyd over all N = 128 codewords. 
+
+F Sub-linear encoder complexity for large N : hierarchical list decoding 
+
+The naive F IB QUANT encoder for one k-vector is one batched dot-product against the N codewords, costing O(N k ) FLOPs per block and O(dN ) per cached vector. At the most aggressive operating points used in the paper ( k = 64 , N = 16384 at d = 64 ) this is ∼ 10 6 FLOPs per cached vector — still cheap on a GPU, but the linear-in-N scaling becomes the dominant decode-time cost when 
+
+N grows. This appendix sketches two complexity-reduction ideas that reduce the encoder cost from O(N ) to O(√N ) per k-block while preserving the bitstream and the random-access decoder interface. Decoding is unaffected — it remains a single table lookup per index. 13 Stage 1: radius-first search. The multi-shell construction (11) writes C = SLℓ=1 {rℓ u(ℓ) 
+
+> n
+
+}Ma
+
+> n=1
+
+with L Beta-quantile radii and Ma = N/L direction codewords per shell. Encoding can exploit this factorization: 1. compute ρ = ∥y(m)∥2 once and find ℓ⋆ = arg min ℓ |ρ − rℓ| in O(L) scalar comparisons; 2. search the angular code on shell ℓ⋆ alone: ˆn = arg min n ∥y(m) − rℓ⋆ u(ℓ⋆) 
+
+> n
+
+∥2 in O(Ma) = 
+
+O(N/L ) inner products. The total cost is O(L + N/L ), minimized at L = √N with total work Θ( √N ) per k-block. At 
+
+(k, N ) = (32 , 8192) this is roughly L = Ma ≈ 90 versus N = 8192 , an ∼ 90 × FLOP reduction at the encoder. The trade-off is a small bias: the rℓ-nearest shell may not contain the (ru )-nearest codeword when ρ falls between two shells. In the rate range studied here the resulting MSE penalty is below 0.1 dB on the canonical fd,k source. 
+
+Stage 2: hierarchical direction code (list decoding). For k > 3 the per-shell direction code itself can be restructured into a two-level tree, in the spirit of classical tree-structured vector quantiza-tion [18]. Cluster the Ma direction codewords on Sk−1 into K parent groups by k-means or by a Roberts–Kronecker partition; let μj ∈ Sk−1 be the mean direction of group j, and Gj the indices of its Ma/K children. Encoding a direction v proceeds in two stages: 1. compare v against the K parent centroids {μj }Kj=1 and keep the top-T matches by inner product, forming a candidate list L(v) of size T · Ma/K ;2. search exhaustively within L(v) for the nearest sub-codeword. The total work is O(K + T · Ma/K ), minimized at K = √T M a with cost Θ( √T M a). The list size 
+
+T controls the accuracy / complexity trade-off: T = 1 is greedy nearest-cluster decoding (fast, occa-sionally suboptimal), while T = K recovers the exhaustive search. For Fibonacci-sphere / Roberts– Kronecker direction sets the parent clusters are themselves quasi-uniform on Sk−1, so the event “the true nearest codeword’s parent is not in the top-T list” has probability that decays geometrically in 
+
+T .
+
+Composition. Composing both stages, the per-k-block cost becomes O(L + K + T M a/K ). At 
+
+L = K = pN/T this is Θ( √T N ) FLOPs per block, against Θ( N ) for the naive encoder. The bitstream is unchanged: the encoder still emits one index in {1, . . . , N } per block, formed as the pair (ℓ⋆, ˆn) with affine offset ℓ⋆ · Ma + ˆ n; random-access addressing is preserved. The decoder is therefore unchanged, and a downstream consumer (e.g. a fused attention kernel) cannot tell whether the encoder used the naive search or the hierarchical one. The cost is paid only on the cache-write path, which already runs once per token, while the decode path — which runs Tseq times per query and is the actual bandwidth bottleneck — is identical in either case. 
+
+G Per-vector reconstruction fidelity on the GPT-2 small KV cache 
+
+Table 3 complements the attention-output cosine similarity of Figure 4 with two per-vector recon-struction metrics, averaged across all 12 · 12 · Tseq = 73 ,728 KV vectors of one GPT-2 small sequence: per-vector cosine similarity cos( x, ˆx) and normalized reconstruction MSE NMSE = 10 log 10 (∥x − ˆx∥2/∥x∥2) in dB. Both reconstruction metrics track cos attn monotonically; T URBO -QUANT at b = 4 recovers vectors at cos = 0 .996 (−20 .4 dB), and F IB QUANT at b = 0 .22 still preserves cos ≈ 0.80 (−5.7 dB) — low at the vector level, but enough downstream fidelity to keep attention outputs at 0.946 cosine similarity versus full precision. 14 Table 3: Per-vector reconstruction fidelity on the GPT-2 small KV cache (one sequence). Per-coord rate b, per-vector cos( x, ˆx) (↑), NMSE in dB ( ↓), and attention-output cosine similarity cos attn (↑). 
+
+Method Operating point b cos( x, ˆx) ↑ NMSE (dB) ↓ cos attn ↑
+
+TURBO QUANT b = 4 4.000 0.996 −20 .40 0.998 
+
+TURBO QUANT b = 3 3.000 0.984 −14 .79 0.993 
+
+TURBO QUANT b = 2 2.000 0.942 −9.42 0.974 
+
+FIB QUANT k = 2 , N = 64 3.000 0.986 −15 .34 0.994 
+
+FIB QUANT k = 4 , N = 256 2.000 0.951 −10 .19 0.980 
+
+FIB QUANT k = 8 , N = 4096 1.500 0.916 −8.08 0.967 
+
+FIB QUANT k = 8 , N = 1024 1.250 0.880 −6.56 0.955 
+
+FIB QUANT k = 8 , N = 256 1.000 0.828 −5.07 0.937 
+
+FIB QUANT k = 16 , N = 4096 0.750 0.805 −5.21 0.933 
+
+FIB QUANT k = 16 , N = 8192 0.812 0.811 −5.47 0.940 
+
+FIB QUANT k = 64 , N = 16384 0.219 0.795 −5.74 0.946 
+
+15

@@ -1,0 +1,1831 @@
+Title: Training Transformers for KV Cache Compressibility
+
+URL Source: https://arxiv.org/pdf/2605.05971v2
+
+Published Time: Wed, 13 May 2026 00:45:13 GMT
+
+Number of Pages: 32
+
+Markdown Content:
+# Training Transformers for KV Cache Compressibility 
+
+Yoav Gelberg 1∗ Yam Eitan 2∗ Michael Bronstein 1,3 Yarin Gal 1 Haggai Maron 2,41University of Oxford 2Technion – Israel Institute of Technology 3AITHYRA 4NVIDIA 
+
+# Abstract 
+
+Long-context language modeling is increasingly constrained by the Key–Value (KV) cache, whose memory and decode-time access costs scale linearly with the prefix length. This bottleneck has motivated a range of context-compression methods, from token-level summarization to recent optimization-based KV cache compression methods. These post-hoc methods operate on the KV cache of a fixed pretrained model, so their effectiveness is fundamentally limited by how well the model’s internal representations can be compressed. In this work, we formalize the notion of KV compressibility and show that it is a property of the learned representations , rather than of the context alone. We prove that almost any sequence-to-vector function admits both highly compressible and inherently non-compressible transformer implementations, highlighting the need to guide transformers toward compressible representations during training. Motivated by this, we propose KV -Compression Aware Training (KV-CAT), a continued pretraining procedure that incentivizes the emergence of compressible representations. We introduce a train-time KV sparsification policy that masks KV slots during training. This forces the model to use fewer KV slots and encourages it to learn representations amenable to post-hoc compression. Empirically, we show that KV-CAT improves the quality–budget tradeoff of downstream compression methods across retrieval, long-context question answering, and perplexity-based evaluation of compressed-prefix continuation. 
+
+# 1 Introduction 
+
+Language models (LMs) are increasingly deployed in long-horizon settings, from understanding large codebases, long-form documents, and personal data repositories [ 41 ; 23 ; 1], to long-form reasoning and continuously learning agents [ 8 ; 60 ; 35 ]. Using autoregressive transformer-based LMs in these settings introduces a significant memory bottleneck: the Key–Value (KV) cache. During inference, these models must store the key and value vectors for every token, at every layer and (KV-)attention head. For long sequences, this cache can dominate both memory usage and decoding cost, turning context length into a primary serving bottleneck [59; 34; 52]. A substantial body of recent work has sought to mitigate this bottleneck, broadly falling into two categories. The first category focuses on designing more efficient alternatives to transformers. Examples include linear attention mechanisms [29; 11; 20; 54], state space models [18; 17], sparse attention variants [ 3; 57 ], and more. These methods significantly reduce the computational cost of long-context language modeling. However, this efficiency typically comes at the cost of empirical performance, and such models still lag behind transformers at scale. The second category focuses on inference-time interventions applied to a fixed pretrained transformer. These methods either operate on the input context or, more generally, directly on the KV cache. Early approaches are largely heuristic, including textual summarization [ 46 ; 42 ], learned token 
+
+> ∗Equal contribution. Order determined by flipping a 2016-issued one-pound coin. Preprint.
+> arXiv:2605.05971v2 [cs.LG] 12 May 2026
+
+a1 a2 a3 a4 a5 a6 a7 a8                                  
+
+> masked dense
+> k1,v1k2,v2k3,v3k4,v4k5,v5k6,v6k7,v7k8,v8
+> k1,v1k2,v2k3,v3k4,v4k5,v5k6,v6k7,v7k8,v8
+> k1,v1k2,v2k3,v3k4,v4k5,v5k6,v6k7,v7k8,v8
+> k1,v1k2,v2k3,v3k4,v4k5,v5k6,v6k7,v7k8,v8
+> k1,v1
+> k1,v1
+> k1,v1
+> k1,v1
+> k2,v2
+> k2,v2
+> k2,v2
+> k2,v2
+> k3,v3
+> k3,v3
+> k3,v3
+> k3,v3
+> k4,v4
+> k4,v4
+> k4,v4
+> k4,v4
+> k5,v5
+> k5,v5
+> k5,v5
+> k5,v5
+> k6,v6
+> k6,v6
+> k6,v6
+> k6,v6
+> k7,v7
+> k7,v7
+> k7,v7
+> k7,v7
+> k8,v8
+> k8,v8
+> k8,v8
+> k8,v8
+> Lmask Lbudget Lanchor
+> joint update: model θ+ routers
+
+Figure 1: KV-Compression Aware Training (KV-CAT). A context a goes through both masked (left) and dense (right) forward passes. In the masked forward pass, routers (orange) compute masks for groups of consecutive layers, marking KV slots as active (green) or inactive (muted green). In the dense forward pass (blue), all KV slots are kept. The output of the masked forward pass is used to compute Lmask , router distributions are used to compute Lbudget , and the outputs of the dense forward pass are used to compute Lanchor . These are jointly used to update the parameters. filtering [ 24 ], and policies based on attention patterns, recency, heavy-hitter behavior, or layer-wise importance [ 59 ; 52 ; 34 ; 6]. More recently, optimization-based KV cache compression 2 methods have emerged as powerful techniques. For example, Eyuboglu et al. [16] use gradient-based optimization to match the distribution induced by the original cache, while Zweiger et al. [61] employ layer-wise objectives to reproduce its attention traces. The success of KV cache compression suggests that the full KV cache often contains redundancies. However, as most approaches operate on a fixed model , they are inherently limited by how well that particular model’s representations can be compressed. Crucially, this compressibility is not deter-mined by the input sequence alone: two transformers can use very different internal representations when processing the same sequence, yet have identical next-token distributions. Consequently, some transformers’ KV caches may be more amenable to compression than others. 
+
+This work. In this paper, we study the following question: can transformer LMs be trained in a way that leads to KV caches that are more amenable to post-hoc compression? This shifts the target from the KV cache compression algorithm to the model itself. To address this question, we introduce the notion of KV-compressibility . Informally, a transformer is KV-compressible if there exists a compression policy that maps the KV cache of long input sequences to a shorter KV cache while preserving the model’s next token distribution. Our theoretical results show that for almost any sequence-to-vector function, there exist transformer implementations whose prefix can be compressed to a single KV pair, as well as implementations for which any non-trivial compression incurs a constant error. To build intuition, we consider a motivating example: character histogram computation. We show that natural transformer implementations of this computation may produce incompressible token representations, whereas more structured alternatives are highly compressible. This motivates treating KV compressibility as an explicit training objective. Guided by this perspective, we propose KV -Compression Aware Training (KV-CAT), a continued pretraining (CPT) procedure that promotes the emergence of KV-compressible internal represen-tations. Starting from a pretrained transformer, KV-CAT introduces a train-time KV sparsification policy which masks out a constant fraction of the KV slots. The training objective combines a self-distillation loss, which matches the masked model’s distribution to the dense model’s distribution, and an NTP loss applied to the unmasked forward pass to preserve uncompressed model behavior. This exposes the model to the information bottleneck induced by KV cache compression during training, encouraging it to reorganize its representations into a more compressible form while maintaining performance in the uncompressed setting. 
+
+> 2These methods are also commonly referred to as KV compaction methods in the literature.
+
+2To demonstrate that KV-CAT improves the quality–budget tradeoff of post-hoc KV cache compression, we apply it to Q WEN 2.5 models [ 51 ], and evaluate state-of-the-art optimization-based compression methods on the KV caches of the resulting checkpoints. We measure performance along three axes: (i) suffix perplexity under prefix compression, (ii) retrieval accuracy from a compressed prefix, and (iii) compressed long-context question answering on LongBench v2 [ 2 ] tasks. Across a range of compression budgets, model sizes, and compression methods, models trained with KV-CAT consistently achieve a better quality–budget tradeoff than the base model, yielding improvements of up to 3.21 × in suffix perplexity retention, 5× in optimization time, 68% in retrieval accuracy, and 39% in long-context QA. Importantly, our goal is not to replace post-hoc methods, but to make models more amenable to them, enabling more effective compression. 
+
+Contributions. In summary, this paper makes the following contributions: (1) We characterize KV-compressibility as a property of the learned transformer representation, rather than solely of the task or the input sequence. (2) We provide theoretical results showing that almost all sequence-to-vector functions can admit both compressible and non-compressible transformer implementations. (3) We propose KV-CAT, a training procedure that promotes compressible KV representations. (4) We show that KV-CAT improves post-hoc KV cache compression at matched cache and optimization budgets across: suffix perplexity retention, retrieval, and long-context QA. 
+
+# 2 KV Cache Compression: Problem Formulation 
+
+In this section, we theoretically formalize the KV cache compression problem. A KV cache compres-sion policy for a transformer with L layers is a collection of functions C = ( c1, . . . , cL), where each 
+
+cℓ maps sequences of n key–value pairs to sequences of length r(n) ≤ n. For KV pairs in layer ℓ
+
+(K, V ) = ([ k1, . . . , kn]⊤, [v1, . . . , vn]⊤), (1) we write 
+
+cℓ(K, V ) = ([ ˜k1, . . . , ˜kr(n)]⊤, [˜ v1, . . . , ˜vr(n)]⊤), (2) where r(n) is referred to as the compression budget . Given a transformer M, a compression policy 
+
+C, and a sequence of tokens a = ( a1, . . . , a n), we define a compressed model MC,a that shares the parameters of M but uses a modified forward pass. For an input sequence b, the computation of 
+
+MC,a(b) proceeds as in M([ a, b]) , except for the attention over prefix tokens, which is augmented the following way: at layer ℓ, let (Ka, Va) denote the KV cache of a, based on the original model 
+
+M and let Y be the representations of b after layer ℓ − 1 of MC,a. We compute 
+
+Qb = Y W Q, Kb = Y W K , Vb = Y W V , (3) and replace the prefix KV cache (Ka, Va) with its compressed version ( ˜Ka, ˜Va) = cℓ(Ka, Va).The attention computation then becomes 
+
+AttnHead( Y ) = softmax 1
+
+√dk
+
+Qb
+
+ ˜Ka
+
+Kb
+
+⊤!  ˜Va
+
+Vb
+
+
+
+. (4) Finally, following standard convention in next-token prediction transformers, we define the output of MC,a(b) to be the representation of the final token. Thus, compression modifies only the prefix KV pairs, leaving the remainder of the computation unchanged. We now formalize the notion of transformer KV-compressibility .
+
+Definition 2.1. Fix N ∈ N, ε > 0, and let r : N → N be a budget function. A transformer M is said to be (N, ε, r )-compressible 3 if there exists a KV cache compression policy C with budget r such that for every pair of sequences a, b of lengths n and k respectively, and with a combined length 
+
+n + k ≤ N , it holds that 
+
+∥M([ a, b]) − MC,a(b)∥ < ε. (5) A more formal treatment of these terms and definitions is provided in Appendix A.1.          
+
+> 3We include Nexplicitly, as many natural sequence-to-vector functions require model dimension scaling with N(e.g.,
+> O(N)or O(log N)) in order to achieve arbitrarily accurate approximation; see e.g., Sanford et al. [48]; Yehudai et al. [55].
+
+33 Motivation and Theoretical Results 
+
+We begin with a theoretical analysis of transformer KV-compressibility, motivated by the following central question: 
+
+Can the same sequence-to-vector function admit transformer implementations with different levels of KV-compressibility? 
+
+The following theorem shows that for almost any sequence-to-vector function, there exist transformer architectures that admit both fully compressible and inherently non-compressible implementations. The proof is deferred to Appendix A.3. 
+
+Theorem 3.1. Let A be a finite alphabet, and let f : S 
+
+> n≤N
+
+An → Rdout be a sequence-to-vector function. Suppose that there exists a sequence a of length n and two sequences b1, b2 of length 
+
+k ≤ N − n such that 
+
+f ([ a, b1]) ̸ = f ([ a, b2]) . (6) 
+
+Then for every ε, C > 0:1. There exists a transformer that approximates f and is (N, ε, 1) -compressible. 2. There exists a transformer of the same architecture, that approximates f but is not (N, C, r )-compressible for any budget function satisfying r(n) < n .
+
+We note that, as KV cache compression methods perform well in practice, the worst-case behavior implied by this theorem may not typically arise; understanding in what scenarios this occurs is an interesting direction for future work. Nevertheless, the result highlights that compressibility can vary across transformer implementations, suggesting the potential benefit of guiding transformers toward more compressible representations at train time. Before turning to training methods, we build intuition through a simple motivating example. We show that even for natural sequence-to-vector functions, simple transformer implementations can yield non-compressible representations, while more structured, highly compressible implementations exist. 
+
+Motivating example: histogram computation. Let A = [ m] be a finite alphabet. Given a sequence 
+
+a = ( a1, . . . , a n) ∈ An, the histogram function computes the empirical distribution of symbols, 
+
+fhist (a) =   n1 
+
+> n
+
+, . . . , nm
+
+> n
+
+ , (7) where ni = |{ j : aj = i}| . This is a natural sequence-to-vector function that depends only on aggregate statistics of the input. A straightforward way to implement this function with a 2-layer transformer is as follows. First, take the embedding map to be 4 emb( ai, i ) = eai . We take the first transformer layer to be the identity 5, and then apply a second attention layer with uniform attention weights (by setting WQ = 0), So that the representation of the final token becomes the average of all previous token embeddings, obtaining 
+
+M(a) = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+eai = fhist (a). (8) This gives a natural implementation of the histogram function with a very simple architecture (see Appendix A.2 for details). Interestingly, we find that this implementation is not compressible: 
+
+Proposition 3.2. For any N ∈ N and any budget function r with r(N −1) < N −1 there exists a con-stant C > 0 such that the above transformer implementation of fhist is not (N, C, r )-compressible. Proof sketch. Recall that in the compressed setting the input is [a, b] and we want to compress the KV caches associated with the prefix a. We begin by observing that since in the first layer 
+
+WO = 0, compressing the prefix of the first layer has no effect on the representation of the tokens of 
+
+b. Additionally, since in the second layer WQ = 0, the attention scores are independent of the keys,         
+
+> 4We typically assume token embeddings of the form emb( ai, i ) = uai+pi. The embedding map used above can be obtained from this representation by a minor adjustment to the first attention layer; see Appendix A.2 for details.
+> 5This can be done by setting WO=0and choosing the feedforward network to be the identity.
+
+4and therefore the attention weights are uniform across all tokens. Thus, for a prefix sequence a of length n and a suffix b of length k, the compressed model satisfies, for any compression policy C,
+
+MC,a(b) = 1
+
+r(n) + k
+
+ r(n)
+
+X
+
+> i=1
+
+˜vi +
+
+> k
+
+X
+
+> i=1
+
+ebi
+
+
+
+. (9) Similarly, the full model computes 
+
+M([ a, b]) = 1
+
+n + k
+
+ nX
+
+> i=1
+
+eai +
+
+> k
+
+X
+
+> i=1
+
+ebi
+
+
+
+. (10) For notational convenience, define 
+
+˜v = 1
+
+r(n) + k
+
+> r(n)
+
+X
+
+> i=1
+
+˜vi, ˜a = 1
+
+n + k
+
+> n
+
+X
+
+> i=1
+
+eai , ˜b =
+
+ 1
+
+r(n) + k − 1
+
+n + k
+
+ kX
+
+> i=1
+
+ebi . (11) Then the difference between the compressed and full outputs can be written as 
+
+∥MC,a(b) − M([ a, b]) ∥ = ˜v − ˜a + ˜b . (12) Both ˜v and ˜a depend only on the prefix a, while ˜b depends on the suffix b and can vary over a range of values. For MC,a(b) to ε-approximate M([ a, b]) uniformly over all suffixes b, Equation 12 requires that the fixed term ˜v − ˜a be ε-close to every possible value of ˜b. For sufficiently small ε,this is impossible. Hence, the error is bounded below by a constant. For a formal proof of Proposition 3.2, see Appendix A.2. We now show that a slight modification of the above implementation yields highly compressible KV representations. 
+
+Proposition 3.3. For every N ∈ N and ε > 0, there exists a fhist transformer implementation with the same architecture as above that is (N, ε, r )-compressible with r(n) = 1 .Proof sketch. We assume an injective token embedding of the form emb( ai, i ) = uai + pi where pi
+
+are positional embeddings. As in the previous construction, we set WO = 0 in the first transformer layer, but now choose the feedforward network to approximately satisfy 
+
+ρ1(uai + pi) = [ e⊤ 
+
+> ai
+
+, p⊤ 
+
+> i
+
+, 0⊤, 0⊤]⊤ (13) That is, each token representation is partitioned into four blocks: the first encodes token identity, the second retains positional information, and the last two are auxiliary slots used later in the construction. We then apply a second attention layer with WQ = 0, so attention is uniform. With the residual connection, the final token representation can be made to contain the empirical average in the third block while preserving the positional encoding pn, which encodes the sequence length. The final feedforward network ρ2 is designed to behave differently depending on the available information. In the uncompressed setting, the value of the final block remains 0, in which case it simply returns the empirical average (from the third slot). In the compressed setting, however, an optimal compression policy can provide additional positional information in the final vector block, which can then be used to correct for the distortion introduced by compression. Specifically, we define a compression policy that maps the prefix to a single KV pair, whose value stores the unnormalized histogram together with the prefix length (encoded via pn in the last block). When processing a suffix, attention averages this summary with the suffix tokens, producing a mis-scaled estimate of the histogram. Crucially, the model now has access to both the original prefix length and the total sequence length (via positional encodings). The final feedforward network uses this information to re-normalize the average and recover the correct histogram. This establishes (N, ε, r )-compressibility with r(n) = 1 .For a formal proof of Proposition 3.3, see Appendix A.2. Note that while incorporating positional information to correct attention weights under compression is conceptually straightforward, a standard transformer trained only on full (uncompressed) sequences is not explicitly encouraged to learn such a mechanism. Since computing the histogram depends only on token identities and is invariant to their positions, the model can, in principle, learn to ignore positional information. This suggests that obtaining compressible solutions may benefit from a training procedure that encourages compression. 5Table 1: KV-CAT matches base model performance. We test our KV-CAT-trained Q WEN 2.5 checkpoints on a variety of QA benchmarks without any KV cache compression applied. Values are normalized multiple-choice accuracy (%) with 1000 examples per task.                                       
+
+> Model Variant HellaSwag WinoGrande PIQA OpenBookQA ARC-E ARC-C Avg. QWEN 2.5-0.5B Base 54.6 52.9 70.4 38.2 60.8 32.2 51.5 KV-CAT 53.6 54.1 72.1 37.4 63.6 32.4 52.2
+> QWEN 2.5-1.5B Base 68.6 60.5 76.2 40.0 73.3 45.2 60.6
+> KV-CAT 66.4 60.5 75.5 40.6 73.9 43.5 60.1
+
+# 4 Training for KV Cache Compressibility 
+
+As shown in the previous section, training transformers to solve sequence-to-vector tasks may admit both compressible and non-compressible solutions. This naturally raises the following question: Can we guide transformers toward more compressible representations during training? To answer this question, we introduce KV-Compression Aware Training (KV-CAT), a continued pretraining procedure that explicitly encourages compressible internal representations. 
+
+Train-time KV sparsification policy. Our goal is to train transformers whose representations are more amenable to SOTA optimization-based KV cache compression methods. Ideally, one would incorporate such methods directly into the training loop, adapting the compression policy as the model evolves; however, this is computationally prohibitive. A practical alternative is to introduce a simple and scalable training-time KV sparsification policy, such as random KV slot dropping, attention-based filtering, or a lightweight parameterized policy that adapts jointly with the model. In our ablations (Appendix D.1), we find that a parameterized policy provides the strongest performance, in terms of both downstream compression and retention of uncompressed accuracy. We hypothesize that this is because adaptive policies better align with the test-time behavior of optimization-based compressors, whereas fixed policies may be too rigid. Accordingly, in our experiments, we implement KV-CAT using lightweight learned routers, described below, while emphasizing that the framework is general and can accommodate a range of sparsification policies. 
+
+Routing mechanism. Starting from a pretrained decoder-only transformer, we insert learned routers 
+
+between consecutive layers and train them jointly with the model. At layer ℓ, the router takes as input the token representations from layer ℓ − 1 and outputs a scalar score in [0 , 1] for each token, indicating its importance. These scores are thresholded using a (non-trainable) hyperparameter τ to produce a binary mask: tokens with scores above τ are active in attention, while the rest are masked out. For efficiency, routers are implemented as linear attention modules. Routers are initialized with all tokens active (i.e., all scores are set to 1), so training begins from the standard dense transformer and gradually learns to mask tokens, using a budget loss (defined below). To further reduce overhead, routers are shared across groups of consecutive layers. See Appendix B for additional details. 
+
+Training objective. We train the transformer using an augmented next-token prediction (NTP) objective. For a sequence a = ( a1, . . . , a n), let pmask  
+
+> θ
+
+(· | a<i ) denote the model distribution when masking is applied to the KV cache, and pdense  
+
+> θ
+
+(· | a<i ) denote the distribution under the standard (unmasked) forward pass. During training, we optimize 
+
+L(θ) = λmask Lmask + λbudget Lbudget + λanchor Lanchor . (14) The first term is given by 
+
+Lmask = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+DKL 
+
+ sg[ pdense  
+
+> θ
+
+(· | a<i )] pmask  
+
+> θ
+
+(· | a<i ) , (15) where sg denotes the stop-gradient operation. This term trains the masked forward pass to match the dense model distribution via self-distillation. When the KV-sparsification policy is learnable, we include a budget loss designed to maintain a desirable retention rate. Following Hwang et al. [22] , in our implementation, we use: 
+
+Lbudget = ρ−1F G + (1 − ρ)−1(1 − F )(1 − G), F = 1
+
+L
+
+> L
+
+X
+
+> i=1
+
+mi, G = 1
+
+L
+
+> L
+
+X
+
+> i=1
+
+qi, (16) 6Figure 2: KV-CAT speeds up gradient-based KV cache compression. We plot the gap in suffix perplexity under full/compressed-prefix inference throughout gradient-based KV cache optimization. Each panel fixes a different KV keep ratio. Across ratios, the KV-CAT checkpoint achieves a comparable ∆PPL in fewer optimization steps than the base model, yielding up to a 5× speedup. where qi and mi denote the router’s score and binary mask for token i, respectively, and ρ is the target retention rate. The loss is averaged across router layers, and gradients are taken with respect to the scores qi only. The final term 
+
+Lanchor = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+− log pdense  
+
+> θ
+
+(ai | a<i ), (17) applies standard NTP to the output of the dense forward pass, preserving its distribution and providing a stable teacher for distillation. 6 See Figure 1 for an illustration of this training procedure. 
+
+Inference. At evaluation time, we use the unmasked forward pass, on top of which we can apply standard KV cache compression methods. Thus, the output of KV-CAT is a standard transformer whose representations are trained to be more amenable to compression. 
+
+# 5 Empirical Evaluation 
+
+Table 2: Needle retrieval from compressed haystack. Exact-match accuracy (%) over 100 examples per keep ratio. QWEN 2.5-0.5B QWEN 2.5-1.5B Keep Base KV-CAT Base KV-CAT 5% 18 17 20 20 
+
+10% 12 15 20 20 
+
+15% 15 16 21 21 
+
+20% 15 13 22 23 
+
+25% 20 22 24 28 
+
+30% 23 34 41 44 
+
+35% 21 32 46 54 
+
+40% 24 38 42 55 
+
+50% 28 47 49 67 
+
+Mean 19.6 26.0 31.7 36.9 
+
+We evaluate the effect of KV-CAT on the performance of downstream optimization-based KV cache compres-sion techniques. Our empirical study is guided by four central questions: (Q1) Does KV-CAT training preserve base model performance in uncompressed settings? (Q2) Does KV-CAT improve compres-sion quality under a fixed KV-optimization budget? 
+
+(Q3) Does KV-CAT improve retrieval from a KV-compressed context? (Q4) Do these gains transfer to KV-compressed long-context question answering? Across all experiments, we compare the original pre-trained model to the model obtained via KV-CAT continued pretraining, applying the same downstream compression method at matched KV retention and opti-mization budgets. We provide full experimental details in Appendix C, and additional results in Appendix D. 
+
+KV-CAT training setup. We apply KV-CAT to Q WEN 2.5-0.5B and Q WEN 2.5-1.5B checkpoints via continued pretraining on FineWeb-Edu [ 44 ]. In both cases, we train all model parameters, and introduce four learned routers shared across four layer groups. Each model is trained on a total of 
+
+5.24 × 10 9 tokens with a max learning rate of 10 −4. See further details in Appendix C.1. 
+
+> 6We note that a natural alternative to our training objective is to use distillation from a frozen base model for both the masked and dense forward passes. We do not use this variant since it requires keeping an additional frozen teacher model in memory and running a third forward pass, significantly increasing training cost.
+
+7Table 3: Suffix completion under prefix compres-sion. Each example uses a 768-token prefix and a 256-token suffix. Prefix KVs are compressed using Attention Matching. We report: (1) ∆PPL, the differ-ence in suffix perplexity under the full prefix vs. com-pressed prefix; (2) KL, the divergence between the two token distributions; and (3) Top-1, percentage of tokens on which the two distributions’ top-1 agree. Model Keep Variant ∆PPL ( ↓) KL ( ↓) Top-1 ( ↑)QWEN 2.5-0.5B  5% Base 0.780 0.0562 88.5% KV-CAT 0.461 0.0385 91.1%                                                  
+
+> 10% Base 0.662 0.0483 89.3% KV-CAT 0.422 0.0321 91.4%
+> 20% Base 0.777 0.0549 88.7% KV-CAT 0.438 0.0374 90.8%
+> 40% Base 0.592 0.0431 90.3% KV-CAT 0.360 0.0272 92.5%
+> QWEN 2.5-1.5B  5% Base 0.573 0.0570 89.2% KV-CAT 0.292 0.0361 90.9%
+> 10% Base 1.027 0.0796 88.3% KV-CAT 0.320 0.0366 90.7%
+> 20% Base 1.093 0.0876 87.7% KV-CAT 0.536 0.0491 90.2%
+> 40% Base 0.742 0.0653 90.0% KV-CAT 0.259 0.0326 92.4%
+
+KV cache compression methods. Across experiments, we use two post-hoc KV cache compression procedures: Attention Matching [ 61 ] and a gradient-based KV cache optimization method adapted from Eyuboglu et al. [16] . Attention Matching constructs a compact prefix cache layer-by-layer, approx-imating the dense model’s attention traces. The gradient-based method instead directly optimizes the compact prefix KV cache to match the dense model’s logits on suffix tokens. Both methods compress the KV cache of a given prefix <text> by leveraging super-vision from a suffix, which together form a 
+
+reconstruction sequence . For the retrieval and QA evaluations, we follow Zweiger et al. [61] ,and use a reconstruction sequence of the form 
+
+<text><instruction><text> , where 
+
+<instruction> is set to “ Reproduce the preceding passage verbatim. ”, and the loss is applied only on the second repeated 
+
+<text> span. Additional implementation details are given in Appendix C. 
+
+Preserving uncompressed performance (Q1). We evaluate the effect of KV-CAT on the per-formance of the model with no KV cache compression applied . We compare the base model and the KV-CAT-trained checkpoint on six standard multiple-choice benchmarks using the LightEval harness [ 19 ]. As shown in Table 1, KV-CAT closely matches the base model, with an average gain of 0.7 accuracy points for Q WEN 2.5-0.5B and a drop of 0.5 points for Q WEN 2.5-1.5B. These results indicate that KV-CAT preserves standard dense behavior rather than trading it off for compressibility. 
+
+Compression under fixed KV-optimization budget (Q2). We evaluate compression quality at different keep ratios, under a fixed KV-optimization budget. To do this, we sample held–out prefix–suffix pairs from FineWeb and directly optimize a compacted prefix KV cache to produce the corresponding suffix. We optimize the KV slots via Attention Matching using 256 query states and 8 NNLS iterations across all keep ratios. We report three different similarity metrics between the suffix next token distribution under the full/compressed prefix, averaged over 128 pairs per keep ratio. As seen in Table 3, under a fixed optimization budget, the KV-CAT-trained model consistently outperforms the base model across compression ratios, model sizes, and similarity measures, and achieves up to 3.21 × better retention of suffix perplexity. We additionally evaluate gradient-based KV cache optimization on the same prefix–suffix pairs. As seen in Figure 2, the KV-CAT-trained model achieves better suffix perplexity retention throughout optimization, requiring up to 5× fewer optimization steps to match the base model’s performance. For additional details, see Appendix C.3 and for cross-domain evaluation see Appendix D.2. Table 4: Long-form QA after context compression. We evaluate the models on seven tasks from LongBench v2. The KV caches of the questions’ contexts are compressed with a gradient-based method.                                                         
+
+> 10% keep 20% keep 50% keep Subdomain Base KV-CAT Base KV-CAT Base KV-CAT Academic 18.1 26.6 19.1 27.7 21.3 26.6
+> Agent history QA 20.0 30.0 25.0 30.0 30.0 30.0
+> Knowledge graph reasoning 33.3 33.3 26.7 26.7 20.0 26.7
+> Legal 27.3 48.5 27.3 45.5 27.3 42.4
+> Many-shot learning 28.6 19.0 28.6 28.6 38.1 33.3 New language translation 30.0 30.0 15.0 35.0 15.0 35.0
+> Table QA 11.1 27.8 22.2 22.2 38.9 33.3
+> Total 22.2 30.3 22.2 30.8 25.3 31.2
+
+Retrieval from a com-pressed context (Q3). 
+
+We conduct a needle-in-a-haystack experiment in which we first optimize a compact KV cache for the haystack prefix, and then evaluate exact-match passkey retrieval from the resulting compressed cache. We compress the haystack using the gradient-based method described earlier, training the compacted KVs for 100 steps on the reconstruction sequence. We find that KV-CAT improves retrieval accuracy over 8the base model, particularly at moderate compression budgets. KV-CAT increases mean retrieval accuracy by 6.4 points for Q WEN 2.5-0.5B and 5.2 points for Q WEN 2.5-1.5B (Table 2), achieving an 11–19 point improvement at 30–50 percent keep ratios. See additional details in Appendix C.4. 
+
+Compressed long-context question answering (Q4). We evaluate on seven LongBench v2 [ 2] tasks, where the context of each question is compressed using the reconstruction sequence before model prediction. As shown in Table 4, compared to the base model, the KV-CAT-trained model achieves better average accuracy across all KV retention ratios, with an average improvement of up to 39% .These results demonstrate that KV-CAT yields consistent downstream gains, even when applied to LLMs using only an NTP objective and no post-training. See additional details in Appendix C.5. 
+
+# 6 Related Work 
+
+Token-level context compression and retrieval. One approach to long-context inference reduces the number of input tokens before prompting, rather than modifying the model’s hidden state. Retrieval-augmented generation keeps the prompt short by selecting only relevant external text [ 32 ], while prompt-compression methods prune or rewrite the provided context in token space [24; 25; 33; 42; 46]. These methods are complementary to latent KV cache compression. 
+
+Learned memory and soft-token compression. Another line of work uses learned memory or soft tokens as compact substitutes for long contexts. Recurrent Memory Transformers add memory tokens that carry information between segments [ 5]; AutoCompressors adapt language models to map earlier segments into summary vectors that act as soft prompts [ 10 ]; and gist-tokens train models to compress prompts into reusable learned tokens [ 40 ]. DuoAttention instead learns which attention heads require full retrieval over the KV cache, and which can run with a streaming-style state [ 53 ]. These methods modify the model’s runtime interface, architecture, or cache policy. Another direction [ 9; 7; 36 ] uses hypernetworks to encode long contexts into model parameters, typically via LoRA adapters, rather than storing them in the prompt or KV cache. 
+
+Post-hoc KV cache compression. Another line of work focuses on reducing the KV cache of pretrained transformers at inference time. Token-selection and eviction methods keep a subset of original KV slots using attention, recency, or query-dependent importance signals [ 59 ; 43 ; 34 ; 6; 50 ]. KVzip selects keys using reconstruction-style objectives over the context [ 30 ]. Other post-hoc methods move beyond choosing a subset of the original tokens. Cartridges optimize a compact latent KV cache for each context [ 16 ], Attention Matching constructs compact keys and values to preserve attention behavior [ 61 ], and Lexico represents KV vectors with sparse codes over learned universal dictionaries [ 31 ]. Our work is orthogonal to these compressors: we ask whether the model can be trained so that the same post-hoc methods work better. 
+
+# 7 Conclusion 
+
+In this work, we argue that KV cache compressibility is not only a property of the task or input, but also of the representation learned by the transformer. Theoretically, we show that almost any sequence-to-vector function admits both highly compressible and inherently non-compressible implementations. We also provide a motivating example which further suggests that standard training may favor simpler but non-compressible solutions over more structured, compressible ones, thereby motivating compression-aware training. Guided by these insights, we introduce KV-CAT, a compression-aware training procedure that promotes compressible representations. By incorporating a train-time KV sparsification policy with a fixed retention budget into the forward pass, KV-CAT exposes the model to compression constraints during training, encouraging representations that remain effective under cache compression. Empirically, we demonstrate that models trained with KV-CAT consistently improve the quality–budget tradeoff of state-of-the-art post-hoc compression methods, at matched cache budgets over a range of tasks. Overall, our results suggest a complementary approach to post-hoc compression methods: training models to become compressible. 
+
+# 8 Acknowledgements 
+
+YG is supported by the UKRI Engineering and Physical Sciences Research Council (EPSRC) CDT in Autonomous and Intelligent Machines and Systems (grant reference EP/S024050/1). MB is partially 9supported by the EPSRC Turing AI World-Leading Research Fellowship No. EP/X040062/1 and EPSRC AI Hub No. EP/Y028872/1. HM is supported by the Israel Science Foundation through a personal grant (ISF 264/23) and an equipment grant (ISF 532/23). 
+
+# References 
+
+[1] Simran Arora and Christopher Ré. Can foundation models help us achieve perfect secrecy? 
+
+arXiv preprint arXiv:2205.13722 , 2022. [2] Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xiaozhi Wang, Xin Lv, Shulin Cao, Jiazheng Xu, Lei Hou, Yuxiao Dong, et al. Longbench v2: Towards deeper understanding and reason-ing on realistic long-context multitasks. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 3639–3664, 2025. [3] Iz Beltagy, Matthew E Peters, and Arman Cohan. Longformer: The long-document transformer. 
+
+arXiv preprint arXiv:2004.05150 , 2020. [4] Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 7432–7439, 2020. doi: 10.1609/aaai.v34i05.6239. URL https://ojs.aaai.org/index.php/AAAI/article/view/6239 .[5] Aydar Bulatov, Yuri Kuratov, and Mikhail S. Burtsev. Recurrent memory transformer, 2022. [6] Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao. PyramidKV: Dynamic kv cache compression based on pyramidal information funneling, 2025. [7] Rujikorn Charakorn, Edoardo Cetin, Shinnosuke Uesaka, and Robert Tjarko Lange. Doc-to-lora: Learning to instantly internalize contexts. arXiv preprint arXiv:2602.15902 , 2026. [8] Qiguang Chen, Libo Qin, Jinhao Liu, Dengyun Peng, Jiannan Guan, Peng Wang, Mengkang Hu, Yuhang Zhou, Te Gao, and Wanxiang Che. Towards reasoning era: A survey of long chain-of-thought for reasoning large language models. arXiv preprint arXiv:2503.09567 , 2025. [9] Tong Chen, Hao Fang, Patrick Xia, Xiaodong Liu, Benjamin Van Durme, Luke Zettlemoyer, Jianfeng Gao, and Hao Cheng. Generative adapter: Contextualizing language models in parameters with a single forward pass. arXiv preprint arXiv:2411.05877 , 2024. [10] Alexis Chevalier, Alexander Wettig, Anirudh Ajith, and Danqi Chen. Adapting language models to compress contexts, 2023. [11] Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamas Sarlos, Peter Hawkins, Jared Davis, Afroz Mohiuddin, Lukasz Kaiser, et al. Rethinking attention with performers. arXiv preprint arXiv:2009.14794 , 2020. [12] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try ARC, the AI2 reasoning challenge. arXiv preprint arXiv:1803.05457 , 2018. URL https://arxiv.org/abs/1803. 05457 .[13] Arman Cohan, Franck Dernoncourt, Doo Soon Kim, Trung Bui, Seokhwan Kim, Walter Chang, and Nazli Goharian. A discourse-aware attention model for abstractive summarization of long documents. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 2 (Short Papers) , pages 615–621, New Orleans, Louisiana, 2018. Association for Computational Linguistics. doi: 10.18653/v1/N18-2097. URL https://aclanthology.org/N18-2097/ .[14] George Cybenko. Approximation by superpositions of a sigmoidal function. Mathematics of control, signals and systems , 2(4):303–314, 1989. [15] Yam Eitan. The centered convex body whose marginals have the heaviest tails. arXiv preprint arXiv:2110.14382 , 2021. 10 [16] Sabri Eyuboglu, Ryan Ehrlich, Simran Arora, Neel Guha, Dylan Zinsley, Emily Liu, Will Ten-nien, Atri Rudra, James Zou, Azalia Mirhoseini, and Christopher Ré. Cartridges: Lightweight and general-purpose long context representations via self-study, 2025. [17] Albert Gu and Tri Dao. Mamba: Linear-time sequence modeling with selective state spaces. 
+
+arXiv preprint arXiv:2312.00752 , 2023. [18] Albert Gu, Karan Goel, and Christopher Ré. Efficiently modeling long sequences with structured state spaces. arXiv preprint arXiv:2111.00396 , 2021. [19] Nathan Habib, Clémentine Fourrier, Hynek Kydlíˇ cek, Thomas Wolf, and Lewis Tunstall. Lighte-val: A lightweight framework for llm evaluation. https://github.com/huggingface/ lighteval , 2023. GitHub repository. [20] Alex Horn, Ali Kheradmand, and Mukul Prasad. Delta-net: Real-time network verification using atoms. In 14th USENIX Symposium on Networked Systems Design and Implementation (NSDI 17) , pages 735–749, 2017. [21] Kurt Hornik. Approximation capabilities of multilayer feedforward networks. Neural networks ,4(2):251–257, 1991. [22] Sukjun Hwang, Brandon Wang, and Albert Gu. Dynamic chunking for end-to-end hierarchical sequence modeling. arXiv preprint arXiv:2507.07955 , 2025. [23] Pranab Islam, Anand Kannappan, Douwe Kiela, Rebecca Qian, Nino Scherrer, and Bertie Vidgen. Financebench: A new benchmark for financial question answering. arXiv preprint arXiv:2311.11944 , 2023. [24] Huiqiang Jiang, Qianhui Wu, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. LLMLingua: Com-pressing prompts for accelerated inference of large language models, 2023. [25] Huiqiang Jiang, Qianhui Wu, Xufang Luo, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. LongLLMLingua: Accelerating and enhancing llms in long context scenarios via prompt compression, 2024. [26] Samuel Karlin and William J Studden. Optimal experimental designs. The Annals of Mathemat-ical Statistics , 37(4):783–815, 1966. [27] Samuel Karlin and William J Studden. Tchebycheff systems: With applications in analysis and statistics. (No Title) , 1966. [28] Samuel Karlin and Zvi Ziegler. Chebyshevian spline functions. Siam Journal on Numerical Analysis , 3(3):514–543, 1966. [29] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and François Fleuret. Transformers are rnns: Fast autoregressive transformers with linear attention. In International conference on machine learning , pages 5156–5165. PMLR, 2020. [30] Jang-Hyun Kim, Jinuk Kim, Sangwoo Kwon, Jae W Lee, Sangdoo Yun, and Hyun Oh Song. Kvzip: Query-agnostic kv cache compression with context reconstruction. arXiv preprint arXiv:2505.23416 , 2025. [31] Junhyuck Kim, Jongho Park, Jaewoong Cho, and Dimitris Papailiopoulos. Lexico: Extreme KV cache compression via sparse coding over universal dictionaries. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 30672–30687, 2025. [32] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, Sebastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Advances in Neural Information Processing Systems , volume 33, pages 9459–9474, 2020. 11 [33] Yucheng Li, Bo Dong, Frank Guerin, and Chenghua Lin. Compressing context to enhance inference efficiency of large language models. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , pages 6342–6353, 2023. doi: 10.18653/ v1/2023.emnlp-main.391. [34] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. SnapKV: Llm knows what you are looking for before generation, 2024. [35] Zhuoling Li, Xiaogang Xu, Zhenhua Xu, SerNam Lim, and Hengshuang Zhao. Larm: Large auto-regressive model for long-horizon embodied intelligence. arXiv preprint arXiv:2405.17424 ,2024. [36] Yewei Liu, Xiyuan Wang, Yansheng Mao, Yoav Gelbery, Haggai Maron, and Muhan Zhang. Shine: A scalable in-context hypernetwork for mapping context to lora in a single pass. arXiv preprint arXiv:2602.06358 , 2026. [37] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models, 2016. [38] CA Micchelli and Allan Pinkus. Moment theory for weak chebyshev systems with applications to monosplines, quadrature formulae and best one-sided lˆ1-approximation by spline functions with fixed knots. SIAM Journal on Mathematical Analysis , 8(2):206–230, 1977. [39] Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct electricity? a new dataset for open book question answering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 2381–2391, Brussels, Belgium, 2018. Association for Computational Linguistics. doi: 10.18653/v1/D18-1260. URL 
+
+https://aclanthology.org/D18-1260/ .[40] Jesse Mu, Xiang Lisa Li, and Noah Goodman. Learning to compress prompts with gist tokens, 2023. [41] Daye Nam, Andrew Macvean, Vincent Hellendoorn, Bogdan Vasilescu, and Brad Myers. Using an llm to help with code understanding. In Proceedings of the IEEE/ACM 46th International Conference on Software Engineering , pages 1–13, 2024. [42] Emre Okcular. Context Engineering - Short-Term Memory Management with Sessions from OpenAI Agents SDK, September 2025. [43] Matanel Oren, Michael Hassid, Nir Yarden, Yossi Adi, and Roy Schwartz. Transformers are multi-state RNNs. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pages 18724–18741, 2024. doi: 10.18653/v1/2024.emnlp-main.1043. [44] Guilherme Penedo, Hynek Kydlíˇ cek, Anton Lozhkov, Margaret Mitchell, Colin Raffel, Leandro Von Werra, Thomas Wolf, et al. The fineweb datasets: Decanting the web for the finest text data at scale. Advances in Neural Information Processing Systems , 37:30811–30849, 2024. [45] Jack W. Rae, Anna Potapenko, Siddhant M. Jayakumar, Chloe Hillier, and Timothy P. Lillicrap. Compressive transformers for long-range sequence modelling. arXiv preprint , 2019. URL 
+
+https://arxiv.org/abs/1911.05507 .[46] Prithvi Rajasekaran, Ethan Dixon, Carly Ryan, and Jeremy Hadfield. Effective context engi-neering for ai agents, September 2025. [47] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. WinoGrande: An adversarial winograd schema challenge at scale. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 34, pages 8732–8740, 2020. doi: 10.1609/aaai.v34i05.6399. URL https://ojs.aaai.org/index.php/AAAI/article/view/6399 .[48] Clayton Sanford, Daniel J Hsu, and Matus Telgarsky. Representational strengths and limitations of transformers. Advances in Neural Information Processing Systems , 36:36677–36707, 2023. 12 [49] Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. Social IQa: Commonsense reasoning about social interactions. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP) , pages 4463–4473, Hong Kong, China, 2019. Association for Computational Linguistics. doi: 10.18653/v1/D19-1454. URL https: //aclanthology.org/D19-1454/ .[50] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. QUEST: Query-aware sparsity for efficient long-context LLM inference. In Proceedings of the 41st In-ternational Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research , pages 47901–47911, 2024. [51] Qwen Team. Qwen2.5: A party of foundation models, September 2024. URL https:// qwenlm.github.io/blog/qwen2.5/ .[52] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks, 2024. [53] Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, Junxian Guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. Duoattention: Efficient long-context LLM inference with retrieval and streaming heads. In International Conference on Learning Representations , 2025. URL 
+
+https://arxiv.org/abs/2410.10819 .[54] Songlin Yang, Jan Kautz, and Ali Hatamizadeh. Gated delta networks: Improving mamba2 with delta rule. arXiv preprint arXiv:2412.06464 , 2024. [55] Gilad Yehudai, Haim Kaplan, Guy Dar, Royi Rassin, Asma Ghandeharioun, Mor Geva, and Amir Globerson. When can transformers count to n? arXiv preprint arXiv:2407.15160 , 2024. [56] Manzil Zaheer, Satwik Kottur, Siamak Ravanbakhsh, Barnabas Poczos, Russ R Salakhutdinov, and Alexander J Smola. Deep sets. Advances in neural information processing systems , 30, 2017. [57] Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, et al. Big bird: Transformers for longer sequences. Advances in neural information processing systems , 33: 17283–17297, 2020. [58] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. HellaSwag: Can a machine really finish your sentence? In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 4791–4800, Florence, Italy, 2019. Association for Computational Linguistics. doi: 10.18653/v1/P19-1472. URL https://aclanthology. org/P19-1472/ .[59] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. H2O:Heavy-hitter oracle for efficient generative inference of large language models, 2023. [60] Junhao Zheng, Chengming Shi, Xidi Cai, Qiuke Li, Duzhen Zhang, Chenxing Li, Dong Yu, and Qianli Ma. Lifelong learning of large language model based agents: A roadmap. IEEE Transactions on Pattern Analysis and Machine Intelligence , 2026. [61] Adam Zweiger, Xinghong Fu, Han Guo, and Yoon Kim. Fast kv compaction via attention matching, 2026. 
+
+# A Theory 
+
+A.1 Transformers and KV Cache Compression Notation. For a set A, let A∗ denote the set of all finite sequences over A. We denote by ei the i-th standard (one hot encoded) basis vector. For n ∈ N, we write [n] = {1, . . . , n }.13 For matrices X ∈ Rn×d and Y ∈ Rn×d′
+
+, we denote their row-wise concatenation (along the feature dimension) by 
+
+[X, Y ] ∈ Rn×(d+d′). (18) For matrices X ∈ Rn×d and Z ∈ Rn′×d, we denote their column-wise concatenation (along the sequence dimension) by XZ
+
+
+
+∈ R(n+n′)×d. (19) When convenient, we sometimes write [X⊤, Z⊤]⊤ instead of 
+
+XZ
+
+
+
+.
+
+For vectors v, u ∈ Rn, we treat them as column vectors in Rn×1 and write 
+
+[v, u] ∈ Rn×2. (20) 
+
+Definition A.1 (Attention Head) . Let din , d out ∈ N. An attention head is a function 
+
+AttnHead : ( Rdin )∗ → (Rdout )∗ (21) defined as follows. For a sequence X = [ x1, . . . , xn]⊤ ∈ Rn×din ,
+
+Q = XW Q, K = XW K , V = XW V , (22) where WQ, WK , WV ∈ Rdin ×dout . The output is 
+
+AttnHead( X) = softmax 
+
+ QK ⊤
+
+√dk
+
+
+
+V , (23) where the softmax is applied row-wise. 
+
+Definition A.2 (Transformer Block) . Fix h, d in , d out , d ff ∈ N. A transformer block is a function 
+
+Block : ( Rdin )∗ → (Rdout )∗ (24) defined as follows. For a sequence 
+
+X = [ x1, . . . , xn]⊤ ∈ Rn×din , (25) we define 
+
+Block( X) = FFN([head 1(X), . . . , head h(X)] WO + X) , (26) where each head i is an attention head with input and output dimensions din , d out respectively, and 
+
+WO ∈ Rh·dout ×dout , and FFN is a 2-layer feed forward network applied row-wise, i.e., 
+
+FFN( X)i = FFN( xi), i = 1 , . . . , n, (27) with 
+
+FFN( x) = σ(xW 1 + b1)W2 + b2, (28) where W1 ∈ Rdout ×dff , W2 ∈ Rdff ×dout , b1 ∈ Rdff , and b2 ∈ Rdout .
+
+Note. In the theoretical analysis, we omit layer normalization, causal masking, and the residual connection following the FFN for simplicity, as is standard in prior theoretical treatments (See e.g. [ 48 ; 55 ]). Our results extend to the full architecture with only minor modifications. All empirical evaluations are conducted with these components included. 
+
+Definition A.3 (Token Embedding) . Let A be a finite alphabet. A token embedding function is a function 
+
+emb : A × N → Rdmodel . (29) Given a sequence a = ( a1, . . . , a n) ∈ A∗, its embedding is the sequence 
+
+emb( a) = [emb( a1, 1) , . . . , emb( an, n )] ⊤ ∈ Rn×dmodel . (30) 14 Definition A.4 (Transformer) . Let A be a finite alphabet. A transformer is a tuple 
+
+M = (Block 1, . . . , Block L, emb) , (31) where each Block ℓ : ( Rdℓ−1 )∗ → (Rdℓ )∗ is a transformer block, and emb : A∗ → (Rd0 )∗ is a token embedding function. The transformer M defines a function 
+
+M : A∗ → RdL (32) as follows. For a = ( a1, . . . , a n) ∈ A∗, let 
+
+X(0) = emb( a), X(ℓ) = Block ℓ(X(ℓ−1) ), ℓ = 1 , . . . , L. (33) Then 
+
+M(a) = X(L) 
+
+> n
+
+, (34) i.e., the output is the representation of the final token. 
+
+Definition A.5 (KV Cache Compression) . A KV cache compression policy is a tuple C =(c1, . . . , cL), where each 
+
+cℓ : ( Rdℓ × Rdℓ )∗ → (Rdℓ × Rdℓ )∗ (35) maps a sequence of key–value pairs to a shorter sequence. Concretely, for 
+
+(K, V ) =  [k1, . . . , kn]⊤, [v1, . . . , vn]⊤, (36) we write 
+
+cℓ(K, V ) = ( ˜K, ˜V ) =  [˜k1, . . . , ˜kr(n)]⊤, [˜ v1, . . . , ˜vr(n)]⊤, (37) where r(n) ≤ n. The function r(·) is called the compression budget .Given a transformer M = (emb , Block 1, . . . , Block L), a compression policy C, and a context 
+
+sequence a = ( a1, . . . , a n), we define the associated compressed transformer MC,a.For an input sequence b = ( b1, . . . , b k), the output MC,a(b) is obtained by running the forward pass of 
+
+M on the concatenated sequence [a, b] = ( a1, . . . , a n, b 1, . . . , b k), with the following modifications. For each ℓ and each attention head at the ℓ-th block, after computing keys and values, the compression function cℓ is applied to the KV pairs corresponding to the context tokens. The compressed KV pairs replace the original ones in the attention computation. More precisely, let (Ka, Va) denote the KV cache produced by the prefix a at some attention head of 
+
+Block ℓ of the original model M, and let Y ∈ Rk×dℓ−1 be the input corresponding to b in the forward pass computation of MC,a after block ℓ − 1. We first compute 
+
+Qb = Y W Q, Kb = Y W K , Vb = Y W V . (38) We then compress the context KV pairs: 
+
+( ˜Ka, ˜Va) = cℓ(Ka, Va). (39) The resulting attention computation is 
+
+AttnHead( Y ) = softmax 1
+
+√dk
+
+Qb
+
+ ˜Ka
+
+Kb
+
+⊤!  ˜Va
+
+Vb
+
+
+
+. (40) 
+
+Definition A.6. [KV compressibility] Let N ∈ N, ε > 0, and let r : N → N be a budget function. A transformer M is said to be (N, ε, r )-compressible if there exists a KV cache compression policy C
+
+with budget r such that for every pair of sequences a, b of lengths n and k with combined length satisfying n + k ≤ N , it holds that 
+
+∥M([ a, b]) − MC,a(b)∥ < ε. (41) We include N explicitly in the definition above, as many natural sequence-to-vector functions require model dimension scaling with N (e.g., O(N ) or O(log N )) in order to achieve arbitrarily accurate approximation; see Sanford et al. [48]; Yehudai et al. [55] for examples. 15 A.2 Motivating example: histogram computation 
+
+In this section we provide formal proofs of Propositions 3.2 and 3.3. 
+
+Proof of Proposition 3.2. The construction of M = (emb , Block 1, Block 2) is straightforward. First, for j ∈ [m] and i ∈ [N ], define 
+
+emb( j, i ) = uj + pi, (42) where uj , pi ∈ Rm encode token value and token position respectively, and assume that emb is injective over [m] × [N ].Let X ∈ Rn×m. We define Block 1(Rm)∗ → (R2m)∗ by 
+
+Block 1(X)i ≈ ρ1(Xi) (43) where ρ1 : Rm → R2m is applied row wise X and satisfies for each j, i ∈ [m] × [N ]:
+
+ρ1(uj + pi) = 
+
+ej
+
+0
+
+
+
+. (44) 
+
+Block 1 can be implemented by zeroing out all attention projections and relying on the residual connection together with a feedforward network that approximates ρ1 to arbitrary precision (this can be obtained as a two-layer feedforward network is a universal approximator of continuous functions on compact sets [14; 21]). Let X ∈ Rn×2m, and write each row as xi. We define 
+
+Block 2(X)i = 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+xj (45) i.e., each output token is replaced by the average of all input tokens. This operation can be imple-mented using a single attention head by setting 
+
+WQ = WK = 0, (46) so that all attention weights are uniform, and choosing 
+
+WV = WO =
+
+0 0
+
+I 0
+
+
+
+. (47) This choice extracts the first half of each vector and places it in the second half before averaging. After applying a residual connection, the intermediate representation of the i-th token is then 
+
+ xi
+
+> 1
+> n
+
+Pnj=1 xj
+
+
+
+(48) Finally, the feedforward network is taken to be 
+
+FFN( x, y) = y, (49) resulting in a final representation of 1
+
+> n
+
+Pni=1 xi. For input sequence a of length n we thus have 
+
+M(a) ≈ 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+eai = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+1ai=1 , 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+1ai=2 , . . . , 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+1ai=m
+
+!
+
+= fhist (a), (50) Thus M approximates fhist to arbitrary precision. Now let C = ( c1, c2) be any compression policy with budget function r(·) satisfying r(N − 1) < N − 1. Fix a prefix sequence a of length n and a suffix sequence b of length k, and consider the computation of MC,a(b).First, observe that in the first block all attention projection matrices (and in particular WO ) are zero. Hence, c1 has no effect on the representations of the tokens of b, and after the first block the representations are exactly as in the uncompressed model. 16 Next, consider the second block. Let (Ka, Va) denote the KV cache corresponding to the prefix a
+
+computed durning the computation of M(a), and let ( ˜Ka, ˜Va) = c2(Ka, Va) be the compressed cache. Since WQ = 0 , all attention scores are uniform for both M and MC,a and so 
+
+MC,a(b) = 1
+
+r(n) + k
+
+
+
+> r(n)
+
+X
+
+> i=1
+
+˜vi +
+
+> k
+
+X
+
+> i=1
+
+ebi
+
+ . (51) 
+
+M([ a, b]) = 1
+
+n + k
+
+> n
+
+X
+
+> i=1
+
+eai +
+
+> k
+
+X
+
+> i=1
+
+ebi
+
+!
+
+. (52) For notational convenience, define 
+
+˜v = 1
+
+r(n) + k
+
+> r(n)
+
+X
+
+> i=1
+
+˜vi, ˜a = 1
+
+n + k
+
+> n
+
+X
+
+> i=1
+
+eai , ˜b =
+
+> k
+
+X
+
+> i=1
+
+ebi . (53) Then the difference between the compressed and full outputs can be written as 
+
+∥MC,a(b) − M([ a, b]) ∥ = ˜v − ˜a +
+
+ 1
+
+r(n) + k − 1
+
+n + k
+
+
+
+˜b . (54) We now derive a lower bound. First, choose b = (1 , 1, . . . , 1) and examine the first coordinate. This yields 
+
+∥MC,a(b) − M([ a, b]) ∥ ≥ ˜v1 − ˜a1 + k(r(n) − n)(n + k)( r(n) + k) . (55) Next, choosing b = (2 , 2, . . . , 2) removes the contribution of the last term, giving 
+
+∥MC,a(b) − M([ a, b]) ∥ ≥ | ˜v1 − ˜a1|. (56) Combining the two inequalities, we conclude that for any choice of ˜v, there exists a b such that 
+
+∥MC,a(b) − M([ a, b]) ∥ ≥ k(n − r(n)) 2( n + k)( r(n) + k) . (57) Finally, taking n = N − 1 and k = 1 yields 
+
+∥MC,a(b) − M([ a, b]) ∥ ≥ N − 1 − r(N − 1) 2( N )( r(N − 1) + 1) = C > 0, (58) which completes the proof. 
+
+Note: for the weakest compression case r(n) = n − 1, the constant above is C = O(N −2), and so as 
+
+N grows the approximation bound becomes weaker, but for the extreme compression case r(n) = c
+
+for some c ∈ N, C can be chosen independently of N .
+
+proof of Proposition 3.3. We construct M = (emb , Block 1, Block 2) similarly to the above construc-tion, with a few modifications. Like before, for j ∈ [m] and i ∈ [N ], define 
+
+emb( j, i ) = uj + pi, (59) where uj , pi ∈ Rm encode token value and token position respectively, and assume that emb is injective over [m] × [N ].Let X ∈ Rn×m. We define Block 1(Rm)∗ → (R4m)∗ by 
+
+Block 1(X)i ≈ ρ1(Xi) (60) where ρ1 : Rm → R4m is applied row wise X and satisfies for each j, i ∈ [m] × [N ]:17 ρ1(uj + pi) = 
+
+
+
+ej
+
+pi
+
+00
+
+ . (61) Where each of the vector blocks above is of size m. That is, Block 1 is identical to the construction in the proof of Proposition 3.2, except that it preserves the positional component. As before, Block 1
+
+can be implemented by zeroing out all attention projections and relying on the residual connection together with a feedforward network that approximates ρ1 to arbitrary precision. This follows from the universal approximation property of two-layer feedforward networks for continuous functions on compact sets [14; 21]. We construct Block 2 to be composed of a single attention head with 
+
+WQ = WK = 0, WO = I (62) so that all attention weights are uniform, and choosing 
+
+WV =
+
+
+
+I 0 0 00 I 0 0
+
+I 0 0 00 0 0 0
+
+ . (63) This choice extracts the first m-length block of each vector and places it in the third block before averaging, keeping the first and second vector blocks the same, and zeroing out the last vector block. After applying a residual connection, the intermediate representation of the i-th token ai is then 
+
+
+
+eai
+
+pi
+
+> 1
+> n
+
+Pnj=1 ej
+
+0
+
+ . (64) finally, we choose the last feed forward network to approximate a map ρ2 satisfying for all i, j, k ∈
+
+[N ]:
+
+ρ2(w, x, y, z) = 
+
+(
+
+y if z = 0  
+
+> j−i+1
+> j
+
+y if z = pi 
+
+> k+1
+
+and x = pj . (65) Such a function can be realized to arbitrary precision by a feedforward network: the above specifica-tion is defined on a union of disjoint compact sets, and therefore admits a continuous extension to a compact domain, which can in turn be approximated by a standard feedforward network via universal approximation. Equations 64 and 65 imply that, in the uncompressed setting, for any sequence a of length n ≤ N ,we recover as before 
+
+M(a) ≈ 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+eai = 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+1ai=1 , 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+1ai=2 , . . . , 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+1ai=m
+
+!
+
+= fhist (a), (66) and so M approximates fhist . We now define a compression policy C = ( c1, c2). We first note that, like before, SINCE WO = 0 in the first block, c1 does not effect the forward pass of MC,a.Given a prefix a of length n with KV cache (Ka, Va), we compress it into a single KV pair: 
+
+c2(Ka, Va) = 
+
+
+
+0,
+
+Pni=1 eai
+
+00
+
+pn
+
+
+
+. (67) 18 That is, we store a single value vector containing (i) the unnormalized histogram of the prefix and (ii) its length encoded via pn. Now consider processing a suffix b = ( b1, . . . , b k). Since the compressed prefix consists of a single KV entry with zero key, attention again produces a uniform average over the compressed prefix and suffix tokens. The representation of the final token bk becomes 
+
+
+
+ebi
+
+pn+k
+
+> 1
+> k+1
+
+Pni=1 eai + Pki=1 ebi
+
+ 
+
+> 1
+> k+1
+
+pn
+
+ . (68) Applying ρ2 and using equation 65, we obtain 
+
+MC,a(b) ≈ 1 + ( n + k) − nn + k · 1
+
+k + 1 
+
+ nX
+
+> i=1
+
+eai +
+
+> k
+
+X
+
+> i=1
+
+ebi
+
+
+
+= 1
+
+n + k
+
+> n+k
+
+X
+
+> i=1
+
+eci , (69) where ci ranges over [a, b]. This matches the histogram of the concatenated sequence (up to ε), completing the proof. 
+
+A.3 Compressible Transformers for General Functions 
+
+In this section, we present a formal proof of Theorem 3.1. The proof is divided into two lemmas: the first (Lemma A.7) establishes the existence of compressible transformer approximations, and the second (Lemma A.8 demonstrates the existence of non-compressible ones. The theorem then follows immediately. 
+
+Lemma A.7. Let A be a finite alphabet, and let f : S 
+
+> n≤N
+
+An → Rdout be any sequence-to-vector function. Then for every ε > 0 There exists a transformer such that 1. ( Approximation ) For every sequence a = ( a1, . . . , a n) ∈ An with n ≤ N ,
+
+∥f (a) − M(a)∥ < ε. (70) 
+
+2. (Maximal compressibility ) There exists a KV cache compression policy C with compression budget 
+
+r(n) ≡ 1 (71) 
+
+such that for every prefix a ∈ An and suffix b ∈ Ak with k + n ≤ N ,
+
+∥M([ a, b]) − MC,a(b)∥ < ε. (72) 
+
+Proof. We assume that the token embedding map emb : A × N → Rd0 is defined by 
+
+emb( a, i ) = ua + pi (73) where ∥pi∥ = ∥pj ∥ for all i, j ∈ [N ], and ua, pi ∈ Rd0 for all a ∈ A. We further assume injectivity of the embedding function, that is 
+
+(a, i )̸ = ( b, j ) ⇒ emb( a, i )̸ = emb( b, j ). (74) Such embeddings can be obtained, for example, using a learned lookup table for tokens combined with a positional encoding (e.g., sinusoidal) with sufficiently large frequencies. Let u∅ ∈ Rd0 be a padding vector such that v∅̸ = emb( a, i ) for all a ∈ A and i ∈ N. For a sequence 
+
+a = ( a1, . . . , a n) ∈ A∗ with n ≤ N , define 
+
+Ua = P [emb( a1, 1) , . . . , emb( an, n ), u∅, . . . , u∅]⊤ | P ∈ RN ×N is a permutation matrix ⊂ RN ×d0 .
+
+(75) That is, we embed the sequence, pad it to length N using u∅, and then apply an arbitrary permutation to the order of the elements. 19 By injectivity of the embeddings, the sets {Ua : a ∈ A∗, |a| ≤ N } are pairwise disjoint. Conse-quently, there exists a continuous function 
+
+¯f : RN ×d0 → Rdout (76) such that for every a ∈ A∗ with |a| ≤ N and every [v1, . . . , vN ]⊤ ∈ Ua,
+
+¯f (v1, . . . , vN ) = f (a). (77) Without loss of generality, we may assume that ¯f is permutation-invariant. That is, for every permutation σ ∈ SN and every V = [ v1, . . . , vN ]⊤ ∈ RN ×d0 ,
+
+¯f (v1, . . . , vN ) = ¯f (vσ(1) , . . . , vσ(N )). (78) Indeed, if ¯f is not permutation-invariant, we can define 
+
+˜f (v1, . . . , vN ) = 1
+
+|SN |
+
+X
+
+> σ∈SN
+
+¯f (vσ(1) , . . . , vσ(N )). (79) Then ˜f is continuous and permutation-invariant. Moreover, for every sequence a ∈ A∗ and every 
+
+V ∈ Ua, ˜f (V ) = ¯f (V ), (80) since Ua is closed under permutations. Because ¯f is continuous and permutation-invariant, it follows from Zaheer et al. [56] that there exists a pair of functions ϕ : Rd0 → Rd1 and ρ : Rd1 → Rdout such that 
+
+¯f (v1, . . . , vN ) = ρ
+
+> N
+
+X
+
+> i=1
+
+ϕ(vi)
+
+!
+
+(81) (Note that some functions require d1 = O(N )). We further assume without loss of generality that 
+
+ϕ(v∅) = 0 . We now construct a compressible transformer M = (emb , Block 1, Block 2) approximat-ing f using this decomposition. The construciton of this transformer cloesly resembles the one used in the proof of Proposition 3.3. For the first block Block 1, we set all attention projection matrices to zero, 
+
+WQ = WK = WV = WO = 0, (82) so that the block reduces to its feedforward component. Let ˜ϕ : Rd0 → R4d0 be a continuous function satisfying 
+
+˜ϕ(emb( a, i )) = 
+
+
+
+ϕ(emb( a, i )) 
+
+pi
+
+00
+
+ . (83) for all a ∈ A and i ∈ [N ] where of the four vector blocks above are of size d0. That is, ˜ϕ computes ϕ
+
+on the embedding while preserving positional information and padding with additional zeroes. We choose the feedforward map FFN 1 in this block to approximate ˜ϕ to accuracy ε′ > 0, to be specified later (This is possible as 2-layer feed forwand networks are universal approximators of continuous functions on compact sets [14; 21]). Thus, for any sequence a = ( a1, . . . , a n),
+
+Block 1(emb( a)) ≈
+
+
+
+˜ϕ(emb( a1, 1)) 
+
+...
+
+˜ϕ(emb( an, n )) 
+
+ . (84) For the second block Block 2, we again use a single attention head, and set 
+
+WQ = WK = 0, WO = I (85) 20 The value projection WV is chosen to extract the ϕ-component from the output of ˜ϕ, and copy it to the third d1-sized vector block, keep the first 2d1 coordinates the same, and zero out the remaining coordinates. That is: 
+
+WV =
+
+
+
+I 0 0 00 I 0 0
+
+I 0 0 00 0 0 0
+
+ . (86) Since WQ = WK = 0, all attention scores are identical, and hence the attention weights are uniform. Applying the attention update in Block 2 to the outputs of Block 1 and using a residual connection, the representation at position i becomes approximately 
+
+
+
+˜ϕ(emb( ai, i )) 
+
+pi
+
+> 1
+> n
+
+Pnj=1 ϕ(emb( aj , j )) 
+
+0
+
+ . (87) We now choose the feedforward network of Block 2 to approximate up to ε′′ (to be chosen later) a continuous function ˜ρ satisfying 
+
+˜ρ(w, x, y, z) = 
+
+ρ(j · y) if z = 0 and x = pj .ρ(( j − i + 1) · y) if z = pi 
+
+> k+1
+
+and x = pj . (88) Intuitively, this map recovers the position index i from the positional embedding pi, rescales the averaged sum as necessary to recover the unweighted sum, and applies ρ. In particular, at the final position n, the output of M is approximately 
+
+ρ
+
+n · 1
+
+n
+
+> n
+
+X
+
+> j=1
+
+ϕ(emb( aj , j )) 
+
+ = ρ
+
+
+
+> n
+
+X
+
+> j=1
+
+ϕ(emb( aj , j )) 
+
+ = f (a). (89) By choosing ε′, ε ′′ sufficiently small, it follows that M approximates f to arbitrary precision. We now show that there exists a compression policy with r(n) = 1 that satisfies Equation 72. Define C = (c1, c2) as follows. For any sequence of key–value pairs (K, V ) with V =[v1, . . . , vn]⊤,
+
+c1(K, V ) = ( 0, 0), (90) and 
+
+c2(K, V ) = ( ˜K, ˜V ), (91) where ˜K = 0 and 
+
+˜V =
+
+
+
+I 0 0 00 0 0 00 0 0 00 0 0 0
+
+
+
+> n
+
+X
+
+> i=1
+
+vi +
+
+
+
+0 0 0 00 0 0 I
+
+0 0 0 00 0 0 0
+
+ vn. (92) clearly r(n) = 1 .For a prefix a of length n and a suffix b of length k, we begin by analyzing the forward pass of 
+
+MC,a(b). After the first block, the representations of the tokens bi are given by 
+
+
+
+˜ϕ(emb( b1, 1 + n)) 
+
+...
+
+˜ϕ(emb( bk, k + n)) 
+
+ . (93) 21 This follows because the embedding layer of MC,a is identical to that of M, applied to the concatenated sequence [a, b]. Moreover, the computation of Block 1 is applied independently to each token representation, and is therefore unaffected by compression. Next, consider the attention computation in the second block. Since WQ = 0 , all attention scores are zero, and hence the attention weights are uniform, equal to 11+ k . By the definition of c2, it follows that after the attention update in Block 2, the representation of each token bi is 
+
+
+
+ϕ(emb( bi, n + i)) 
+
+en+i
+
+> 11+ k
+
+Pnj=1 ϕ(emb( aj , j )) + Pkj=1 ϕ(emb( bj , n + j)) 
+
+ 
+
+> 1
+> k+1
+
+pn
+
+ . (94) Finally, after applying the feed forward network FFN , by choosing ε′, ε ′′ small enough, Equation 88 implies that the final output of MC,a(b) is approximately 
+
+ρ
+
+(k + n − n + 1) · 1
+
+k + 1 
+
+  nX
+
+> j=1
+
+ϕ(emb( aj , j )) + 
+
+> k
+
+X
+
+> j=1
+
+ϕ(emb( bj , n + j))  ≈ f ([ a, b]) (95) and is in an ε approximator of MC,a(b), completing the proof. Finally, after applying the feedforward network FFN , and choosing ε′, ε ′′ sufficiently small, Equation 88 implies that the final output of 
+
+MC,a(b) is approximately and thus constitutes an ε-approximation of MC,a(b), completing the proof. 
+
+Lemma A.8. Let A be a finite alphabet, and let f : S 
+
+> n≤N
+
+An → Rdout be any sequence-to-vector function. Assume additionally that for some prefix sequence ¯a of length n < N there exists two suffix sequences b1, b2 both of length k ≤ N − n such that 
+
+f ([ a, b1]) ̸ = f ([¯ a, b2]) (96) 
+
+Then for every ε, C > 0 There exists a transformer such that 1. ( Approximation ) For every sequence a = ( a1, . . . , a n) ∈ An with n ≤ N ,
+
+∥f (a) − M(a)∥ < ε. (97) 
+
+2. (Non- compressibility ) For every KV cache compression policy C with compression budget satisfying r(n) < n 
+
+there exists a suffix b ∈ Ak with k + n ≤ N such that, 
+
+∥M([ a, b]) − MC,a(b)∥ > C. (98) 
+
+Proof. By the same argument as in the proof of Lemma A.7, there exist functions ϕ : Rd0 → Rd1
+
+and ρ : Rd1 → Rdout such that for every a = ( a1, . . . , a n),
+
+f (a) = ρ
+
+> n
+
+X
+
+> i=1
+
+ϕ(emb( ai, i )) 
+
+!
+
+. (99) Let ¯a be the prefix from the theorem statement, and let b1, b2 ∈ Ak be suffixes such that 
+
+f ([¯ a, b1]) ̸ = f ([¯ a, b2]) . (100) It follows from equations 96 and 99 that 
+
+> k
+
+X
+
+> i=1
+
+ϕ(emb( b1 
+
+> i
+
+, i )) ̸ =
+
+> k
+
+X
+
+> i=1
+
+ϕ(emb( b2 
+
+> i
+
+, i )) , (101) 22 where b1 = ( b11, . . . , b 1
+
+> k
+
+) and b2 = ( b21, . . . , b 2
+
+> k
+
+).Define 
+
+H = conv 
+
+( kX
+
+> i=1
+
+ϕ(emb( bi, i )) (b1, . . . , b k) ∈ Ak
+
+)! 
+
++
+
+> n
+
+X
+
+> i=1
+
+ϕ(emb( ai, i )) , (102) and let D denote the diameter of H. Since ρ is continuous and H is compact, the image ρ(H) is also compact. Consequently, there exists u0 ∈ Rdout such that 
+
+dist( u0, ρ (H)) > C. (103) We construct the transformer M similarly to the one constructed in the proof of Lemma A.7, with two modifications to the second block. First, we replace WO = I with 
+
+WO =
+
+
+
+0 0 0 00 0 0 00 0 I 00 0 0 0
+
+ . (104) Second, we modify the second feedforward function to approximate a continuous function ¯ρ satisfying 
+
+¯ρ(w, x, y, z) = 
+
+(ρ(i · y), if ∥x − pi∥ < ε ′ and i · y ∈ H δ
+
+> 2
+
+,
+
+u0, if ∥x − pi∥ < ε ′ and i · y /∈ Hδ , (105) where 
+
+δ =
+
+ n + kn − 1 + k − 1
+
+ D
+
+2 , (106) and 
+
+Hε := {z ∈ Rd : dist( z, H ) < ε }. (107) By the same reasoning as in Lemma A.7, Equation 97 holds. Let C = ( c1, c2) be any compression policy with compression budget r(n) < n . Since the first block of M zeroes out all attention heads and depends only on the token embeddings, c1 has no effect on the forward pass of MC,a(b). Thus, after the first block, the representations of the tokens bi are 
+
+
+
+˜ϕ(emb( b1, 1 + n)) 
+
+...
+
+˜ϕ(emb( bk, k + n)) 
+
+ . (108) In the second block, since WQ = 0 , all attention scores are identical, and hence the attention weights are uniform, equal to 1 
+
+> k+r(n)
+
+. It follows that the representation of each token bi after the second block is 
+
+¯ρ
+
+ϕ(emb( bi, i + n)) , pi+n, 1
+
+r(n) + k
+
+˜v +
+
+> k
+
+X
+
+> j=1
+
+ϕ(emb( bj , j + n)) 
+
+ , 0
+
+ , (109) where the compressed prefix cache is given by 
+
+c2(Ka, Va) = ( ˜Ka, ˜Va) = ([ ˜k1, . . . , ˜kr(n)]⊤, [˜ v1, . . . , ˜vr(n)]⊤) (110) and 
+
+˜v =  r(n)
+
+X
+
+> i=1
+
+˜vi
+
+
+
+> 2d1:3 d1
+
+. (111) Since n+kr(n)+ k > 1 by Lemma A.9, there exists a sequence ¯b of length k such that 
+
+dist 
+
+ n + kr(n) + k
+
+v +
+
+> k
+
+X
+
+> j=1
+
+ϕ(emb( ¯bj , j + n)) 
+
+ , H 
+
+ >
+
+ n + kr(n) + k − 1
+
+ D
+
+2 ≥ δ. (112) 23 Therefore, by Equation 105, the final representation of the token ¯bk, which is the output of MC,¯a(¯b),is equal to u0.On the other hand, by construction, M([¯ a, ¯b]) ∈ ρ(H). Hence, 
+
+∥M([¯ a, ¯b]) − MC,¯a(¯b)∥ > C, (113) completing the proof. 
+
+Lemma A.9. Let x1, . . . , xk ∈ Rd be distinct points with k ≥ 2, and let 
+
+H := conv {x1, . . . , xk}.
+
+Let α > 1. Then for every v ∈ Rd there exists i ∈ [k] satisfying 
+
+dist( αxi + v, H ) ≥ α − 12 diam( H).
+
+Proof. Let 
+
+D := diam( H) = sup 
+
+> p,q∈H
+
+∥p − q∥.
+
+Since the points x1, . . . , xk are distinct and k ≥ 2, we have D > 0.Choose p, q ∈ H such that ∥p − q∥ = D (such a pair exists since H is compact), and define 
+
+u := p − q
+
+∥p − q∥ .
+
+The set {⟨ u, x⟩ | x ∈ H} forms a closed interval, and the width of H in direction u is 
+
+max  
+
+> x∈H
+
+⟨u, x⟩ − min 
+
+> x∈H
+
+⟨u, x⟩ = D. 
+
+For any v ∈ Rd, the width of αH + v in direction u is therefore 
+
+max 
+
+> x∈αH +v
+
+⟨u, x⟩ − min 
+
+> x∈αH +v
+
+⟨u, x⟩ = αD. 
+
+Let 
+
+ε := α − 12 D. 
+
+Suppose, for contradiction, that 
+
+dist( αxi + v, H ) < ε for all i = 1 , . . . , k. 
+
+Since 
+
+αH + v = conv {αx1 + v, . . . , α xk + v},
+
+and since the ε-neighborhood of H,
+
+Hε := {z ∈ Rd : dist( z, H ) < ε },
+
+is convex, it follows that 
+
+αH + v ⊆ Hε.
+
+Consequently, the width of αH + v in direction u is strictly smaller than the width of Hε in direction 
+
+u. This width is at most 
+
+D + 2 ε. 
+
+Therefore, 
+
+αD < D + 2 ε. 
+
+But by the definition of ε,
+
+D + 2 ε = D + ( α − 1) D = αD, 
+
+which is a contradiction. Hence there exists some i ∈ { 1, . . . , k } such that 
+
+dist( αxi + v, H ) ≥ ε. 
+
+Note. We believe that a finer-grained analysis of transformer compressibility may be possible through the theory of Chebyshev systems [ 27 ], a classical framework with broad applications across both pure and applied mathematics [ 26 ; 38 ; 15 ; 28 ]. Chebyshev systems provide tools for controlling the zeros, sign changes, and interpolation structure of linear combinations of functions, which makes them a natural candidate for studying the degrees of freedom available in attention-like mixtures of value functions. We leave a systematic development of this connection to future work. 24 B KV-CAT implementation details 
+
+Masked attention forward pass. Instead, at each layer group, the train-time KV sparsification policy defines which previous KV slots are visible to attention. For layer ℓ, let m(ℓ) 
+
+> j
+
+be the most recent mask produced by the sparsification policy. The attention for query token t is evaluated over 
+
+Aℓt = {j ≤ t : m(ℓ) 
+
+> j
+
+= 1 } (114) Thus all valid queries are still processed by the transformer, but their access to past KV slots is restricted to the active, unmasked KV slots. The masks are independent across compression points: a token dropped in one layer may be selected again in a later layer. No masking is used at evaluation time in our comparisons. 
+
+Router parameterization. For the main experiments in the paper, we use lightweight learnable router modules, parameterized as linear attention, as our KV sparsification policy. For a sequence 
+
+x1: T , let hℓt ∈ Rd denote the hidden state of token t before decoder layer ℓ. We insert routers at a small set of compression layers C (e.g., for Q WEN 2.5-0.5B we use C = {1, 7, 13 , 19 }). Each router independently predicts which KV slots are masked for the following group of layers. Given hidden states Hℓ = ( hℓ
+
+> 1
+
+, . . . , h ℓT ) and, the router first computes 
+
+˜ht = LN( hℓt ), qt = ϕ(WQ˜ht), kt = ϕ(WK ˜ht), rt = WV ˜ht, ϕ(z) = ELU( z) + 1 .
+
+(115) It then forms a causal linear-attention summary without storing a router KV cache, 
+
+St = X
+
+> j≤t
+
+kj r⊤ 
+
+> j
+
+, zt = X
+
+> j≤t
+
+kj , at = WO
+
+q⊤ 
+
+> t
+
+St
+
+q⊤ 
+
+> t
+
+zt + ϵ . (116) The keep probability is computed from a cosine score between a pointwise projection of the current state and the state after the router summary: 
+
+ut = WP hℓt
+
+∥WP hℓt ∥2
+
+, wt = hℓt + αa t
+
+∥hℓt + αa t∥2
+
+, pt = 1 − ⟨ ut, w t⟩
+
+2 . (117) The binary routing decision is 
+
+mℓt = 1{pt > τ }, (118) with τ = 0 .5 in all reported runs. During training, this hard threshold is optimized with a straight-through estimator: the forward pass uses the binary mask above, while the backward pass passes gradients through the pre-threshold keep probability pt to the router parameters. We initialize 
+
+WP = −I and α = 0 , which gives pt = 1 for every valid token, so training starts from the dense model. 
+
+Training objective. Let pmask  
+
+> θ
+
+(· | x<t ) denote the masked forward pass and pdense  
+
+> θ
+
+(· | x<t ) the same model with masking disabled. We optimize 
+
+L = λmask 
+
+1
+
+T − 1
+
+> T
+
+X
+
+> t=2
+
+DKL 
+
+ sg pdense  
+
+> θ
+
+(· | x<t ) pmask  
+
+> θ
+
+(· | x<t )
+
++ λanchor 
+
+1
+
+T − 1
+
+> T
+
+X
+
+> t=2
+
+− log pdense  
+
+> θ
+
+(xt | x<t ) + λbudget 
+
+1
+
+|C| 
+
+X
+
+> c∈C
+
+Bc.
+
+(119) where sg stops gradients through the dense teacher. When using the router based KV sparsification policy, we use λbudget ̸ = 0 and the budget term follows the load-balancing objective from Hwang et al. [22]. For target keep rate ρ, define 
+
+Fc = 1
+
+T
+
+> T
+
+X
+
+> t=1
+
+mct , Gc = 1
+
+T
+
+> T
+
+X
+
+> t=1
+
+pct , Bc = FcGc
+
+ρ + (1 − Fc)(1 − Gc)1 − ρ . (120) All transformer and router parameters are updated during continued pretraining; in the reported runs 
+
+ρ = 0 .5, λmask = 1 , λanchor = 1 , and λbudget = 0 .1.25 C Extended Experimental Details 
+
+This section provides additional details for the empirical evaluation described in Section 5. We describe the continued-pretraining setup, including the data, architecture hyperparameters, and compression objective, and then give additional details on the post-hoc compression evaluations and experimental setups used throughout the paper. Unless otherwise stated, evaluations compare the base model to the KV-CAT checkpoint with masking disabled. All experiments were run on up to 8 H100 GPUs. Table 5: KV-CAT continued-pretraining hyperparameters for Q WEN 2.5 checkpoints.                                                       
+
+> Setting QWEN 2.5-0.5B QWEN 2.5-1.5B Base checkpoint Qwen/Qwen2.5-0.5B Qwen/Qwen2.5-1.5B
+> Training data FineWeb-Edu train, streaming FineWeb-Edu train, streaming Sequence length 1024 tokens 1024 tokens Compression layers 0, 6, 12, 18 0, 7, 14, 21 Router feature dimensions 64 64 Train threshold τtrain 0.5 0.5 Target keep rate 50% 50% Compression loss weight λmask 11Dense anchor weight λanchor 11Budget weight λbudget 0.1 0.1 Optimizer AdamW AdamW Weight decay 0.01 0.01 Gradient clipping 1.0 max norm 1.0 max norm Peak learning rate 10 −410 −4
+> Minimum learning rate 5×10 −65×10 −6
+> Warmup steps 600 600 Tokens per optimizer step 131,072 131,072 Training hardware 8×H100 GPUs 8×H100 GPUs Training steps 40k 40k Training tokens 5.24 ×10 95.24 ×10 9
+
+C.1 Continued pretraining runs 
+
+We train two model sizes, initialized from the public Q WEN 2.5-0.5B and Q WEN 2.5-1.5B [ 51 ]checkpoints, using continued pretraining on FineWeb-Edu [ 44 ] at a context length of 1024. The compression-aware objective is the one described in the method section: a compressed self-distillation loss matched to the model’s dense distribution, an uncompressed next-token prediction anchor, and a budget penalty. All transformer and compression module parameters are updated. The router layers are inserted at layers 0, 6, 12, and 18 for Q WEN 2.5-0.5B and layers 0, 7, 14, and 21 for Q WEN 2.5-1.5B. Each module is a causal linear-attention boundary predictor (as described in Appendix B) with 64 feature dimensions, a threshold τ = 0 .5, and a target keep rate of 50%. The objective weights are λmask = 1 , λanchor = 1 , and λbudget = 0 .1. We use AdamW with peak learning rate 10 −4, 600 warmup steps, minimum learning rate 5 × 10 −6, weight decay 0.01, and gradient clipping at norm 1.0. Both model sizes use a batch of 131,072 tokens per optimizer step, corresponding to 128 sequences of length 1024, and are trained on 8 GPUs. Runs are configured for 40k optimizer steps, which see 5.24 × 10 9 tokens. At evaluation time, the boundary predictors are turned off, and the post-hoc compressor named in each experiment is the only cache-reduction procedure whose quality is measured. Figure 3 reports the compressed and uncompressed validation NTP loss as well as the KV retention ratio throughout the KV-CAT continued pretraining for Q WEN 2.5-0.5B. Table 5 reports all hyperparameters and training setup for both runs. 
+
+C.2 No compression QA evaluation 
+
+To check that our training procedure does not substantially degrade ordinary model behavior, we evaluate normalized multiple-choice accuracy on a variety of question answering benchmarks us-ing the LightEval harness [ 19 ]. The evaluation suite contains HellaSwag [ 58 ], WinoGrande [ 47 ], 26 (a) Dense NTP loss (b) Compressed NTP loss 
+
+> (c) KV retention ratio
+
+Figure 3: QWEN 2.5-0.5B KV-CAT continued pretraining run. We plot dense validation next-token-prediction loss, compressed-path validation next-token-prediction loss, and the realized KV retention ratio over the 5.24B-token KV-CAT continued-pretraining run. The retention trace reports the fraction of KV slots kept by the learned routers, whose budget target is 50%. PIQA [ 4], Social IQa [ 49 ], OpenBookQA [ 39 ], ARC-Easy and ARC-Challenge [ 12 ]. We use 1000 validation examples per task, except for OpenBookQA, whose validation split contains 500 examples in this setup. The reported average is the unweighted mean over these eight tasks. The purpose of this evaluation is to measure whether the trained checkpoints maintain language modeling performance on standard short-context multiple-choice tasks before we test their behavior under hoc KV cache compression. 
+
+C.3 Suffix perplexity under prefix KV cache compression 
+
+The suffix-prediction experiments evaluate whether the continued-pretrained checkpoints are easier targets for post-hoc prefix KV cache compression. The in-domain evaluation data consists of held-out blocks from FineWeb. Each evaluation example is a 1024-token excerpt split into a 768-token prefix and a 256-token suffix. We first run the model on the full 1024-token sequence and record the suffix logits and per-layer attention traces. The first 768 tokens define the prefix cache to be compressed. The following 256 suffix tokens are never removed or compressed: after a compact prefix cache has been constructed, the same suffix tokens are appended normally and scored under the original transformer layers. This protocol is shared by the Attention Matching table and the gradient based optimization step-curve figures, but the two experiments fit the compact cache differently. 
+
+Attention-Matching. We use the AM-HighestAttnKeys Attention matching variant from Zweiger et al. [61] . For a keep ratio ρ ∈ { 0.05 , 0.1, 0.2, 0.4}, Attention Matching constructs a compact prefix cache independently for each layer and key-value head. Let K, V ∈ RL×d denote the dense prefix keys and values for one key-value head, where L = 768 , and let Q ∈ RM ×d denote suffix query states from the corresponding grouped query heads. We subsample at most 256 suffix queries per key-value head. Attention Matching first selects ⌈ρL ⌉ source keys with the largest root-mean-square attention weight over the sampled suffix queries. The selected keys form the compact keys C1. A 27 scalar log-bias vector β is then fit by two iterations of box-constrained nonnegative least squares so that the compact cache approximately matches the dense attention normalizer. Finally, compact values C2 are fit by ridge least squares to reconstruct the dense attention outputs, 
+
+softmax 
+
+ QC ⊤
+
+> 1
+
+√dk
+
++ β
+
+
+
+C2 ≈ softmax 
+
+ QK ⊤
+
+√dk
+
+
+
+V. 
+
+We use ridge coefficient 10 −4 with spectral scaling and solve the value regression with a least-squares solver. After constructing the compact prefix cache, we run the model on the same prefix-suffix sequence while replacing the dense prefix cache with the compact cache for all subsequent suffix positions. We report the increase in suffix perplexity relative to the same model’s dense-prefix forward pass, KL divergence to the native dense-prefix logits, and top-1 agreement with the native logits. All metrics are averaged over 128 evaluation examples. 
+
+Gradient-based KV cache compression. In this setting, we directly optimize a small set of continuous key and value vectors for each example while keeping all model parameters fixed. The resulting optimization curves measure how much information about the prefix can be preserved in a compact KV cache when the cache itself is allowed to adapt to the example. The dense model is first run on the full prefix-suffix sequence to produce teacher logits on the suffix. For a target keep ratio 
+
+ρ ∈ { 0.05 , 0.1, 0.15 , 0.2, 0.25 , 0.3, 0.35 , 0.4, 0.5},
+
+we allocate a compact prefix cache with 
+
+m = ⌈ρL ⌉
+
+KV slots per layer and key-value head, where L = 768 is the dense prefix length. The compact cache consists of learnable key and value tensors 
+
+eKℓ,h , eVℓ,h ∈ Rm×d
+
+for each layer ℓ and key-value head h. We initialize eKℓ,h and eVℓ,h from the first m dense prefix KV states for that layer and head. The compact cache is optimized per example using the suffix teacher distribution from the dense full-prefix forward pass. Let z⋆t denote the dense teacher logits at suffix position t, and let zt( eK, eV ) denote the logits obtained when the dense prefix cache is replaced by the compact cache. We minimize 
+
+LKV = 1
+
+|S| 
+
+X
+
+> t∈S
+
+DKL 
+
+
+
+softmax( z⋆t ) softmax( zt( eK, eV )) 
+
+
+
+,
+
+where S is the set of suffix prediction positions. The optimization updates only the compact KV tensors; model weights are never updated. We use AdamW for 100 gradient steps with learning rate 
+
+10 −2, weight decay 0, and gradient clipping at norm 1.0. We record intermediate compact caches after steps 
+
+{0, 1, 2, 5, 10 , 20 , 50 , 100 }
+
+to produce the optimization-step curves. After each recorded optimization step, we evaluate next-token prediction on the same suffix using the compact cache in place of the dense prefix cache. The reported perplexity is computed against the ground-truth suffix tokens. This evaluation should be interpreted as a controlled probe of the cache-construction problem in post-hoc compression. For each example, the compact prefix cache is fit using supervision derived from the same prefix–suffix sequence on which it is evaluated: Attention Matching uses suffix attention/query traces to construct the compact cache, while the gradient-based method uses suffix teacher logits. Thus, the comparison asks whether the trained checkpoints make the per-example compact-cache optimization problem easier under matched cache budgets and matched supervision, rather than testing transfer from a cache fit on one suffix to unseen suffixes (which is tested in the next experiments). 
+
+C.4 Needle-in-a-haystack retrieval under KV cache compression 
+
+We evaluate retrieval under prefix KV cache compression using a deterministic needle-in-a-haystack task. Each example contains neutral filler text, passkey-like distractor numbers, a single six-digit passkey, and a final query asking for the passkey. The prompt length before the final query is 1024 tokens. The model is evaluated using the compressed prompt and the query. 28 Example construction. To generate each example, we sample a six-digit string a ∈{000000 , . . . , 999999 }, which defines the passkey stored in the prefix and the answer expected at evaluation. For example, if a = 483920 , the needle inserted into the haystack is 
+
+Memory record: special_passkey=483920. 
+
+The final query is 
+
+Memory record: special_passkey= 
+
+and the answer is exactly 
+
+483920 .
+
+The passkey is inserted at relative depths 
+
+d ∈ { 0, 0.25 , 0.5, 0.75 , 1},
+
+where d = 0 .0 places the needle at the beginning of the haystack and d = 1 places it at the end. In addition to the answer passkey, examples contain distractors: passkey-like six-digit strings that are explicitly not equal to the answer. These distractors are inserted into the sequence so that the model cannot solve the task by copying an arbitrary number. For example, if the answer is 483920 , a possible distractor sentences is or 
+
+Ignore the misleading special passkey candidate 672041. 
+
+During example construction, the haystack is assembled from filler text before and after the needle. At each filler-sentence draw, with probability 0.35 we insert a distractor sentence; otherwise we insert a neutral sentence unrelated to the retrieval key. Distractor codes are sampled uniformly from the six-digit code space and rejected if they match the answer. The needle is then inserted at the requested relative depth in the haystack, and the query is appended after the haystack. For each compression ratio, we evaluate 20 instances per depth totaling at a 100 examples. 
+
+Training the compact KV cache. For each example, we train a new compact prefix KV cache while keeping all model weights frozen. Let <haystack> denote the haystack prefix, including the filler text, needle and any distractors, but excluding the final query and answer. We construct an reconstruction sequence 
+
+<haystack><instruction><haystack> ,
+
+where the instruction is 
+
+Reproduce the preceding passage verbatim. Preserve every word, digit, and punctuation mark. 
+
+The compact cache replaces the KV states for the first <haystack> . The loss is applied only on the second <haystack> , so the optimizer must store enough information in the compact cache to reconstruct the original prefix, including the passkey and distractors. For a keep ratio ρ, the compact cache contains 
+
+m = ⌈ρL ⌉
+
+KV slots per layer and KV head, where L is the haystack length. The compact keys and values are initialized by selecting m random haystack KV states and then optimized directly with AdamW. As in Appendix C.3, we use a KL objective between the suffix logits (computed on the second copy of 
+
+<haystack> ) produced by the dense model and the ones produced when attending to the compact cache. For each example, this objective is optimized by running AdamW for 100 steps with learning rate 10 −2, weight decay 0, and gradient clipping at norm 1.0.
+
+Evaluation. At evaluation time, the haystack prefix is represented by the optimized compact KV cache, while the final query is appended normally and remains uncompressed. We then perform greedy answer generation and compare the generated completion against the six-digit passkey. In the table, we report native-success-conditioned exact-match retrieval accuracy: for each model, keep ratio, and compact-cache optimization step, we report the percentage of those examples for which the compressed-prefix model also generates exactly the passkey. 29 C.5 Long-form question answering under KV cache compression 
+
+We evaluate long-context question answering under post-hoc KV cache compression on LongBench v2. Because the compression procedure optimizes a separate compact KV cache for each prompt, this evaluation is substantially more expensive than ordinary decoding. We therefore report results on a fixed subset of seven LongBench v2 subdomains: Academic, Agent history QA, Knowledge graph reasoning, Legal, Many-shot learning, New language translation, and Table QA. This subset contains 221 examples in total. For each LongBench example, we construct a multiple-choice prompt from the context, question, and four answer choices. The prefix is 
+
+Please read the following text and answer the question below. 
+
+followed by the context from the benchmark. The suffix is 
+
+What is the correct answer to this question: <question> 
+
+followed by the four choices (A) , (B) , (C) , and (D) , and the answer-format prefix 
+
+The correct answer is ( .
+
+We score the four continuations A) , B) , C) , and D) by total log-likelihood and predict the answer with the highest score. No free-form generation is used. For each example, model, and keep ratio ∈ { 0.1, 0.2, 0.5}, we optimize a compact KV cache for example’s context while keeping all model weights frozen. The optimization uses a reconstruction sequence as in Appendix C.4. As common in LongBench evaluations, if the reconstruction sequence length is larger than the context length of the model (32,768 tokens) we truncate the context using middle truncation (keeping a prefix and suffix of equal length) [ 2]. The KC objective is a KL divergence between the dense model’s next-token distribution and the compact-cache model’s next-token distribution on all tokens of the repeated prefix. The compressed caches are initialized from the first prefix KV slots. We optimize each compact cache for 100 AdamW steps with learning rate 
+
+10 −2, weight decay 0, gradient clipping norm 1.0, and gradient checkpointing enabled. At evaluation time, the optimized compact KV cache replaces the full KV cache of the context prefix. The question, answer choices, and answer prefix are then processed normally, without compression. We report accuracy, grouped by subdomain and averaged over the 221 examples. 
+
+# D Additional Experimental Results 
+
+This section collects supplementary results that are complementary to Section 5. In Section D.1, we ablate the choice of the train-time sparsification policy used in KV-CAT. In Section D.2, we test whether the Attention Matching performance gains we observe in Section 5 generalize to prefix–suffix from additional text corpora. 
+
+D.1 Train-time KV sparsification policy ablation 
+
+We use this ablation to choose the train-time KV sparsification policy used in the main experiments. Starting from Q WEN 2.5-0.5B, we train three checkpoints with the same self-distillation and dense-anchor losses and the same 50% target keep rate, varying only the policy that selects active KV slot during the masked forward pass. R AND uniformly samples an exact-count 50% subset of valid KV slots at each sparsification point. A TTN is an H2O-inspired [ 59 ] attention-mass baseline: it computes dense causal attention at the routed layer, sums the attention mass received by each source token over heads and valid query positions, and keeps the top 50% source KV slots. R OUTER uses the lightweight learned linear-attention routers described in Appendix B. Because R AND and A TTN 
+
+satisfy the target keep rate by construction, we set λbudget = 0 for those runs; for R OUTER , we use the budget regularizer described in Appendix B. In all comparisons below, the trained checkpoints are evaluated in the unmasked forward pass mode, with the training-time sparsification mechanism disabled, and post-hoc compression is applied afterward. 
+
+Uncompressed performance. ROUTER is the only sparsification policy in this ablation that pre-serves dense downstream accuracy at or above the base model average. Its average score is 52.2, compared to 51.5 for the base model, 50.7 for R AND , and 50.2 for A TTN . The fixed policies still retain much of the base model’s zero-shot performance after continued pretraining. 30 Table 6: KV-CAT implemented with a R OUTER policy retains base model performance better than the fixed R AND and A TTN policies. 
+
+Model Variant HellaSwag WinoGrande PIQA OpenBookQA ARC-E ARC-C Avg. QWEN 2.5-0.5B Base 54.6 52.9 70.4 38.2 60.8 32.2 51.5 ROUTER 53.6 54.1 72.1 37.4 63.6 32.4 52.2 
+
+RAND 52.6 52.9 70.2 35.4 61.8 31.1 50.7 ATTN 50.7 53.6 70.0 35.6 60.2 30.9 50.2 
+
+Attention Matching Evaluation. All checkpoints are evaluated with the same Attention Matching procedure described in Appendix C.3. Table 7 shows that all three train-time sparsification policies Attention Matching performance compared to the original base checkpoint for every reported metric and budget. This further supports the KV-CAT framework, demonstrating that the downstream compression improvements are not tied exclusively to learned router parameterization. Among the policies, R OUTER gives the best result for every reported keep ratio and metric. The margin over RAND is sometimes small, especially at 10% and 40% keep ratio, but R OUTER is consistently at least as good under compression and is clearly stronger on dense task retention. We therefore use R OUTER 
+
+in the main experiments as the default train-time sparsification policy. Table 7: Attention-matching prefix compression on FineWeb-Edu for the base model and three KV-CAT models with the R OUTER , R AND , and A TTN KV sparsification policies. We report degradation relative to each model’s native dense-prefix forward pass. Lower ∆PPL and KL are better; higher top- 1 agreement is better. Keep ratio ∆PPL ( ↓) KL ( ↓) Top-1 ( ↑)Base ROUTER RAND ATTN Base ROUTER RAND ATTN Base ROUTER RAND ATTN                                                 
+
+> 0.05 0.780 0.461 0.547 0.593 0.0562 0.0385 0.0420 0.0440 88.5% 91.1% 90.3% 90.3% 0.10 0.662 0.422 0.427 0.495 0.0483 0.0321 0.0356 0.0363 89.3% 91.4% 90.9% 90.8% 0.20 0.777 0.438 0.547 0.594 0.0549 0.0374 0.0409 0.0396 88.7% 90.8% 90.4% 90.5% 0.40 0.592 0.360 0.361 0.386 0.0431 0.0272 0.0283 0.0288 90.3% 92.5% 92.3% 92.4%
+
+D.2 Cross-domain attention matching evaluation 
+
+We test whether the Attention Matching optimization gains observed for KV-CAT transfer to prefix– suffix pair from additional textual domains. We evaluate Attention Matching KV cache compression on validation examples from three held-out corpora: WikiText-103 [ 37 ], PG-19 [ 45 ], and arXiv [ 13 ]. For each example, we take a 768-token prefix and a 256-token suffix, compress only the prefix KV cache with the same Attention Matching procedure used in Appendix C.3, and then score suffix next-token prediction against each model’s own dense full-prefix distribution. Across all three held-out domains, the compression-aware checkpoint remains a better target for the same post-hoc compressor. It reduces KL and increases top-1 agreement for every corpus and keep ratio. It also lowers ∆PPL in 11 of 12 settings; the only exception is arXiv at 40% keep ratio, where 
+
+∆PPL increases even though KL and top-1 agreement still improve. We therefore interpret this table as evidence that KV-CAT improves cross-domain compressibility under Attention Matching. 
+
+D.3 Additional KV keep-ratio curves 
+
+Figure 4 extends the main-body optimization curves in Figure 2 with three additional KV keep ratios: 15%, 25%, and 35%. 31 Figure 4: KV-CAT speeds up gradient-based KV cache compression. We plot the gap in suffix perplexity under full/compressed-prefix inference throughout gradient-based KV cache optimization. Each panel fixes a different KV keep ratio. Across ratios, the KV-CAT checkpoint achieves a comparable ∆PPL in fewer optimization steps than the base model, yielding up to a 5× speedup. 
+
+# E Limitations 
+
+Our approach relies on continued pretraining with additional routing modules, introducing non-trivial training overhead and potentially limiting applicability in low-resource settings. The routing mechanism and training objective also add implementation complexity, which may hinder integration into existing production systems. Finally, our evaluation is limited to a small set of model sizes and tasks, and it remains to be seen how well the method generalizes to larger-scale models or different domains. 
+
+# F Broader Impact 
+
+Broader Impact. This work is primarily methodological, aiming to improve the efficiency of transformer-based language models by enabling more effective KV cache compression. On the positive side, our approach can reduce memory and compute requirements for long-context inference, making large models more accessible and energy-efficient, and enabling their deployment in resource-constrained settings. Potential negative impacts are indirect: by improving the efficiency of existing LLMs, our method may lower the cost of deploying such models at scale, which could amplify both beneficial and harmful downstream applications. However, our method does not introduce new capabilities or alter model behavior beyond improving compatibility with compression, and therefore does not create new misuse vectors beyond those already present in the underlying models. Mitigation strategies largely align with existing practices for responsible LLM deployment, including monitoring, access control, and adherence to usage policies of the underlying models. 32
