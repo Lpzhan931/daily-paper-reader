@@ -6,35 +6,32 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-15
-- 运行时间：2026-05-15 20:37:17 UTC
+- 最新运行日期：2026-05-16
+- 运行时间：2026-05-16 19:48:43 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：4
-- 速读区：0
+- 本次总论文数：3
+- 精读区：0
+- 速读区：3
 
 ### 今日简报（AI）
-今日深度研读 4 篇论文，核心聚焦 KV 缓存（KV Cache）的智能剪枝与高效留存技术。
-重点推荐通过预测未来效用实现自剪枝的 KV 注意力机制，以及基于多样性惩罚的最小干预留存方案。
-建议关注长文本推理效率的读者优先探索“自剪枝”思路，以实现更低成本的大模型部署。
-- 详情：[/202605/15/README](/202605/15/README)
+今日聚焦 LLM 效率优化与状态解析，涵盖在线记忆、硬件感知量化及循环状态稀疏编码三大前沿。
+重点关注 $δ$-mem 带来的高效在线记忆机制，以及针对硬件特性的逐层量化方案，显著提升模型部署性能。
+建议开发者优先调研硬件感知量化技术以优化推理成本，研究者可关注 SAE 在解析模型内部状态中的新应用。
+- 详情：[/202605/16/README](/202605/16/README)
 
 ### 精读区论文标签
-1. [Self-Pruned Key-Value Attention: Learning When to Write by Predicting Future Utility](/202605/15/2605.14037v1-self-pruned-key-value-attention-learning-when-to-write-by-predicting-future-utility)  
-   标签：评分：9.0/10、query:llm
-   evidence：通过预测未来效用来实现自剪枝KV注意力
-2. [Minimal-Intervention KV Retention: A Design-Space Study and a Diversity-Penalty Survivor](/202605/15/2605.14292v1-minimal-intervention-kv-retention-a-design-space-study-and-a-diversity-penalty-survivor)  
-   标签：评分：8.0/10、query:llm
-   evidence：KV缓存压缩机制的设计空间研究
-3. [CoRDS: Coreset-based Representative and Diverse Selection for Streaming Video Understanding](/202605/15/2605.14310v1-cords-coreset-based-representative-and-diverse-selection-for-streaming-video-understanding)  
-   标签：评分：8.0/10、query:kvcache-survey
-   evidence：通过核心集选择进行KV缓存压缩
-4. [HeatKV: Head-tuned KV-cache Compression for Visual Autoregressive Modeling](/202605/15/2605.14877v1-heatkv-head-tuned-kv-cache-compression-for-visual-autoregressive-modeling)  
-   标签：评分：8.0/10、query:llm
-   evidence：视觉自回归模型的头部微调KV缓存压缩
+- 本次无精读推荐。
 
 ### 速读区论文标签
-- 本次无速读推荐。
+1. [$δ$-mem: Efficient Online Memory for Large Language Models](/202605/16/2605.12357v1--mem-efficient-online-memory-for-large-language-models)  
+   标签：评分：7.0/10、query:llm
+   evidence：用于高效上下文复用的轻量级记忆机制
+2. [A Hardware-Aware, Per-Layer Methodology for Post-Training Quantization of Large Language Models](/202605/16/2605.14929v1-a-hardware-aware-per-layer-methodology-for-post-training-quantization-of-large-language-models)  
+   标签：评分：7.0/10、query:llm-ef
+   evidence：用于大模型推理优化的训练后量化
+3. [WriteSAE: Sparse Autoencoders for Recurrent State](/202605/16/2605.12770v1-writesae-sparse-autoencoders-for-recurrent-state)  
+   标签：评分：6.0/10、query:llm
+   evidence：用于循环状态缓存管理的稀疏自编码器
 
 
 <div class="dpr-home-promo-card">
