@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
-from llm import DeepSeekClient
+from llm import DeepSeekClient, resolve_max_output_tokens
 from subscription_plan import build_pipeline_inputs
 
 SCRIPT_DIR = os.path.dirname(__file__)
@@ -921,7 +921,7 @@ def main() -> None:
     parser.add_argument(
         "--max-output-tokens",
         type=int,
-        default=8192,
+        default=resolve_max_output_tokens(),
         help="max tokens for model output.",
     )
     parser.add_argument(
