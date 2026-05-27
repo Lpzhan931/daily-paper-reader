@@ -1,0 +1,1382 @@
+Title: CachePrune: Privacy-Aware and Fine-Grained KV Cache Sharing for Efficient LLM Inference
+
+URL Source: https://arxiv.org/pdf/2605.23640v1
+
+Published Time: Mon, 25 May 2026 00:58:31 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# CachePrune : Privacy-Aware and Fine-Grained KV Cache Sharing for Efficient LLM Inference 
+
+## Guanlong Wu ∗
+
+santiscowgl@gmail.com SUSTech 
+
+## Zhaohan Li ∗
+
+ray.eldath@outlook.com SUSTech 
+
+## Yao Zhang 
+
+zhangyao.crypto@bytedance.com ByteDance 
+
+## Zheng Zhang 
+
+aca2hang2heng@gmail.com SUSTech 
+
+## Jianyu Niu 
+
+Njianyu@gmail.com SUSTech 
+
+## Ye Wu 
+
+wuye.2020@bytedance.com ByteDance 
+
+## Yinqian Zhang †
+
+yinqianz@acm.org SUSTech 
+
+ABSTRACT 
+
+Large Language Models (LLMs) rely on Key-Value (KV) caching to accelerate inference, and many serving systems further share the KV cache across users’ requests to reduce redundant computation. While widely adopted, unrestricted cross-user sharing introduces side-channel vulnerabilities, allowing an adversary to infer user inputs by probing for cache reuse. Existing defenses disable shar-ing entirely to prevent leakage; yet such a coarse-grained strategy sacrifices substantial reuse potential, since prompts often include large portions of privacy-irrelevant segments, such as system in-structions or publicly accessible materials. Building on this, we present CachePrune , a privacy-aware KV cache sharing mecha-nism that enables fine-grained reuse of KV entries across requests. Realizing such fine granularity requires token-level cache man-agement, as reusable segments vary in length and position due to sensitivity masking, making reuse more complex than the fixed-size or sentence-level chunking used in existing coarse-grained schemes. Specifically, CachePrune makes fine-grained reuse prac-tical by addressing two key challenges: accurately and efficiently deriving reusable KV segments and efficiently retrieving them over variable-length spans. We implement CachePrune on top of vLLM and evaluate it on three datasets, showing that it eliminates di-rect leakage through KV cache reuse side channels while reducing TTFT by 4.5x and increasing cache hit rates by 44% compared with state-of-the-art approaches. 
+
+1 INTRODUCTION 
+
+Large Language Models (LLMs) [ 1, 54 ] have achieved remarkable progress in production, with enormous usage across diverse do-mains and user bases. To meet the massive computational demands, numerous optimizations have been developed to enhance inference efficiency, among which one widely-adopted method is to share the Key-Value (KV) cache [ 20 , 66 ] across different users. KV cache shar-ing involves storing and reusing the intermediate attention states computed during inference, allowing multiple requests to leverage previously computed key-value pairs when processing overlapping 
+
+> ∗Equal contribution
+> †Corresponding author
+
+input sequences. This mechanism reduces memory usage and com-putational overhead, enabling higher system throughput and lower response latency. KV cache sharing has been extensively deployed in both open-source implementations ( e.g. , vLLM [ 20 ], SGLang [ 66 ]) and production systems ( e.g. , OpenAI [ 41 ], Claude [ 8], Gemini [ 13 ]), demonstrating its practicality in LLM serving infrastructure. Unfortunately, recent studies [ 50 , 61 , 67 ] show that unrestricted sharing across mutually untrusted users exposes a new side-channel surface. At a high level, an adversary sends probe requests and checks for KV cache reuse through side channel signals such as reduced latency [ 50 , 67 ] or scheduling priority [ 61 ]. A reuse sig-nal indicates that the probe matches part of the victim’s prompt, enabling the adversary to reconstruct the victim’s input. Existing defenses ( e.g. , discussed by NVIDIA [ 39 ]) suggest disabling cross-user sharing entirely, which eliminates leakage but also sacrifices most of the efficiency benefits of KV cache sharing. However, the existing all-or-nothing sharing policy is overly coarse-grained and sacrifices significant reuse potential, as user prompts often contain substantial privacy-irrelevant segments in practice that could be safely shared. As motivating examples, we first note that prompts often include substantial system and public content, such as instructions, templates, or retrieved passages in retrieval-augmented generation (RAG) pipelines, unrelated to user input; our analysis on the MSMARCO [ 29 ] dataset ( Sec. 3.2 ) shows that user-provided text constitutes only 8.8% of the total prompt. Be-sides, even within the user-provided portion, most content remains privacy-irrelevant; prior studies [ 28 , 35 , 49 ] report that in domains such as banking or customer-service, only personally identifiable information (PII) like names or account numbers is considered sen-sitive. Using the SOTA PII identifier Presidio [ 30 ], we found such sensitive tokens account for merely 2.3% of the user input ( Sec. 3.2 ). 
+
+Together, these highlight the need for a practical mech-anism to enable fine-grained selective KV cache sharing, thereby breaking the all-or-nothing trade-off between pri-vacy and efficiency. Nonetheless, existing systems ( e.g. , vLLM, CacheBlend, CacheCraft, Epic) [ 3, 17 , 20 , 64 ] operate at coarse gran-ularity and thus fundamentally cannot support selective sharing: they reuse KV cache at the level of fixed chunks (e.g., 512 tokens [ 3]) or entire prompt, so the presence of a single sensitive token (e.g., 
+
+> arXiv:2605.23640v1 [cs.CR] 22 May 2026
+
+PII) invalidates the whole unit and discards most otherwise reusable content (as detailed in Sec. 3.3). To this end, we propose CachePrune , which realizes privacy-aware selective KV cache sharing. Specifically, for each prompt after inference, CachePrune integrates privacy detection ( e.g. ,user-defined or existing detection tools) to identify and exclude sensitive segments of the prompt, then derives the reusable KV segments from the remaining tokens, storing them for retrieval across requests. We identify two key challenges in realizing such fine-grained KV cache sharing beyond existing chunk-level designs: 
+
+• Challenge 1: Deriving reusable KV segments. Achieving fine-grained, privacy-aware sharing goes beyond identifying non-sensitive text, as KV segments are context-dependent and naively reusing them under mismatched contexts leads to quality degra-dation. In practice, such reusable segments can also emerge at arbitrary positions and with variable lengths, making their identi-fication and validation a major challenge. While prior work [ 3 ] de-fines reusability using intra- and inter-attention comparisons, sim-ply applying this criterion to fine-grained sharing would require evaluating every possible token pair to compute cross-segment dependencies, leading to an 𝑂 (𝑛 2) complexity that makes it im-practical for real-time inference ( Sec. 4.2.1 ). To make fine-grained sharing practically viable, we design an adaptive algorithm based on summed-area tables that efficiently evaluates segment reusabil-ity without incurring additional computational cost. 
+
+• Challenge 2: Efficiently retrieving reusable segments. Once reusable KV segments are derived, the system must efficiently match them against incoming requests to enable reuse. Existing methods rely on fixed-size segments with predefined boundaries, allowing direct hash-based lookup. However, under fine-grained sharing, segments have variable lengths and positions, where even a single-token shift breaks hash alignment and reduces matching to substring search over all spans, leading to prohibitive overhead. To address this, we design a rolling-hash–based retrieval algo-rithm that supports constant-time updates and enables linear-time matching for variable-length segments. We implement a prototype of CachePrune on top of vLLM [ 20 ]and conduct comprehensive evaluations. Our results demonstrate the effectiveness of CachePrune from three perspectives: 
+
+• Privacy: (i) Within our threat model, we show that tokens marked as sensitive cannot be directly recovered through reuse-based side channels, eliminating the leakage channel targeted in prior at-tacks [ 50 , 61 , 67 ]. (ii) Beyond our threat model, we note that an attacker may infer sensitive information from non-sensitive to-kens, i.e. , contextual leakage, a broader open problem [ 63 ] but not considered in prior attacks [ 50 , 61 , 67 ]. We provide a dedicated evaluation ( Sec. 5.2 ), showing that contextual leakage remains lim-ited in practice, as CachePrune does not expose the positions or counts of sensitive tokens, nor the grouping or ordering of non-sensitive tokens, resulting in only 2.2% exact recovery and 6.4% semantic recovery under SOTA attacks [ 51 ]. (iii) Privacy under imperfect privacy detection. CachePrune is decoupled from the underlying detector and is compatible with a wide range of mech-anisms (from user-defined rules to detectors), reflecting a com-mon security-by-design practice built on well-established privacy detection ( e.g. , Presidio [ 30 ] or OpenAI Privacy Filter [ 40 ]). How-ever, detectors are inherently imperfect—a limitation shared by all detection-based systems. We analyze detection errors and show that false negatives (unmarked sensitive tokens) increase direct leakage, while false positives (over-marked non-sensitive tokens) reduce contextual leakage (Sec. 5.2). 
+
+• Generation quality: CachePrune preserves model output qual-ity across datasets and models, showing negligible deviation from full recomputation and aligning with prior works [3, 17, 64]. 
+
+• Efficiency: (i) End-to-end evaluations show that CachePrune 
+
+reduces TTFT by up to 4.5x and reuses up to 94.57% of tokens’ KV cache compared to non-sharing baselines. (ii) Even without privacy constraints ( i.e. , privacy filtering is disabled), CacheP-rune’s fine-grained sharing improves cache hit rate by 44% over existing reuse mechanisms, showing the efficiency benefit of fine-grained KV reuse itself. (iii) We further characterize the tradeoff between privacy protection and efficiency: stronger privacy re-quirements mark more tokens as sensitive, fragmenting prompts into smaller pieces. This fragmentation reduces the likelihood of forming reusable segments, thereby lowering reuse opportunities. 
+
+Our contributions. To summarize, we make the following contri-butions in this paper: 
+
+• We present CachePrune , the first practical KV cache sharing system that breaks the privacy-efficiency trade-off by enabling fine-grained reuse of non-sensitive KV entries, mitigating direct recovery via reuse-based side channels [ 50 , 61 , 67 ] by restricting reuse of tokens identified as sensitive. 
+
+• We introduce fine-grained KV cache sharing that overcomes the limitations of fixed chunk-based reuse. We show that even without privacy constraints, fine-grained sharing alone improves reuse efficiency over existing approaches. 
+
+• We implement CachePrune upon vLLM and conduct compre-hensive evaluations. CachePrune is compatible with existing LLM serving frameworks (e.g., vLLM) and provides a unified in-terface for integrating diverse privacy detection mechanisms. Our results demonstrate (i) elimination of direct leakage from reuse-based side channels, (ii) preserved generation quality across tasks and models, and (iii) significant efficiency gains together with a characterization of the privacy–efficiency tradeoff. 
+
+2 KV CACHE 2.1 Fundamentals 
+
+Large language models (LLMs) [ 36 , 65 ] are built on the Trans-former [ 55 ], where each token is represented by a Key vector (for attention matching) and a Value vector (for information retrieval). In autoregressive generation, tokens are processed sequentially, and each step attends to all previous tokens via their Key and 
+
+Value vectors. To avoid recomputation, modern systems maintain a Key-Value (KV) cache [ 22 ] that stores these vectors across lay-ers, making attention cost grow only with newly generated tokens rather than the full sequence length. While KV caching is a standard optimization for LLM inference, it shifts the bottleneck from compu-tation to memory [ 19 ]. Caching attention states reduces decoding latency, but storing key and value tensors for all past tokens causes                                                                 
+
+> 201234567
+> 012345618
+> 8910 11 Stored
+> Request
+> Incoming
+> Request
+> Identical prefix reuse
+> 12 13 14 15 16 17
+> 8910 11 12 13 14 15 16 17
+> Cannot be reused because early token differs (a) Prefix sharing. 01234567
+> 18 1234567
+> 8910 11
+> 8910 19
+> Reuse with recomputing
+> Stored
+> Request
+> Incoming
+> Request
+> Chunk 1 (Hash 1) Chunk 2 (Hash 2)
+> 12 13 14 15 16 17
+> 12 13 14 15 16 17
+> Chunk 3 (Hash 3)
+> Chunk 4 (Hash 4) Chunk 5 (Hash 5) Chunk 6 (Hash 3)
+> Cannot be reused due to chunk-level granularity
+> (b) Position-independent sharing.
+
+Figure 1: KV cache sharing mechanisms. White blocks denote unreusable KV cache, gray blocks denote reusable KV cache, and hatched blocks denote recomputed KV cache. 
+
+memory usage to scale with sequence length and model size. In multi-tenant serving, this trade-off directly constrains concurrency and throughput under a fixed GPU budget. 
+
+2.2 KV Cache Sharing 
+
+While KV caching improves efficiency, its memory usage still scales with sequence length and model size, limiting scalability in prac-tice. KV cache sharing [ 20 , 66 ] addresses this by reusing cached KV across requests with overlapping content, avoiding redundant storage and computation. This reduces memory footprint, enabling higher concurrency, while also lowering per-request latency. Exist-ing approaches mainly fall into two categories: prefix sharing [ 20 ,66] and position-independent sharing [3, 17, 64] (Fig. 1). 
+
+2.2.1 Prefix Sharing. Prefix sharing reuses cached KV pairs when requests share the same initial sequence. The system matches the prefix of an incoming request against existing cache entries and reuses the corresponding KV vectors, computing only the re-maining tokens. As in Fig. 1 -a, tokens 0–6 overlap between the stored and incoming requests, enabling KV reuse. This is the most widely adopted form of KV cache sharing, used in systems such as vLLM [ 20 ], SGLang [ 66 ], and DeepSeek [ 23 ], and deployed in production including OpenAI [ 41 ], Anthropic [ 8], and Gemini [ 13 ]. 
+
+Advantages. Prefix sharing does not affect model accuracy, as reused KV entries are identical to recomputed ones. 
+
+Limitations. Reuse is limited to exact prefix matches; any dif-ference in early tokens prevents sharing, leaving overlapping se-quences unused ( e.g. , token 8-17 in Fig. 1-a). 
+
+2.2.2 Position-independent Sharing. Position independent shar-ing is an emerging approach designed to increase the usability of KV cache sharing beyond exact-prefix matches. Recent work [ 3, 17 , 64 ]shows that KV entries can be reused even when overlapping content appears at different positions, with only a slight accuracy trade-off. The approach leverages the sparsity of attention in LLMs: only a subset of “important” tokens strongly influences each step. By recomputing the important tokens, many other KV entries can still be reused without degrading output quality. Fig. 1 -b illustrates the process. When a new request arrives, the input is divided into fixed-size chunks (e.g., 512 tokens in practice and 6 tokens in this case). Each chunk is matched against the cache using hash-based lookup; matched chunks (e.g., chunk 3 and chunk 6) reuse their KV entries, while a small subset of tokens within them (e.g., token 15) is recomputed to preserve generation quality. Representative systems include CacheBlend [ 64 ], CacheCraft [ 3 ], and EPIC [ 17 ], which mainly differ in their strategies for selecting tokens to recompute. 
+
+• CacheBlend [ 64 ] selects tokens for recomputation based on KV deviation. It compares the first-layer KV of a chunk in its original context with that from a full recomputation in the new context, then recomputes the top 15% of tokens with the largest deviation, as these tokens are most likely to change in attention distribution under the new context. 
+
+• EPIC [ 17 ] extends CacheBlend by observing that boundary to-kens are most critical for maintaining cross-chunk dependencies. Instead of recomputing a fixed 15% of high-deviation tokens, it recomputes only the first and last K/2 tokens of the chunk, where K is a predefined value, making the recomputation cost constant. 
+
+• CacheCraft [ 3] provides an explainable methodology for selec-tive recomputation, moving beyond the heuristic nature of KV deviation in EPIC and CacheBlend. It selects tokens directly from attention scores: within a reused chunk, tokens whose attention is concentrated inside the chunk are retained, while those attending more to tokens outside the chunk have their KV recomputed in the new context. This principled approach forms the basis of our system and will be detailed in Sec. 4.2.1. 
+
+Advantages. Position-independent sharing greatly increases the opportunities for KV reuse compared to prefix sharing. 
+
+Limitations. All existing position-independent methods reuse at fixed chunk granularity: both cached and incoming requests are split into equal-sized chunks and matched by hash lookup. This rigid segmentation can split identical segments across different boundaries, making them unreusable. For instance, in Fig. 1 -b, to-kens 1–10 cannot be reused because they span in different chunks. 
+
+2.3 Privacy Concerns in KV Cache Sharing 
+
+While KV cache sharing improves inference efficiency, it also opens up new privacy risks. Because the KV cache encodes intermediate states directly derived from user prompts, unrestricted sharing across mutually distrustful users creates a side channel that can be exploited to leak sensitive input. 
+
+Attack procedure. Existing attacks [ 50 , 61 , 67 ] follow the same high-level procedure, where the attacker interacts with the LLM service as a normal client: To test whether a victim’s prompt con-tains a certain token sequence, the attacker issues a probe request containing that sequence. If the KV cache already holds matching entries from the victim’s request, the attacker’s probe benefits from cache reuse. This reuse can be detected through observable side effects such as reduced response latency [ 50 , 67 ] or higher schedul-ing priority in cache-aware systems [ 61 ]. By repeating this process with different probes and tracking which ones trigger reuse, the attacker can gradually reconstruct the victim’s prompt. 
+
+> 3
+
+Existing defense. A straightforward defense is to block KV cache sharing or restrict it within the same user session only [ 39 , 42 ]. However, this drastically reduces cache hit rates, increases memory usage, and nullifies much of the latency and throughput improve-ments that make KV caching attractive in the first place. This moti-vates our work, which aims to preserve the performance benefits of KV cache sharing while ensuring its security, as detailed in Sec. 3 .
+
+3 MOTIVATION 3.1 Problem Statement 
+
+KV cache sharing is widely used in multi-tenant LLM serving to reduce redundant computation ( Sec. 2.2 ). However, since cached states are derived from user prompts, cross-user sharing exposes side-channel signals that allow adversaries to infer other users’ inputs ( Sec. 2.3 ). Existing defenses [ 39 ] eliminate this by disabling cross-user sharing, as such attacks fundamentally rely on detecting reuse. While effective, this removes most of the efficiency gains of KV caching: as shown in Fig. 2 , TTFT can increase by up to 14x for a 10,000-token input on Mistral-7B [ 31 ]. Given that prompts often contain substantial non-private content ( Sec. 3.2 ), we aim to enable cross-user sharing while mitigating side-channel leakage ( Sec. 3.3 ). 
+
+Threat model. We summarize our threat model, following prior work [50, 61, 67], as follows: 
+
+• Adversary’s capabilities. The adversary is a client-side user with the same privileges as any ordinary user: it can only interact with the service via standard client APIs, with no direct access to the server, model weights, or plaintext KV cache entries. Its back-ground knowledge is limited to the publicly available tokenizer of LLM services. We model the adversary’s observation as a binary reuse oracle 𝑅 (𝑝 ) ∈ { 0, 1}, where 𝑅 (𝑝 ) = 1 indicates that a probe prompt 𝑝 triggers reuse of cached KV entries, and 𝑅 (𝑝 ) = 0 other-wise; such oracles can be inferred indirectly through side channels such as latency reduction or scheduling priority. By issuing a se-quence of probe requests 𝑃 = {𝑝 1, 𝑝 2, . . . , 𝑝 𝑘 } and observing the corresponding reuse oracles 𝑅 (𝑝 𝑖 ), the adversary can infer the presence of specific token sequences in other users’ prompts. 
+
+• Adversary’s goals. Identical to prior work [ 50 , 61 , 67 ]: the ad-versary aims to directly recover private content in other users’ prompts solely through side channels from KV cache sharing. For-mally, let a prompt be a token sequence 𝑃 = {𝑡 1, 𝑡 2, . . . , 𝑡 𝑛 }, and let 
+
+𝑀 ∈ { 0, 1}𝑛 be a binary sensitivity mask, where 𝑀 𝑖 = 1 indicates that token 𝑡 𝑖 is sensitive. The adversary’s goal is to recover tokens or spans with 𝑀 𝑖 = 1 based only on observed reuse oracles. 
+
+Design goals. We aim to build a practical KV cache sharing system that breaks the privacy–efficiency trade-off by enabling fine-grained reuse of non-sensitive KV entries, and preventing direct recovery of tokens identified as sensitive through reuse-based side channels. 
+
+Out of scope. Sensitive information may be inferred from non-sensitive tokens, i.e. , contextual leakage, a broader open problem inherent to fine-grained text processing [ 51 , 63 ]. In addition, privacy identification relies on automated detectors [ 30 , 40 ] that may be imperfect, a limitation shared by all detector-based systems. While treated orthogonal to our design, we provide dedicated evaluations (Sec. 5.2) to quantify their residual privacy impact in our setting. 2               
+
+> N       
+> 2
+> 
+> 
+> 
+>     
+>  
+>    
+
+Figure 2: TTFT reduction. U           
+
+> 0
+> 
+> 
+> 
+> 
+> 0
+>    
+>  
+
+Figure 3: Non-sensitive text. 
+
+3.2 Observations 
+
+Prompts contain abundant privacy-irrelevant content. We identify two representative scenarios to illustrate: 
+
+• System and public context dominates most prompts. Prompts are largely composed of system instructions, templates, or re-trieved passages ( e.g. , RAG), while user-provided text forms only a small fraction. As in Fig. 3 , analysis on MSMARCO [ 29 ] shows that user-provided content accounts for only 8.8% of the total prompt. 
+
+• Even within user input, most content is inherently privacy-irrelevant. In many applications ( e.g. , financial) [ 28 , 35 , 49 ], only personally identifiable information (PII) of user text is privacy-relevant, while the rest is non-sensitive. Other works [ 2 , 37 ] have discussed cases involving context privacy, where the sensitivity of context is largely domain-dependent; for example, under clini-cal settings, questions about a patient’s symptoms are treated as private, whereas unrelated queries (e.g., weather conditions) in the same setting do not constitute privacy. Using the Presidio [ 30 ]detector, we find that sensitive tokens account for 2.3% of user input and only 0.2% of the full prompt (Fig. 3). 
+
+Opportunity: selectively sharing privacy-irrelevant KV en-tries. These observations point to a middle ground between full sharing and complete isolation. By restricting cross-user KV cache sharing to tokens that are privacy-irrelevant, the side-channel sig-nal from sensitive tokens is eliminated, while the majority of KV entries remain reusable. This preserves privacy guarantees without incurring the large performance penalties of existing defense. 
+
+3.3 Selective KV Cache Sharing 
+
+Definition. Selective KV cache sharing enables cross-user reuse only for tokens marked as non-sensitive under the sensitivity mask defined in Sec. 3.1 . Specifically, KV entries for token 𝑡 𝑖 are reused across users if and only if 𝑀 𝑖 = 0, while tokens with 𝑀 𝑖 = 1 are excluded from cross-user sharing. 
+
+Privacy protection. Selective KV cache sharing guarantees that tokens marked as sensitive cannot be directly leaked through side channels. Side-channel attacks fundamentally rely on detecting whether a token’s KV entries are reused across requests ( Sec. 2.3 ). By excluding sensitive tokens from cross-user reuse, their KV en-tries are never shared and thus produce no reuse signal, rendering direct extraction by side-channel attacks ineffective (aligning with the threat model in Sec. 3.1 ). This applies only to direct leakage; contextual leakage from partially recovered content lies outside this design, yet we evaluate and analyze its impact in Sec. 5.2.  
+
+> 4(a) Prefix sharing with selective reuse. Chunk 1 Chunk 2
+> (b) Position-independent sharing with selective reuse.
+> (c) Selective KV cache sharing at token granularity.
+
+Figure 4: Selective KV cache sharing under different mechanisms. White blocks denote unreusable KV cache, gray blocks denote reusable KV cache, and hatched blocks denote sensitive tokens’ KV cache. 
+
+Practical use cases. Selective KV cache sharing can flexibly sup-port different levels of privacy protection, depending on how private contents are identified. For example, aligning with Sec. 3.2 , in a low privacy demand setting, only specific tokens containing personally identifiable information are excluded from reuse, while in a high privacy demand setting, the entire user input is masked and only system prompts or public materials are shared. 
+
+3.3.1 Gaps in Existing Work for Selective KV Cache Sharing. Se-lective KV cache sharing cannot be realized by simply extending prior work ( i.e. , prefix or positional-independent sharing, as de-picted in Sec. 2.2 ), since both lead to excessive loss of reusable KV cache under selective-sharing constraints. 
+
+Prefix sharing. Prefix sharing requires two sequences to match from the beginning to enable reuse. Under selective sharing, once a sensitive token appears, all subsequent tokens become non-reusable. Otherwise, reusing any later token would imply that the entire prefix, including the sensitive token, matches across users, thereby leaking its presence (as shown in Fig. 4-a). 
+
+Position-independent sharing. Position-independent sharing also breaks down under selective constraints because it reuses KV entries at the fix-sized chunk level. If a single sensitive token appears in a chunk, the entire chunk must be excluded from reuse; otherwise, it would reveal the presence of the sensitive token (as depicted in Fig. 4 -b). Since chunks are typically large (e.g., 512 tokens or more in practice [ 3]), this coarse granularity causes many non-sensitive tokens to be discarded along with the sensitive one, leading to a substantial loss of reuse. 
+
+3.3.2 Need for KV Cache Sharing at Token Granularity. The shortcomings of prior work show that to fully preserve reuse un-der selective sharing, KV cache management needs to operate at token granularity. In this setting, reuse decisions are made for each token individually, rather than in fixed-size chunks. When a to-ken is marked as sensitive, its KV entries are excluded from reuse, while the surrounding tokens remain unaffected. Sensitive tokens therefore serve as natural boundaries that partition the prompt into dynamic-length reusable segments. These segments can be reused independently without leaking sensitive information (Fig. 4-c). Notably, token-level KV cache management not only enables selective sharing for privacy but also improves efficiency in general 
+
+Figure 5: System architecture of CachePrune . New modules introduced by CachePrune are highlighted in light yellow. 
+
+KV cache management. In chunk-level management, reusable seg-ments that span across chunk boundaries often cause mismatches and are discarded, reducing cache hit rates ( Fig. 1 -b). Token-level management eliminates this limitation by deciding reuse at the token level, allowing all matching tokens to be reused regardless of alignment and thereby maximizing cache utilization (Sec. 5.6). 
+
+4 SYSTEM DESIGN OF CACHEPRUNE 
+
+4.1 Architecture 
+
+Components. CachePrune (Fig. 5) consists of five components: 
+
+• KV Retriever ( Sec. 4.3.1 ). The KV Retriever searches the KV Pool for KV segments that match the incoming request’s context and links them to the sequence, leaving unmatched positions for the LLM Engine to compute. 
+
+• LLM Engine ( Sec. 4.3.2 ). The LLM Engine completes missing KV entries, recomputes those marked by the KV Annotator , and generates the final output from the full KV cache. We do not modify the functionality of existing LLM engines, and CachePrune is compatible with existing frameworks such as vLLM [20]. 
+
+• Sensitivity Detector ( Sec. 4.3.3 ). The Sensitivity Detector 
+
+acts as a pluggable interface that identifies privacy-related con-tent within user prompts and marks the corresponding regions for exclusion from KV sharing. Such privacy information can be specified through various means, including manual annota-tions, rule-based matching, or existing detection models. While we do not introduce new detection methods, we integrate these approaches to support different levels of privacy guarantees. 
+
+• KV Annotator ( Sec. 4.3.4 ). The KV Annotator identifies reusable KV segments after excluding sensitive KV, and marks KV entries that should be recomputed to maintain LLM generation quality. 
+
+• KV Pool ( Sec. 4.3.5 ). The KV Pool stores reusable KV cache segments, indexing them via hashing for fast retrieval, evicting en-tries when the storage capacity is reached, and resolving conflicts when multiple KV segments overlap. 
+
+Workflow. Upon a new request, the KV Retriever queries the KV Pool , integrates matched segments into the sequence, and passes it to the LLM Engine , which computes missing KV entries and returns the response. Afterward, CachePrune performs a post-inference phase (without affecting latency): the Sensitivity Detector 
+
+identifies sensitive tokens and blocks their sharing, and the KV Annotator derives reusable segments from the remaining tokens while marking entries requiring recomputation. The resulting seg-ments and metadata are stored in the KV Pool for future reuse. 
+
+> 5
+
+l r  
+
+> Sm-1 SmSm+1
+> Self-Contextualized P[l:r] Higher I nter-attention
+> L ower I ntr a-attention
+
+Figure 6: Deriving reusable KV segments under sensitive tokens. 
+
+4.2 Challenges and Algorithmic Solutions 
+
+4.2.1 C1: Efficiently and Accurately Deriving Reusable KV Seg-ments. After inference, the Sensitivity Detector analyzes the input token sequence 𝑃 = {𝑡 1, 𝑡 2, . . . , 𝑡 𝑛 } and produces a binary sensitivity mask 𝑀 ∈ { 0, 1}𝑛 , where 𝑀 𝑖 = 1 indicates that token 
+
+𝑡 𝑖 contains sensitive information. Tokens with 𝑀 𝑖 = 1 act as sep-arators, partitioning 𝑃 into coarse-grained segments 𝑆 1, 𝑆 2, . . . , 𝑆 𝑘 ,where each segment 𝑆 𝑚 = {𝑡 𝑎 𝑚 , 𝑡 𝑎 𝑚 +1, . . . , 𝑡 𝑏 𝑚 } satisfies 𝑀 𝑎 𝑚 −1 = 1
+
+or 𝑎 𝑚 = 1, and 𝑀 𝑏 𝑚 +1 = 1 or 𝑏 𝑚 = 𝑛 . However, such segments are not directly reusable, since each token’s KV state depends on all preceding tokens in the original context. Reusing a segment without adjustment introduces mismatched attention dependen-cies, degrading generation quality (Sec. 2.2). 
+
+Reuse criterion. Prior work [ 3] has proposed that a segment is con-sidered reusable if it is self-contextualized , i.e. , its intra-attention 
+
+(attention paid within the segment) exceeds its inter-attention 
+
+(attention paid to tokens outside the segment). Specifically, let 
+
+𝐴𝑡𝑡𝑛 (𝑖, 𝑗 ) denote the attention score from token 𝑡 𝑖 to token 𝑡 𝑗 . For a substring 𝑃 [𝑙 : 𝑟 ] within segment 𝑆 𝑚 , we define: 
+
+IntraAttn (𝑙, 𝑟 ), InterAttn (𝑙, 𝑟 ) =
+
+> 𝑟
+
+∑︁ 
+
+> 𝑖 =𝑙
+
+ 𝑖 ∑︁ 
+
+> 𝑗 =𝑙
+
+Attn (𝑖, 𝑗 ), 
+
+> 𝑙 −1
+
+∑︁ 
+
+> 𝑗 =1
+
+Attn (𝑖, 𝑗 )
+
+
+
+A substring 𝑃 [𝑙 : 𝑟 ] is therefore reusable if 𝐼𝑛𝑡𝑟𝑎𝐴𝑡𝑡𝑛 (𝑙, 𝑟 ) >
+
+𝐼𝑛𝑡𝑒𝑟𝐴𝑡𝑡𝑛 (𝑙, 𝑟 ). Moreover, within such a segment, tokens whose 
+
+𝐼𝑛𝑡𝑒𝑟𝐴𝑡𝑡𝑛 () − 𝐼𝑛𝑡𝑟𝑎𝐴𝑡𝑡𝑛 () is high are marked for recomputation when the segment is reused in a new context. Thus, KV Annotator 
+
+aims to refine each coarse segment 𝑆 𝑚 by selecting the substring 
+
+𝑃 [𝑙 : 𝑟 ] ⊆ 𝑆 𝑚 with the largest intra–inter difference and marking tokens that depend on outside context for recomputation (Fig. 6). However, prior works restrict reuse to fixed chunks with prede-termined boundaries ( Sec. 2.2 ), whereas token-granularity requires exploring all substrings, dramatically increasing the computational cost. Specifically, in the chunk-level setting with constant chunk size 𝑐 , the number of candidate segments is 𝑂 (𝑛 /𝑐 ). For each chunk, computing IntraAttn () takes 𝑂 (𝑐 2) time and InterAttn () takes 𝑂 (𝑛 )
+
+(as equation above), so the total complexity is 𝑂 (𝑛 /𝑐 · ( 𝑐 2 + 𝑛 )) =
+
+𝑂 (𝑛 2). In contrast, token-granularity allows arbitrary start and end indices (𝑙, 𝑟 ), yielding 𝑂 (𝑛 2) substrings. Evaluating intra- and inter-attention for each still costs 𝑂 (𝑛 2) from raw scores. This naive extension therefore incurs 𝑂 (𝑛 2) × 𝑂 (𝑛 2) = 𝑂 (𝑛 4) total time complexity, which is prohibitive in practice. To this end, we propose a method based on the summed area table [9 , 15 ], a widely adopted algorithm that supports constant-time retrieval of sub-region sums after an 𝑂 (𝑛 2) preprocessing step. By applying this to the attention score matrix, we obtain intra/inter attention values for any candidate substring in 𝑂 (1) time, reducing the overall search from 𝑂 (𝑛 4) to 𝑂 (𝑛 2). The process has three steps: EA  EA  IA          
+
+> EA EA IA IA
+> EA EA IA IA IA
+> EA EA IA IA IA IA
+
+t1 t2 t3(l)  t4 t5 t6(r) 
+
+t1
+
+t2
+
+t3(l) 
+
+t4
+
+t5
+
+t6(r) 
+
+t7
+
+t7    
+
+> (a) Attention matrix EA EA IA IA
+> EA EA IA IA
+
+t1 t2 t3(l)  t4 t5 t6(r) 
+
+t1
+
+t2
+
+t3(l) 
+
+t4
+
+t5
+
+t6(r) 
+
+t7
+
+t7 (b) Summed area table 
+
+Figure 7: Example of intra- (IA) and inter-attention (EA) computation using the attention matrix and the summed area table, with 𝑡 3 and 𝑡 6 as the boundaries 𝑙, 𝑟 .
+
+Step 1: Constructing the summed area table in-place. Let 
+
+𝐴 ∈ R𝑛 ×𝑛 denote the attention score matrix, where 𝐴 [𝑖, 𝑗 ] is the attention weight from token 𝑡 𝑖 to token 𝑡 𝑗 . We overwrite 𝐴 in place to store its summed area table 𝑇 , where each entry 𝑇 [𝑖, 𝑗 ] contains the sum of all elements in the submatrix [1 : 𝑖 ] × [ 1 : 𝑗 ]:
+
+𝑇 [𝑖, 𝑗 ] ← 𝐴 [𝑖, 𝑗 ] + 𝑇 [𝑖 − 1, 𝑗 ] + 𝑇 [𝑖, 𝑗 − 1] − 𝑇 [𝑖 − 1, 𝑗 − 1]
+
+with any term having an index < 1 treated as zero. This preprocess-ing requires one update per request, runs in 𝑂 (𝑛 2) time and uses 
+
+𝑂 (1) additional memory, since 𝐴 is updated in place. Once 𝑇 is com-puted, the sum of any rectangular subregion 𝑅 = [𝑥 1, 𝑥 2] × [ 𝑦 1, 𝑦 2]
+
+of the original attention matrix can be retrieved in 𝑂 (1) time: 
+
+sum (𝑅 ) = 𝑇 [𝑥 2, 𝑦 2] − 𝑇 [𝑥 1 −1, 𝑦 2] − 𝑇 [𝑥 2, 𝑦 1 −1] + 𝑇 [𝑥 1 −1, 𝑦 1 −1]
+
+Here, out-of-bound indices are treated as zero. Since intra- and inter-attention are sums over contiguous rectangular regions in 𝐴 ,this formula yields them in 𝑂 (1) (Fig. 7). 
+
+Step 2: Optimal substring search within coarse segments. 
+
+With the summed area table in place, we can now evaluate intra-inter attention for any substring in 𝑂 (1) time. Given a coarse seg-ment 𝑆 𝑚 from the Sensitivity Detector , we enumerate all sub-strings 𝑃 [𝑙, 𝑟 ] ⊆ 𝑆 𝑚 and compute their intra–inter difference. The substring with the maximum difference is selected as the reusable segment. Since there are 𝑂 (𝑛 2) candidates within a segment, the overall search runs in 𝑂 (𝑛 2) time with no extra space overhead. 
+
+Step 3: Annotating tokens for recomputation. For the selected reusable substring [𝑙 ∗, 𝑟 ∗] from step 2, we compute for each token 𝑡 𝑖 
+
+its inter-attention (to tokens before 𝑙 ∗) and intra-attention (to tokens within [𝑙 ∗, 𝑖 ]), both obtained in 𝑂 (1) time from the summed area table. Tokens are then ranked by their inter–intra difference, and the top 𝜌 % (e.g., 25% in Sec. 5.3.2) are marked for recomputation. 
+
+Optimization. In our experiments, we observe that the length of a reusable segment strongly correlates with the generation quality it can preserve. To avoid redundant computation on short sub-strings with limited contribution, we introduce a configurable min-imum segment length parameter (e.g., 128 tokens, as evaluated in Sec. 5.3.3) for a segment to qualify as reusable.  
+
+> 6Incoming
+> Request
+> Rolling hash 1 Rolling hash x
+
+... 
+
+> Prefix hash
+> Full hash
+> Step 1: Prefix filter ing
+> Step 2: Full ver ification
+> Stored
+> Segment
+
+Figure 8: Retrieving KV segments based on rolling hash. 
+
+4.2.2 C2: Retrieving Dynamic-Length KV Segments. Existing KV retrieval methods ( Sec. 2.2 ) rely on fixed-size chunks, where match-ing reduces to 𝑂 (1) hash lookups per chunk. In contrast, CacheP-rune operates at token granularity, producing variable-length seg-ments ( Sec. 4.2.1 ). Retrieval therefore becomes a substring contain-ment problem: identifying whether a stored segment appears as a contiguous substring of the request. This cannot be handled by direct hash lookup; a naïve solution that checks all substrings incurs 
+
+𝑂 (𝑛𝑚 ) complexity, where 𝑛 and 𝑚 are the lengths of the request and segment. Since this retrieval step must be performed before generating a response for every request, such overhead would be incurred for all queries, making it too slow for practical deployment. To this end, we propose an efficient retrieval algorithm for dynamic-length cached segments based on rolling hash. Rolling hash [ 7, 18 ] can compute the hash of all fixed-size substrings ( i.e. ,window) by calculating the first in full and then updating subse-quent ones in 𝑂 (1) time as the window shifts. This allows us to scan an incoming request for potential matches to cached segments in near-linear time, a substantial improvement over the naive 𝑂 (𝑛 ×𝑚 )
+
+approach. The algorithm proceeds in two steps (Fig. 8): 
+
+Step 1: Prefix filtering. For each cached segment we precompute and store the hash of its prefix (by default first 128 tokens, as stated in Sec. 4.2.1 , every segment is at least 128 tokens). When a new request of length 𝑛 arrives, we slide a 128-token window across it, updating the hash in 𝑂 (1) per shift, and compare each window’s hash to the stored 128-token prefix hashes. This produces a small set of candidates while scanning the request in 𝑂 (𝑛 ) time. 
+
+Step 2: Full verification. For each candidate, we verify the match over the full segment of length 𝑚 . A prefix-hash array enables com-puting the rolling hash of the corresponding substring in 𝑂 (1) time for a fast pre-check against the cached hash. To ensure correct-ness, we then compute a cryptographic hash ( i.e. , SHA-256) of the substring and compare it with the stored hash, eliminating collision-induced false matches without token-by-token comparison. 
+
+Cost analysis. This design reduces the worst-case 𝑂 (𝑛 × 𝑚 ) cost of naive substring search to 𝑂 (𝑛 + 𝑐 ), where 𝑐 is the number of candidates identified by the prefix filter, typically small in practice. The space overhead is modest, requiring only the prefix-hash array for the incoming request, precomputed powers, and two hash values per cached segment (prefix and full length). Our evaluation in Sec. 5 shows that the average cost is only 8 ms. 
+
+Choice of rolling hash algorithm. We use polynomial rolling hash modulo the 64-bit Mersenne prime 261 −1 with a random base. It supports constant-time substring hashing via prefix hashes with precomputed powers, which is critical for efficient verification. In contrast, alternatives such as buzhash or rolling CRC support only fixed-window updates and require 𝑂 (𝑚 ) time to hash an arbitrary substring, increasing verification cost and reducing performance. 
+
+4.3 Component-Level Design 
+
+4.3.1 KV Retriever. The KV Retriever fetches KV segments from the KV Pool and integrates them into the request sequence. 
+
+Integrating multiple sharing policies. The KV Retriever sup-ports both same-user and cross-user sharing. When a new request arrives, the retriever first checks the session identity. If the request belongs to the same user session, all KV cache can be reused with-out restriction. If the request originates from a different user, it applies the selective cross-user sharing policy, which reuses only non-sensitive segments based on the method described in Sec. 4.2.2 .
+
+Operational details. We separate control logic from data storage: matching and verification are performed on the CPU using light-weight metadata, while full KV tensors remain on the GPU to avoid expensive transfers. Metadata consists of token spans, hash values, and indices, which allow the KV Retriever to identify and link reusable segments without touching the actual KV. Unmatched or recomputation-marked tokens are represented as zero placehold-ers, ensuring a consistent sequence structure for the LLM Engine ,which later fills them during normal inference. 
+
+4.3.2 LLM Engine. The LLM Engine fills missing KV entries and generates the output. CachePrune does not modify the inference backend and only requires changes to the KV cache management interface, making it compatible with existing frameworks. 
+
+4.3.3 Sensitivity Detector. The Sensitivity Detector identi-fies sensitive content and excludes the corresponding KV entries from reuse. CachePrune leverages existing mechanisms rather than introducing new ones, supporting: 
+
+Policy 1: User-defined sensitivity. Users can specify sensitive tokens directly through custom rules, e.g. , by defining regex patterns for phone numbers or credit card numbers. This method gives users explicit control over what information should be protected, and the detector marks all matches in the request as sensitive. 
+
+Policy 2: Classifier-based detection. The detector can also in-tegrate existing classifiers, such as NER models [32] or LLMs [43], to automatically identify sensitive entities including names, loca-tions, or organizations. This approach is more flexible and accurate, capturing sensitive information under various context. 
+
+Policy 3: Strict masking policy. For applications that require stronger guarantees, we support a stricter mode in which all user-provided input is masked as sensitive by default. In this setting, only fixed system prompts or external passages (e.g., retrieved from a knowledge base) are considered safe to share. This ensures that no portion of the user’s query is ever reused across sessions, eliminating the risk of leaking private input. 
+
+4.3.4 KV Annotator. The KV Annotator derives reusable seg-ments and marks tokens that require recomputation. 
+
+Operational details. After inference, the KV Annotator transfers the attention score matrix from GPU to CPU memory and applies 
+
+> 7
+
+the algorithm described in Sec. 4.2.1 to determine both reusable segments and recomputation masks. The calculation is performed on the attention scores of the final transformer layer only, as prior work [6, 12, 56] has shown that the last layer sufficiently captures the contextual dependencies relevant for reuse. 
+
+4.3.5 KV Pool. The KV Pool manages the storage and lifecycle of reusable KV segments, defining how they are stored and evicted. 
+
+Storage format and indexing. Each stored KV segment maintains its token sequence along with two hash values: a prefix hash and a full-segment hash. These indices are stored in CPU memory, while the actual KV cache values are retained in GPU memory for fast access during inference. We acknowledge that some prior works propose offloading KV cache values themselves to CPU memory to reduce GPU usage [ 64 ]. Such techniques are orthogonal to our design and can be integrated in future extensions. 
+
+Lifecycle management. The pool ensures efficient storage by keeping only one copy of duplicated segments: if one sequence is a strict subsequence of another (e.g., sequence 𝐴 contains 𝐵 ), only the longer segment is preserved. When GPU memory reaches capacity, cached segments are evicted using a least recently used (LRU) policy, ensuring that frequently accessed segments are retained. 
+
+5 EVALUATION 
+
+We evaluate CachePrune , addressing four main research questions: 
+
+• [RQ1] Defense effectiveness: How effectively does CacheP-rune prevent direct leakage via reuse-based side channels ( Sec. 3.1 ), and what level of contextual leakage may still occur? Further, how do these properties change under imperfect privacy detection? 
+
+• [RQ2] Generation quality: How accurately does CachePrune 
+
+preserve the generation quality, and what are the determining factors that influence the generation quality? 
+
+• [RQ3] Efficiency: How efficient is CachePrune compared to non-sharing approaches, and what factors determine its efficiency? 
+
+• [RQ4] Impact of privacy detection policies: How do different privacy detection policies influence accuracy and efficiency, and what trade-offs arise between stronger privacy protection and system performance? 
+
+5.1 Experimental Setup 
+
+System configurations. We evaluate CachePrune across multiple models of varying sizes, including Mistral-7B [ 31 ], Qwen2.5-7B [ 46 ], and Qwen2.5-14B [ 45 ]. All experiments are conducted on a single NVIDIA H100 GPU with 80 GB of HBM memory. The host machine has two Intel Xeon Silver 4510 processors (each 12 cores, 24 threads), 250 GiB of main memory, and a 480 GB SATA SSD supporting a read throughput of 550 MB/s. The CPU and GPU are connected via PCIe 5.0x16, offering a bi-directional bandwidth of 64 GB/s. 
+
+Datasets. We evaluate CachePrune on three types of datasets, following the setups used in prior work [ 64 ], and all three datasets provide human-labeled ground truth. 
+
+• QASPER [44]. This is a document-grounded question answering dataset based on scientific NLP papers. It includes 5,049 question-answer pairs across 1,585 full-text papers. 
+
+• NarrativeQA [10]. This is a reading comprehension dataset over long narrative texts, e.g. movie scripts. It includes 45,987 ques-tion–answer pairs over 1,572 stories. 
+
+• QMSum [ 62 ]. This is a query-based meeting summarization dataset derived from multi-domain meeting transcripts. It contains 232 meetings and 1,808 query–summary pairs. 
+
+Evaluation metrics. We adopt three categories of metrics: 
+
+• Privacy metrics. We evaluate the effectiveness of CachePrune in preventing privacy leakage under side-channel attacks using two metrics: (i) Exact recovery rate. This measures the fraction of sen-sitive tokens that can be directly reconstructed by the adversary through KV cache reuse signals, requiring exact token-level match. This aligns with our primary security objective ( Sec. 3.1 ) and prior work [ 61 ], where the adversary aims to recover sensitive tokens via side-channel signals. (ii) Contextual recovery rate. This mea-sures the extent to which sensitive content can be inferred from recovered non-sensitive tokens ( i.e. , contextual leakage), which goes beyond our primary threat model. We consider two forms of recovery: (a) exact reconstruction, where sensitive tokens are fully recovered from context, and (b) semantic reconstruction, where the inferred content is not identical but semantically equivalent, as determined by an LLM-based similarity judge [51]. 
+
+• Quality metrics. We adopt two metrics following previous work [ 64 ]. (i) F1-score measures the word-level overlap between the model output and the ground truth and is suitable for question answer-ing tasks; we use it on QASPER and NarrativeQA. (ii) ROUGE-L 
+
+measures sequence-level similarity via the longest common subse-quence and suitable for summarization tasks; we use it on QMSum. 
+
+• Efficiency metrics. We report Time-to-First-Token (TTFT) and system throughput as the main indicators of efficiency. In addition, we provide a detailed breakdown of the costs, in terms of time, contributed by each system component in CachePrune .
+
+Baseline. Our primary goal is to break the privacy-efficiency trade-off in KV cache sharing. We adopt two types of baselines. 
+
+• Secure settings. For the primary evaluation ( Sec. 5.2 to Sec. 5.6 ), we compare against a no-sharing baseline, where each request is processed independently and the KV cache is not shared across requests. This baseline represents the existing secure deployment, as other KV sharing mechanisms do not provide privacy guaran-tees. It worth noting that intra-tenant sharing requires accurate user-level data partitioning and distribution, which is not available in public datasets, making it unable to evaluate. 
+
+• Non-secure settings. To evaluate the efficiency benefit of fine-grained reuse itself without privacy constraints, we compare against representative coarse-grained KV sharing methods, including EPIC, CacheCraft, and CacheBlend ( Sec. 5.7 ). These methods enable cross-request reuse but operate at fixed chunk granularity. 
+
+5.2 RQ1: Defense Effectiveness 
+
+We evaluate CachePrune under the threat model in Sec. 3.1 , where the adversary aims to recover tokens marked as sensitive solely via reuse-based side channels, and examine whether the attack can be mitigated. We also assess contextual leakage, where sensitive 
+
+> 8
+
+Table 1: Defense effectiveness of CachePrune .
+
+Dataset Direct Recovery Contextual Leakage 
+
+Exact Semantic Similar QASPER 0% 3.21% 9.48% NarrativeQA 0% 2.90% 5.88% QMSum 0% 0.50% 3.98% content is inferred from non-sensitive tokens, and the impact of imperfect privacy detection, to quantify residual privacy risks. 
+
+Methodology. We construct the evaluation set by randomly sam-pling 200 instances from each of the three datasets. For each sample, we use a SOTA privacy detection tool (Presidio [ 30 ]) to identify sensitive tokens for CachePrune . We follow a representative side-channel probing attack ( e.g. , PromptPeek [ 61 ]). As discussed in Sec. 2 , prior KV-cache side-channel attacks share the same infer-ence mechanism and differ only in the observable signal; thus evalu-ating one representative instantiation suffices to capture this attack class. We assume a strong adversary with unlimited probing capa-bility. This assumption is motivated by two observations from prior work: (i) adversaries can leverage learning-based strategies (e.g., reinforcement learning) to efficiently explore the input space [ 58 ], and (ii) even partial background knowledge about user inputs can significantly reduce the probing complexity [ 50 , 61 ]. Therefore, we do not restrict the adversary’s resources, and treat the results as an upper bound on attack capability. Beyond exact recovery, we evaluate contextual leakage by al-lowing the adversary to infer sensitive content from non-sensitive tokens. We adopt a SOTA approach [ 51 ] that uses observable to-kens as context to reconstruct or approximate the sensitive content; detailed settings are in Appendix A. 
+
+Results (Table 1). We observe that side-channel attacks cannot directly recover any token marked as sensitive. Beyond direct recov-ery, contextual leakage exists but remains limited: on average, only 2.2% of sensitive tokens are exactly recovered and 6.4% are semanti-cally recovered. We further analyze the failed contextual-recovery cases and compare the attack requirements with the information exposed by CachePrune , leading to the following takeaways. 
+
+• Sensitive-token positions and counts are not identifiable. The ab-sence of reuse signals does not uniquely correspond to sensitive tokens, as not all non-sensitive tokens are shared in practice. Af-ter removing sensitive tokens, only a subset of non-sensitive content is further selected as reusable segments through self-contextualization. As a result, the set of non-shared tokens strictly exceeds the set of sensitive tokens, preventing the adversary from inferring the exact positions or counts of sensitive tokens. 
+
+• Prompt-level structure is not reconstructible from reusable segments. 
+
+Reusable segments are stored independently without maintaining prompt-level grouping or ordering information. Even if an adver-sary recovers all reusable segments, it cannot reconstruct their original associations or sequence within the prompt. 
+
+Impact of imperfect detection ( Fig. 9 ). Privacy detection may introduce mislabeling, but its accuracy is difficult to quantify due to the lack of ground-truth PII annotations. To assess its impact, we 0  0 0                                               
+
+> F     
+> 0
+> 
+> 0
+> 
+> 0
+>         
+>    
+>        
+>         
+> (a) False negative 0 0 0
+> F     
+> 0
+> 
+> 0
+> 
+>        
+>    
+>        
+>         (b) False positive
+
+Figure 9: Impact of imperfect privacy detection (QASPER). 
+
+inject errors by simulating 0–20% False Negatives (FN) and False 
+
+Positives (FP), covering and exceeding typical reported rates (both below 10% for Presidio [ 30 ]). We randomly perturb the sensitivity mask and evaluate on all datasets, presenting QASPER in the main text and others in Appendix A. FN directly increase exact recovery by exposing unmarked sensitive tokens, while having negligible impact on contextual leakage. In contrast, FP do not affect direct recovery but significantly reduce contextual leakage by limiting reusable context, lowering the success rate of contextual inference. Overall, detection quality mainly affects direct leakage through FN, while FP act conservatively by suppressing contextual leakage, motivating the use of conservative detectors. 
+
+Summary. Tokens marked as sensitive cannot be recovered through reuse-based side channels. Contextual leakage remains limited, as 
+
+CachePrune does not expose structural information needed for inference. Imperfect detection mainly affects direct recovery, while having negligible impact on contextual leakage. 
+
+5.3 RQ2: Generation Quality 
+
+In CachePrune , KV cache reuse is governed by three key fac-tors—match rate, recompute rate, and segment length—which to-gether determine generation quality. 
+
+• Match rate refers to how much of the input prompt can be matched with previously stored KV segments, and a higher match rate means more of the prompt context is reused. 
+
+• Recompute rate captures the proportion of KV entries within reused segments that is recomputed to preserve correctness in a new context. A lower rate means more direct reuse, while a higher rate indicates heavier recomputation. 
+
+• Segment length denotes the size of the reused KV segments. Longer segments preserve more contextual information, which may help the model generate coherent outputs. All figures in this section use Mistral-7B; Appendix B reports results on Qwen-7B and Qwen-14B, which exhibit consistent results. 
+
+5.3.1 Impact of Match Rate. We next examine how the match rate influences the generation quality. 
+
+Methodology. We randomly sample 200 question–passage pairs from each dataset. For each passage 𝑝 , we construct a related but distinct passage 𝑝 ′ using the LLM and form 𝑝 ′ + 𝑝 . We compute the KV cache of 𝑝 in this perturbed context to obtain reusable segments. We vary the match rate by controlling the fraction of reused KV cache from 0% to 100%, recomputing the remainder. Throughout        
+
+> 90 0 0  0  0  0   0
+> M 
+> 0 0
+> 0 
+> 0 
+>            
+>  
+>  
+> 
+> 0 0
+> 0 
+> 0 
+>      M
+
+Figure 10: Match rate impact (Mistral-7B). 0 0  0 0 0     
+
+> R 
+> 0 0
+> 0 
+> 0 
+>      R      
+>  
+>  
+> 
+> 0 0
+> 0 
+> 0 
+> R     
+
+Figure 11: Recompute rate impact (Mistral-7B). 6  6         
+
+> S   
+>  
+>  
+>  
+>  
+>  
+>  
+>  
+>  
+>             
+>  
+> 
+> 
+
+Figure 12: Segment length impact (Mistral-7B). 0 0  0  0  0       
+
+> M   
+> 00
+> 00
+> 00
+> 00
+> 000
+> 00
+>     
+>  
+>  
+> 
+
+(a) TTFT 0 0  0  0  0       
+
+> M  
+> 
+> 
+> 
+> 
+> 
+> 
+>         
+> 
+> 
+> 
+
+(b) Throughput 
+
+Figure 13: Impact of match rate on efficiency. 
+
+this experiment, we fix the recompute rate at 25%, which serves as our default setting and will be further examined in Sec. 5.3.2. 
+
+Results ( Fig. 10 ). A match rate of 0% corresponds to full recom-putation (baseline), while 100% represents full reuse (worst case). Across this range, accuracy remains stable on all datasets, indi-cating that match rate has minimal impact on generation quality in CachePrune . This suggests that cache matches can be freely reused without degrading generation quality. 
+
+5.3.2 Impact of Recompute Rate. We next evaluate how recom-pute rate affects generation quality. 
+
+Methodology. We follow the same setup as in Sec. 5.3.1 . We vary the recompute rate by selecting the top-ranked tokens based on intra- and inter-attention scores for recomputation, sweeping from 0% to 100% (including 25%, 50%, and 75%). 
+
+Results ( Fig. 11 ). At 0% recompute, where the KV cache is reused without any correction, the accuracy drops noticeably. Once re-computation is introduced, the results quickly stabilize, and the curves remain relatively flat up to 100% recompute. This trend is consistent with prior observations in existing work [ 3 , 64 ]. Based on this, we set 25% recompute as the default rate in CachePrune .
+
+5.3.3 Impact of Segment Length. We next evaluate how segment length affects generation quality. 
+
+Methodology. Longer segments are expected to preserve more contextual information as documented in prior work [ 3 , 64 ]. We divide each request into fixed-size chunks and compute their inter-and intra-attention scores, where a higher inter-attention score indicates stronger dependence on outside context and thus lower 0 0  0  0        
+
+> R   
+> 00
+> 00
+> 00
+> 00
+> 000
+> 00
+>   
+> 
+> 
+> 
+
+(a) TTFT 0 0  0  0       
+
+> R  
+> 
+> 
+> 
+> 
+> 0
+> 
+> 
+>     
+> 
+> 
+> 
+
+(b) Throughput 
+
+Figure 14: Impact of recompute rate on efficiency. 
+
+reusability. We evaluate four chunk sizes, ranging from 64 to 512 tokens, using 200 randomly selected requests from each dataset. 
+
+Results ( Fig. 12 ). Across all datasets, the inter/intra ratio decreases as segment length increases, showing that longer segments are more self-contained and thus more reusable. Note that fixed-size chunks are used here only for analysis; in CachePrune , segments are dynamically determined by context and are not directly comparable. In practice, we use 128 tokens as the minimum segment length, which can be adjusted as a system parameter. 
+
+5.4 RQ3: Efficiency 
+
+5.4.1 Determining Factors. The efficiency of CachePrune is governed by the same three factors as generation quality: match rate, recompute rate, and segment length. We follow the setup in Sec. 5.3 and evaluate efficiency using TTFT and throughput. TTFT is measured over 200 independent requests as the average response latency, and throughput is measured as the average com-pleted requests per second under a fixed arrival rate of one request per second over 30 seconds. All results are based on Mistral-7B; Appendix C reports consistent results on Qwen-7B and Qwen-14B. 
+
+Impact of match rate ( Fig. 13 ). As the match rate increases, effi-ciency improves almost linearly, with TTFT reduced by up to 3 ×
+
+compared to the no-sharing baseline. This improvement stems from the greater proportion of KV being reused, reducing redundant com-putation. Although the absolute values differ across datasets due to variations in prompt length, the trend remains consistent. 
+
+Impact of recompute rate ( Fig. 14 ). TTFT increases linearly with the recompute rate, as more tokens require fresh KV computation. 
+
+10 2                              
+
+> S    
+> 
+> 
+> 
+> 
+> 2
+> 2
+> 
+> 
+> 
+>         
+>   !
+>   
+>    
+>   (a) KV Annotator. Q Q Q
+> D 
+> 
+> 
+> 
+> 
+> 
+> 
+> 
+> 
+> 
+>       
+>   
+>   
+>   
+> ! (b) Sensitivity Detector. 2   
+> S    
+> 
+> 
+> 2
+> 
+> 
+> 
+> 
+> 
+>         
+>    
+>  (c) KV Retriever.
+
+Figure 15: Computation overhead of core components in CachePrune .
+
+At the default setting of 25%, CachePrune achieves over 3 × lower TTFT than the non-sharing baseline (100% recompute). 
+
+Impact of segment length ( Fig. 28 in Appendix C). With a fixed recompute rate, smaller and more fragmented reusable segments incur additional overhead for linking and managing KV entries. As segment length increases, this overhead diminishes since longer segments reduce metadata lookups and cache-boundary opera-tions. However, the overall difference remains marginal, suggesting 
+
+CachePrune maintains stable across different granularities. 
+
+5.4.2 Detailed Breakdown of System Overhead. To further under-stand where the overhead of CachePrune comes from, we break down the time and memory costs of system components, specifi-cally KV Retriever , Sensitivity Detector and KV Annotator .
+
+Methodology. We measure the overhead of each component sep-arately. For KV Retriever and KV Annotator , we vary the in-put length from 2,500 to 10,000 tokens in steps of 2,500. For the 
+
+Sensitivity Detector , we evaluate on the three datasets using Presidio [ 30 ] under three privacy levels (low, medium, high), fol-lowing existing methodology [ 38 ] (details in Appendix D). We also include a regex-based baseline that masks randomly selected key-words. All results are averaged over 200 runs. 
+
+KV Annotator ( Fig. 15 -a). The KV Annotator consists of four steps: (1) transferring the attention matrix from GPU to CPU, (2) building the summed area table, (3) identifying reusable segments, and (4) generating metadata (e.g., hashes and indices). The dominant overhead comes from data transfer, which takes up to 383 ms for a 10,000-token request. Metadata generation and indexing contribute up to 50 ms, while the other steps remain below 10 ms each. Overall, the total cost is about 450 ms for a 10,000-token request. Since the annotator runs after the response is returned and operates entirely on the CPU, it has limited impact on TTFT. We therefore do not optimize this component further and leave reducing transfer overhead ( e.g. , via pipelining) and accelerating summed-area table construction ( e.g. , via GPU parallelization [14]) to future work. 
+
+Sensitivity Detector ( Fig. 15 -b). Different privacy detection lev-els incur substantially different costs. The strictest setting reaches up to 8s on NarrativeQA ( ≈30K tokens), while a lower-privacy con-figuration incurs up to 600ms; in contrast, the regex-based baseline adds only 0.2ms. This shows that detection cost is dominated by the underlying implementation. As detection runs after response generation, it does not affect per-request latency such as TTFT. We therefore do not optimize this component further. 
+
+KV Retriever ( Fig. 15 -c). The KV Retriever performs two oper-ations: rolling-hash computation and two-phase matching. As it runs before each request, it represents the unavoidable overhead of 
+
+CachePrune . However, the total cost is only 8.3 ms for a 10,000-token request, with 7.2 ms spent on matching and 1.1 ms on hashing. Compared to a TTFT of around 1,000 ms, this overhead is negligible. 
+
+5.5 RQ4: Impact of Privacy Detection 
+
+The previous sections have shown that match rate, recompute rate, and segment length determine both generation quality and effi-ciency. Building on this, we observe that privacy detection policies directly affect the effective match rate and segment length, and thereby influence overall quality and efficiency, whereas the recom-pute rate is fixed by system design and unaffected by policies. 
+
+Methodology. We follow the setup in Sec. 5.4.2 and evaluate CacheP-rune under different privacy detection policies. We vary the de-tector from low to high privacy levels and measure the resulting changes in match rate and segment length, along with their impact on generation quality and efficiency. 
+
+Impact on match rate ( Fig. 29 -a). Stricter privacy policies reduce the match rate by marking more tokens as sensitive. However, since sensitive tokens constitute only a small portion of prompts, over 95% of segments remain reusable even under the strictest setting. 
+
+Impact on segment length ( Fig. 29 -b). Stricter privacy policies lead to shorter reusable segments, as more tokens are marked as sensitive and split prompts into smaller pieces. 
+
+5.6 End-to-End Results 
+
+We now evaluate CachePrune under full end-to-end settings to capture its practical effectiveness. 
+
+Methodology. For each dataset, we apply the default privacy detec-tor to identify sensitive tokens and replace them with contextually consistent substitutes (generated by LLM), yielding a constructed dataset. We randomly sample 200 examples per dataset. For each example, we first issue the constructed request to populate reusable KV segments, followed by the original request to evaluate reuse. Requests are sent at a fixed rate of one per second, and results are 
+
+> 11
+
+Table 2: End-to-end evaluation results on three datasets with default settings. 
+
+Dataset Hit Rate TTFT (ms) Throughput (req/s) Generation Quality 
+
+CachePrune No-Sharing CachePrune No-Sharing CachePrune No-Sharing QASPER 82.88% 273 797 3.66 1.25 0.28 0.30 NarrativeQA 56.45% 705 1675 1.42 0.60 0.23 0.25 QMSum 94.57% 342 1554 2.92 0.64 0.24 0.24 averaged over all examples. We use Mistral-7B as the representative model, as prior results show consistent trends across models. 
+
+Results ( Table 2 ). CachePrune maintains generation quality com-parable to no-sharing while achieving significant efficiency gains. In particular, TTFT improves by up to 4.5 ×, with upmost 94.57% of KV being reused. NarrativeQA shows a relatively lower hit rate, which we attribute to its data containing a larger fraction of privacy-sensitive tokens. This leads to more fragmented segments that cannot be reused, consistent with our observations in Sec. 5.5. 
+
+5.7 Improvement over Fixed-Chunk Reuse 
+
+Methodology. We compare CachePrune with SOTA fixed-chunk approaches [ 3, 17 , 64 ] to evaluate the benefit of token-level reuse. To isolate the reuse mechanism, we disable privacy constraints in 
+
+CachePrune . Unlike the datasets used in earlier evaluations, which are constructed to provide ground-truth annotations for privacy analysis and thus exhibit limited natural overlap, here we use three real-world datasets (WildChat [ 4 ], LMSys [ 25 ], and ShareGPT [ 48 ]) to capture realistic reuse patterns; such datasets lack ground truth and are therefore unsuitable for the main evaluation but necessary for faithful efficiency analysis. Baselines partition each request into fixed-size chunks (128 tokens), while CachePrune performs variable-length fine-grained reuse. All systems are evaluated under the same model (Mistral-7B) and serving configuration. We report the proportion of KV cache reused and the resulting efficiency. 
+
+Results (Table 3). CachePrune significantly increases reuse op-portunities over fixed-chunk methods, achieving up to 44% higher match rates across datasets. This directly translates to lower TTFT, as more KV cache can be reused and less computation is required. Notably, match rate dominates system performance—once reuse is sufficiently high, differences among reuse strategies have limited impact compared to the gain from increased matching. 
+
+6 RELATED WORK 
+
+Selective KV handling. Recent work explores selective KV han-dling to improve inference efficiency, including KV dropping [ 53 ,57 ], offloading [ 21 , 26 ], and quantization [ 16 , 52 ]. These approaches differentiate tokens based on their contribution to output quality. In contrast, our work follows a similar selective paradigm but selects based on sensitivity, shifting the focus from efficiency to privacy. 
+
+Defenses against side channel attacks on shared resources. 
+
+Shared resources introduce security risks [ 60 ], especially side chan-nels that leak information through shared state. Existing defenses fall into three categories: partitioning [ 11 , 24 ], randomization [ 47 ,
+
+Table 3: Comparison of fine-grained and fixed-chunk KV reuse. 
+
+Dataset 
+
+Metrics 
+
+CachePrune 
+
+(w/o privacy) CacheCraft CacheBlend EPIC WildChat 
+
+Match Rate 50.2% 22.5% 22.7% 25.1% TTFT (ms) 134 178 171 165 
+
+ShareGPT 
+
+Match Rate 30.5% 7.73% 7.92% 8.57% TTFT (ms) 177 213 210 209 
+
+LMSys 
+
+Match Rate 47.3% 2.9% 3.1% 3.1% TTFT (ms) 74 98 93 94 59 ], and obfuscation [ 34 ]. Partitioning eliminates sharing by isolat-ing resources (e.g., cache coloring), while randomization and obfus-cation preserve sharing but reduce leakage via unpredictability or noise. Among these, partitioning provides the strongest protection, motivating our design to disable sharing for sensitive tokens. 
+
+7 DISCUSSION AND FUTURE WORK 
+
+Decoupled privacy detection. Privacy detection is orthogonal to our design: CachePrune provides a unified interface that sup-ports different detections. Privacy detection is a well-established research area that is widely adopted in both academic [ 33 ] and production [ 5 , 40 ], and has been further strengthened by recent LLM-based techniques [ 40 , 43 ], making it a practical security-by-design foundation. We acknowledge privacy detection is not perfect and we evaluate the impact of such imperfections in Sec. 5.2 , leaving improved detection to future work. 
+
+Scope of KV cache security. KV cache has become a critical com-ponent in modern LLM serving, and its security directly impacts both user inputs and model weights. Prior work has shown that KV reuse introduces practical risks such as side-channel leakage [ 61 ], while other emerging settings consider stronger assumptions where KV entries may be exposed in plaintext and inverted through trans-former structure [ 27 ]. In this paper, we focus on side-channel at-tacks, as they represent a practical threat in real-world multi-tenant systems where KV cache remains internal and not directly observ-able. We do not consider scenarios where KV is explicitly exposed and leave such stronger threat models for future work. 
+
+8 CONCLUSION 
+
+We introduced CachePrune , a privacy-aware and fine-grained KV cache sharing system that enables secure and efficient reuse of KV 
+
+> 12
+
+states in multi-tenant LLM serving. By moving beyond fixed-size chunking and supporting token-level reuse, CachePrune derives and retrieves reusable segments with low overhead while excluding sensitive content from sharing. Our prototype on vLLM shows substantial gains over existing system, demonstrating that fine-grained KV management is both practical and provides a foundation for broader future optimizations in LLM serving. 
+
+REFERENCES 
+
+[1] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Floren-cia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al . 2023. Gpt-4 technical report. arXiv preprint arXiv:2303.08774 
+
+(2023). [2] Mark Ackerman, Trevor Darrell, and Daniel J Weitzner. 2001. Privacy in context. 
+
+Human–Computer Interaction 16, 2-4 (2001), 167–176. [3] Shubham Agarwal, Sai Sundaresan, Subrata Mitra, Debabrata Mahapatra, Archit Gupta, Rounak Sharma, Nirmal Joshua Kapu, Tong Yu, and Shiv Saini. 2025. Cache-craft: Managing chunk-caches for efficient retrieval-augmented genera-tion. Proceedings of the ACM on Management of Data 3, 3 (2025), 1–28. [4] AllenAI. 2025. allenai/WildChat. https://huggingface.co/datasets/allenai/Wild Chat. (2025). [5] Azure. 2025. What is PII detection in Azure Language? https://learn.microsoft. com/en-us/azure/ai-services/language-service/personally-identifiable-infor mation/overview?tabs=text-pii. (2025). [6] Srinadh Bhojanapalli, Ayan Chakrabarti, Andreas Veit, Michal Lukasik, Himan-shu Jain, Frederick Liu, Yin-Wen Chang, and Sanjiv Kumar. 2021. Leveraging redundancy in attention with reuse transformers. arXiv preprint arXiv:2110.06821 
+
+(2021). [7] AR Chayapathi, G Sunil Kumar, Manjunath BE Swamy, J Thriveni, and KR Venu-gopal. 2021. Survey and comparison of string matching algorithms. Turkish Journal of Computer and Mathematics Education 12, 12 (2021), 1471–1491. [8] Claude. 2025. Prompt caching. https://docs.anthropic.com/en/docs/build-with-c laude/prompt-caching. (2025). [9] Franklin C Crow. 1984. Summed-area tables for texture mapping. In Proceedings of the 11th annual conference on Computer graphics and interactive techniques .207–212. [10] Deepmind. 2025. deepmind/narrativeqa. https://huggingface.co/datasets/deepmi nd/narrativeqa. (2025). [11] Xiaowan Dong, Zhuojia Shen, John Criswell, Alan L Cox, and Sandhya Dwarkadas. 2018. Shielding Software From Privileged {Side-Channel } Attacks. In 27th USENIX Security Symposium (USENIX Security 18) . 1441–1458. [12] Javier Ferrando, Gerard I Gállego, and Marta R Costa-Jussà. 2022. Measur-ing the mixing of contextual information in the transformer. arXiv preprint arXiv:2203.04212 (2022). [13] Gemini. 2025. Context Caching. https://ai.google.dev/gemini-api/docs/caching. (2025). [14] Mark Harris, Shubhabrata Sengupta, and John D Owens. 2007. Parallel prefix sum (scan) with CUDA. GPU gems 3, 39 (2007), 851–876. [15] Justin Hensley, Thorsten Scheuermann, Greg Coombe, Montek Singh, and Anselmo Lastra. 2005. Fast summed-area table generation and its applications. In 
+
+Computer Graphics Forum , Vol. 24. Amsterdam: North Holland, 1982-, 547–556. [16] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney, Yakun S Shao, Kurt Keutzer, and Amir Gholami. 2024. Kvquant: Towards 10 million context length llm inference with kv cache quantization. Advances in Neural Information Processing Systems 37 (2024), 1270–1303. [17] Junhao Hu, Wenrui Huang, Weidong Wang, Haoyi Wang, Tiancheng Hu, Qin Zhang, Hao Feng, Xusheng Chen, Yizhou Shan, and Tao Xie. 2024. EPIC: Efficient Position-Independent Caching for Serving Large Language Models. arXiv preprint arXiv:2410.15332 (2024). [18] Hao Jiang and Sian-Jheng Lin. 2020. A rolling hash algorithm and the implemen-tation to LZ4 data compression. IEEE Access 8 (2020), 35529–35534. [19] Shuowei Jin, Xueshen Liu, Qingzhao Zhang, and Z Morley Mao. 2024. Compute or load kv cache? why not both? arXiv preprint arXiv:2410.03065 (2024). [20] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serving with pagedattention. In 
+
+Proceedings of the 29th symposium on operating systems principles . 611–626. [21] Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024. {InfiniGen }:Efficient generative inference of large language models with dynamic {KV }
+
+cache management. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 155–172. [22] Haoyang Li, Yiming Li, Anxin Tian, Tianhao Tang, Zhanchao Xu, Xuejia Chen, Nicole Hu, Wei Dong, Qing Li, and Lei Chen. 2024. A survey on large lan-guage model acceleration based on kv cache management. arXiv preprint arXiv:2412.19442 (2024). [23] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Cheng-gang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al . 2024. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 (2024). [24] Fangfei Liu, Qian Ge, Yuval Yarom, Frank Mckeen, Carlos Rozas, Gernot Heiser, and Ruby B Lee. 2016. Catalyst: Defeating last-level cache side channel attacks in cloud computing. In 2016 IEEE international symposium on high performance computer architecture (HPCA) . IEEE, 406–418. [25] LMSys. 2025. lmsys/lmsys-chat-1m. https://huggingface.co/datasets/lmsys/lmsy s-chat-1m. (2025). [26] Cheng Luo, Zefan Cai, Hanshi Sun, Jinqi Xiao, Bo Yuan, Wen Xiao, Junjie Hu, Jiawei Zhao, Beidi Chen, and Anima Anandkumar. 2025. Headinfer: Memory-efficient llm inference by head-wise offloading. arXiv preprint arXiv:2502.12574 
+
+(2025). [27] Zhifan Luo, Shuo Shao, Su Zhang, Lijing Zhou, Yuke Hu, Chenxu Zhao, Zhihao Liu, and Zhan Qin. 2025. Shadow in the cache: Unveiling and mitigating privacy risks of kv-cache in llm inference. arXiv preprint arXiv:2508.09442 (2025). [28] Erika McCallister. 2010. Guide to protecting the confidentiality of personally identifiable information . Diane Publishing. [29] Microsoft. 2024. microsoft/msmarco. https://huggingface.co/datasets/microsoft/ ms_marco. (2024). [30] Microsoft. 2025. Presidio: Data Protection and De-identification SDK. https: //microsoft.github.io/presidio/. (2025). [31] MistralAI. 2025. mistralai/Mistral-7B-v0.1. https://huggingface.co/mistralai/Mis tral-7B-v0.1. (2025). [32] Behrang Mohit. 2014. Named entity recognition. In Natural language processing of semitic languages . Springer, 221–245. [33] David Nadeau and Satoshi Sekine. 2007. A survey of named entity recognition and classification. Lingvisticae Investigationes 30, 1 (2007), 3–26. [34] Hyoungwook Nam, Raghavendra Pradyumna Pothukuchi, Bo Li, Nam Sung Kim, and Josep Torrellas. 2023. Defensive ml: Defending architectural side-channels with adversarial obfuscation. arXiv preprint arXiv:2302.01474 (2023). [35] Arvind Narayanan and Vitaly Shmatikov. 2010. Myths and fallacies of" personally identifiable information". Commun. ACM 53, 6 (2010), 24–26. [36] Humza Naveed, Asad Ullah Khan, Shi Qiu, Muhammad Saqib, Saeed Anwar, Muhammad Usman, Naveed Akhtar, Nick Barnes, and Ajmal Mian. 2023. A com-prehensive overview of large language models. ACM Transactions on Intelligent Systems and Technology (2023). [37] Helen Nissenbaum. 2018. Respecting context to protect privacy: Why meaning matters. Science and engineering ethics 24, 3 (2018), 831–852. [38] Albert Agisha Ntwali, Luca Rück, and Martin Heckmann. 2025. Detection of Personal Data in Structured Datasets Using a Large Language Model. arXiv preprint arXiv:2506.22305 (2025). [39] Nvidia. 2025. Structuring Applications to Secure the KV Cache. https://develope r.nvidia.com/blog/structuring-applications-to-secure-the-kv-cache/. (2025). [40] OpenAI. 2025. OpenAI Privacy Filter. https://huggingface.co/openai/privacy-fil ter. (2025). [41] OpenAI. 2025. Prompt caching. https://platform.openai.com/docs/guides/prom pt-caching. (2025). [42] Zixuan Pang, Wenhao Wang, and Yong Liao. 2024. Cache partitioning for mitigat-ing timing side-channel attacks in llm serving systems. In 2024 6th International Conference on Frontier Technologies of Information and Computer (ICFTIC) . IEEE, 1238–1245. [43] Mariia Ponomarenko, Sepideh Abedini, Masoumeh Shafieinejad, DB Emerson, Shubhankar Mohapatra, and Xi He. 2026. CAPID: Context-Aware PII Detection for Question-Answering Systems. In Proceedings of the 19th Conference of the European Chapter of the Association for Computational Linguistics (Volume 4: Student Research Workshop) . 320–331. [44] Qasper. 2025. allenai/qasper. https://huggingface.co/datasets/allenai/qasper. (2025). [45] Qwen. 2025. Qwen/Qwen2.5-14B. https://huggingface.co/Qwen/Qwen2.5-14B. (2025). [46] Qwen. 2025. Qwen/Qwen2.5-7B. https://huggingface.co/Qwen/Qwen2.5-7B. (2025). [47] Kartik Ramkrishnan, Antonia Zhai, Stephen McCamant, and Pen Chung Yew. 2019. New attacks and defenses for randomized caches. arXiv preprint arXiv:1909.12302 (2019). [48] RyokoAI. 2025. RyokoAI/ShareGPT52K. https://huggingface.co/datasets/Ryok oAI/ShareGPT52K. (2025). [49] Paul M Schwartz and Daniel J Solove. 2011. The PII problem: Privacy and a new concept of personally identifiable information. NYUL rev. 86 (2011), 1814. [50] Linke Song, Zixuan Pang, Wenhao Wang, Zihao Wang, XiaoFeng Wang, Hongbo Chen, Wei Song, Yier Jin, Dan Meng, and Rui Hou. 2024. The early bird catches the leak: Unveiling timing side channels in llm serving systems. arXiv preprint arXiv:2409.20002 (2024). [51] Robin Staab, Mark Vero, Mislav Balunović, and Martin Vechev. 2023. Beyond memorization: Violating privacy via inference with large language models. arXiv preprint arXiv:2310.07298 (2023). 
+
+> 13
+
+[52] Yi Su, Yuechi Zhou, Quantong Qiu, Juntao Li, Qingrong Xia, Ping Li, Xinyu Duan, Zhefeng Wang, and Min Zhang. 2025. Accurate kv cache quantization with outlier tokens tracing. arXiv preprint arXiv:2505.10938 (2025). [53] Hanlin Tang, Yang Lin, Jing Lin, Qingsen Han, Shikuan Hong, Yiwu Yao, and Gongyi Wang. 2024. Razorattention: Efficient kv cache compression through retrieval heads. arXiv preprint arXiv:2407.15891 (2024). [54] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al . 2023. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 (2023). [55] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing systems 30 (2017). [56] Jesse Vig and Yonatan Belinkov. 2019. Analyzing the structure of attention in a transformer language model. arXiv preprint arXiv:1906.04284 (2019). [57] Guangtao Wang, Shubhangi Upasani, Chen Wu, Darshan Gandhi, Jonathan Li, Changran Hu, Bo Li, and Urmish Thakker. 2025. LLMs Know What to Drop: Self-Attention Guided KV Cache Eviction for Efficient Long-Context Inference. 
+
+arXiv preprint arXiv:2503.08879 (2025). [58] Longxiang Wang, Xiang Zheng, Xuhao Zhang, Yao Zhang, Ye Wu, and Cong Wang. 2026. OptiLeak: Efficient Prompt Reconstruction via Reinforcement Learn-ing in Multi-tenant LLM Services. arXiv preprint arXiv:2602.20595 (2026). [59] Mario Werner, Thomas Unterluggauer, Lukas Giner, Michael Schwarz, Daniel Gruss, and Stefan Mangard. 2019. {ScatterCache }: thwarting cache attacks via cache set randomization. In 28th USENIX Security Symposium (USENIX Security 19) . 675–692. [60] Guanlong Wu, Taojie Wang, Yao Zhang, Zheng Zhang, Jianyu Niu, Ye Wu, and Yinqian Zhang. 2026. When Cache Poisoning Meets LLM Systems: Semantic Cache Poisoning and Its Countermeasures. (2026). [61] Guanlong Wu, Zheng Zhang, Yao Zhang, Weili Wang, Jianyu Niu, Ye Wu, and Yinqian Zhang. 2025. I know what you asked: Prompt leakage via kv-cache sharing in multi-tenant llm serving. In Proceedings of the 2025 Network and Distributed System Security (NDSS) Symposium. San Diego, CA, USA .[62] Yale-LTLY. 2025. QMSum. https://github.com/Yale-LILY/QMSum. (2025). [63] Biwei Yan, Kun Li, Minghui Xu, Yueyan Dong, Yue Zhang, Zhaochun Ren, and Xiuzhen Cheng. 2024. On protecting the data privacy of large language models (llms): A survey. In 2024 International Conference on Meta Computing (ICMC) .IEEE, 1–12. [64] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast large language model serving for RAG with cached knowledge fusion. In Proceedings of the Twentieth European Conference on Computer Systems . 94–109. [65] Wayne Xin Zhao, Kun Zhou, Junyi Li, Tianyi Tang, Xiaolei Wang, Yupeng Hou, Yingqian Min, Beichen Zhang, Junjie Zhang, Zican Dong, et al . 2023. A survey of large language models. arXiv preprint arXiv:2303.18223 1, 2 (2023). [66] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al . 2024. Sglang: Efficient execution of structured language model programs. 
+
+Advances in neural information processing systems 37 (2024), 62557–62583. [67] Xinyao Zheng, Husheng Han, Shangyi Shi, Qiyan Fang, Zidong Du, Xing Hu, and Qi Guo. 2024. Inputsnatch: Stealing input in llm services via timing side-channel attacks. arXiv preprint arXiv:2411.18191 (2024). 
+
+A DEFENSE EFFECTIVENESS EVALUATIONS A.1 Attack Settings of Contextual Leakage 
+
+We evaluate contextual leakage by measuring whether sensitive in-formation can be inferred from non-sensitive tokens after anonymiza-tion. The attack follows a guess–judge pipeline as in prior work [ 51 ]. 
+
+Data preprocessing. We first identify and anonymize all PII using Presidio with spaCy on GPU. Each detected entity is replaced with a string of ’*’ of the same length, ensuring that sensitive tokens are fully masked while preserving surrounding context. 
+
+Guesser. For each sample, we group PII instances into batches of 100 and prompt a guesser LLM to infer the masked content. For each instance, the guesser produces up to guess_top_k guesses. 
+
+Judger. Each PII instance is associated with guess_top_k guesses. We select the top judge_top_k guesses and pass them to a judger LLM, which labels each guess as yes , no , or less precise , corre-sponding to scores of 1.0, 0.0, and 0.5, respectively. 0  0 0                     
+
+> F     
+> 0
+> 
+> 0
+> 
+> 0
+>         
+>    
+>        
+>         
+
+(a) False negative 0  0 0                        
+
+> F     
+> 0
+> 
+> 
+> 
+> 0
+>        
+>     
+>        
+>         
+
+(b) False positive 
+
+Figure 16: Impact of imperfect privacy detection (NarrativeQA). 0  0 0                     
+
+> F     
+> 0
+> 
+> 0
+> 
+> 0
+>         
+>    
+>        
+>         
+
+(a) False negative 0  0 0                 
+
+> F     
+> 0
+> 
+> 
+> 
+> 
+> 
+>        
+>    
+>      
+>       
+
+(b) False positive 
+
+Figure 17: Impact of imperfect privacy detection (QMSum). 
+
+Configuration. In our experiments, we set both guess_top_k 
+
+and judge_top_k to 1. The prompt used for LLMs are unmodified following prior work [51] 
+
+A.2 Impact of Imperfect Detection 
+
+In addition to the results presented in the main paper on QASPER, we further evaluate CachePrune on NarrativeQA ( Fig. 16 ) and QMSum ( Fig. 17 ) to examine the our findings. The results confirm the impact analyzed in the main paper. 
+
+B GENERATION QUALITY EVALUATIONS 
+
+In addition to the results presented in the main paper on Mistral-7B, we further evaluate CachePrune on Qwen2.5-7B and Qwen2.5-14B to examine the generality of our findings. We follow the same experimental setup as described in Sec. 5.3, including dataset con-struction and evaluation metrics. Overall, we observe consistent trends across models ( Fig. 18 to Fig. 23 ): generation quality remains stable under varying match rates, improves with moderate recom-putation, and benefits from longer segment lengths. These results confirm that the impact of the three key factors analyzed in Sec. 5.3 generalizes across different model architectures and scales. 
+
+C EFFICIENCY EVALUATIONS 
+
+Similarly, we further evaluate CachePrune on Qwen2.5-7B and Qwen2.5-14B to examine the generality of our findings. We follow the same experimental setup as described in Sec. 5.4, including dataset construction and evaluation metrics. Overall, we observe consistent trends across models (from Fig. 24 to Fig. 27 ), confirming that the efficiency of CachePrune generalize across different model architectures and scales. 
+
+14 0 0 0  0  0  0   0 
+
+M  
+
+0 0 
+
+0  
+
+0  
+
+0  
+
+>            
+
+ 
+
+ 
+
+ 
+
+0 0 
+
+0  
+
+0  
+
+0  
+
+>      M
+
+Figure 18: Match rate impact (Qwen-7B). 0 0  0 0 0  
+
+R  
+
+0 0 
+
+0  
+
+0  
+
+0  
+
+>      R      
+
+ 
+
+ 
+
+ 
+
+0 0 
+
+0  
+
+0  
+
+0   
+
+> R     
+
+Figure 19: Recompute rate impact (Qwen-7B). 6  6  
+
+S     
+
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+
+>             
+
+  
+
+ 
+
+  Figure 20: Segment length impact (Qwen-7B). 0 0 0  0  0  0   0 
+
+M  
+
+0 0 
+
+0  
+
+0  
+
+0  
+
+>            
+
+ 
+
+ 
+
+ 
+
+0 0 
+
+0  
+
+0  
+
+0  
+
+>      M
+
+Figure 21: Match rate impact (Qwen-14B). 0 0  0 0 0  
+
+R  
+
+0 0 
+
+0  
+
+0  
+
+0  
+
+>      R      
+
+ 
+
+ 
+
+ 
+
+0 0 
+
+0  
+
+0  
+
+0   
+
+> R     
+
+Figure 22: Recompute rate impact (Qwen-14B). 6  6  
+
+S     
+
+  
+
+  
+
+ 6 
+
+  
+
+  
+
+  
+
+  
+
+ 6 
+
+  
+
+>             
+
+ 
+
+ 
+
+ Figure 23: Segment length impact (Qwen-14B). 0 0  0  0  0  
+
+M    
+
+00 
+
+00 
+
+00 
+
+00 
+
+000 
+
+>     
+
+ 
+
+ 
+
+ 
+
+(a) TTFT 0 0  0  0  0  
+
+M   
+
+
+
+
+
+
+
+
+
+
+
+
+
+>         
+
+  
+
+ 
+
+  (b) Throughput 
+
+Figure 24: Impact of match rate on efficiency (Qwen-7B). 0 0  0  0  0  
+
+M    
+
+0 
+
+00 
+
+0 
+
+000 
+
+0 
+
+00 
+
+0 
+
+000 
+
+>     
+
+  
+
+ 
+
+  
+
+(a) TTFT 0 0  0  0  0  
+
+M   
+
+0  
+
+ 0 
+
+  
+
+ 0 
+
+  
+
+ 0 
+
+>         
+
+  
+
+ 
+
+  (b) Throughput 
+
+Figure 25: Impact of match rate on efficiency (Qwen-14B). 
+
+D PRIVACY DETECTION SETTINGS 
+
+Following prior work on sensitivity identification in LLM prompts [ 38 ], we adopt Presidio [30], a widely used privacy detection toolkit, as 0 0  0  0  
+
+R    
+
+00 
+
+00 
+
+00 
+
+00 
+
+00 
+
+00 
+
+00 
+
+>   
+
+  
+
+ 
+
+  
+
+(a) TTFT 0 0  0  0  
+
+R   
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+>     
+
+  
+
+ 
+
+  (b) Throughput 
+
+Figure 26: Impact of recompute rate on efficiency (Qwen-7B). 0 0  0  0  
+
+R    
+
+00 
+
+00 
+
+00 
+
+000 
+
+>   
+
+  
+
+ 
+
+  
+
+(a) TTFT 0 0  0  0  
+
+R   
+
+ 0 
+
+  
+
+ 0 
+
+  
+
+ 0 
+
+  
+
+ 0 
+
+>     
+
+ 
+
+ 
+
+ (b) Throughput 
+
+Figure 27: Impact of recompute rate on efficiency (Qwen-14B). 
+
+the default detector in our evaluation. Presidio supports multiple categories of sensitive entities, which we group into two classes: 
+
+15 6  6       
+
+> S   
+>  
+>   
+>   
+>   
+> 6  
+>     
+>  
+>  
+> 
+
+(a) TTFT 6  6         
+
+> S   
+>  
+>  
+>  
+>  
+>  6
+>      
+>  
+>  
+> 
+
+(b) Throughput 
+
+Figure 28: Impact of segment length on efficiency. Q  Q  Q     
+
+> D 
+> 
+> 
+> 
+> 
+> 
+> 
+> 
+> 
+> 
+>            
+>         
+
+(a) Match rate Q  Q  Q     
+
+> D 
+> 
+> 
+> 
+> 
+> 
+>            
+>         
+
+(b) Segment length 
+
+Figure 29: Impact of privacy detection methods. 
+
+• Personal identifiers : CREDIT_CARD, CRYPTO,IBAN_CODE, EMAIL_ADDRESS, NRP (passport), PERSON, PHONE_NUMBER, SSN, US_BANK_NUMBER, US_DRIVER_LICENSE, US_ITIN,US_SSN, US_PASSPORT. 
+
+• Non-personal identifiers : DATE_TIME, IP_ADDRESS, LOCA-TION, URL, AU_ABN, AU_ACN. We configure three privacy levels for evaluation, as summarized in Table 4. 
+
+Table 4: Privacy detector configurations. 
+
+Level Categories used 
+
+Low CREDIT_CARD, CRYPTO, EMAIL_ADDRESS, IBAN_CODE, NRP, PERSON, PHONE_NUMBER, SSN Medium All Personal identifiers High All Personal + Non-personal identifiers This configuration allows us to emulate settings from lightweight filtering (Low) to strict protection of all detectable categories (High). 
+
+16

@@ -1,0 +1,494 @@
+Title: Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference
+
+URL Source: https://arxiv.org/pdf/2605.22416v1
+
+Published Time: Fri, 22 May 2026 01:21:44 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference 
+
+# An Xuan Nguyen 
+
+Codepawl Ho Chi Minh City, Vietnam nxan2911@gmail.com 
+
+## Abstract 
+
+Hybrid language models like Jamba mix attention layers with State Space Models (SSMs), creating two memory cache types with op-posite profiles: Key-Value (KV) caches grow linearly with sequence length, while SSM states stay fixed per layer. Current inference engines handle this poorly. Unified pools pad SSM states to at-tention page sizes, wasting up to 7.3× capacity. Static dual pools cannot adapt when prompt distributions shift between requests. We present Asymmetric Virtual Memory Paging (AVMP). The allocator separates the two cache types into physically distinct pools behind a unified virtual address space, and migrates capacity between pools when one runs out. Migration triggers only on allocation failure, keeping behavior deterministic. We evaluate AVMP across 180 syn-thetic cells plus 60 cells of ShareGPT trace replay on an RTX 3060 12GB. Out-of-Memory events drop 7.6% and request throughput improves 1.83 × to 13 .3× across synthetic workloads and 2.36 × on ShareGPT. All gains hold under paired-bootstrap 95% confidence in-tervals. A phase-time breakdown reveals two distinct mechanisms: shorter OOM recovery on capacity-pressured workloads, and faster allocation calls on KV-heavy workloads. Implementation is pure Python; Triton integration is future work. 
+
+## 1 Introduction 1.1 Motivation 
+
+Recent advancements in large language models extend context length through hybrid architectures. Models like Jamba combine transformer attention mechanisms with State Space Models (SSMs) to support a 256K context window [ 8 ]. The base Jamba architecture also uses a Mixture-of-Experts (MoE) feedforward configuration, though our work focuses specifically on memory management for the attention and SSM cache types; MoE routing memory is orthogonal to this design. This architecture merges two different layer types: attention mechanisms requiring a linearly scaling Key-Value (KV) cache ( 𝑂 (𝑛 ) per token), and SSMs requiring a fixed-size state footprint ( 𝑂 (1) per layer) [3]. Existing inference engines struggle to serve these heterogeneous memory profiles. The unified pool approach in vLLM [ 7 ] forces the fixed SSM state to pad up to the attention page size, causing severe capacity overestimation documented in vLLM issue #37121 (concrete magnitudes in §3.1). Alternatively, SGLang implements a static dual pool where operators fix a mamba_full_memory_ratio 
+
+parameter at engine initialization [ 20 ]. This rigid partition cannot rebalance without a full process restart. Neither architectural approach handles workload shifts dynam-ically. Static defaults perform poorly when prompt distributions 
+
+> Source code: https://github.com/codepawl/cachepawl.
+
+change during execution. Testing the same workload mix records 1221 Out-of-Memory (OOM) events at a 0.9 static ratio compared to 552 OOMs at a 0.5 static ratio. No existing system provides both asymmetric cache types and runtime adaptivity. In this paper, we introduce Asymmetric Virtual Memory Paging (AVMP), a paged memory allocator designed specifically for hybrid architectures. AVMP provisions physically asymmetric backing stores while enabling dynamic capacity rebalancing at runtime. Our dynamic rebalancing records a 13.3 × goodput improvement on uniform_short workloads compared to the best static baseline. 
+
+## 1.2 Contributions 
+
+We make the following specific contributions: 
+
+• Asymmetric Virtual Page Table Abstraction (§3): We design a unified virtual handle space spanning two physically heteroge-neous backing stores (KV pages and SSM blocks). AVMP extends the GPU virtual memory approach pioneered for KV caches [ 16 ]to two asymmetric pool types. We show that this abstraction in-troduces no measurable effect on simulated capacity outcomes, with byte-identical OOM counts against a static dual-pool base-line (552 OOMs). 
+
+• Dynamic Pool Rebalancing Mechanism (§3): We implement a CapacityError -triggered migration mechanism that trans-fers batched memory capacity between pools. We enforce deter-minism using a logical operation counter rather than wall-clock time, ensuring per-cell byte-identical reproducibility across all experimental reruns. 
+
+• Empirical Validation on Hybrid Architectures (§4): We execute a 180-cell sweep evaluating 5 allocator variants, 3 syn-thetic workloads, 2 model specifications, 2 pool sizes, and 3 random seeds. The dynamic AVMP allocator records a 7.6% OOM reduction (510 versus 552) against the best static baseline. AVMP records 13.3 × higher goodput on uniform_short , 2.39 ×
+
+on mixed_long , and 1.83 × on agentic_burst traffic patterns. A parameter sensitivity analysis proves migration_batch_size 
+
+acts as the dominant configuration axis, while a Stage 2 thresh-old sweep returned a strict null result. 
+
+• Open-Source Prototype: We provide a reference Python im-plementation and synthetic workload harness with committed sweep artifacts at https://github.com/codepawl/cachepawl. 
+
+## 2 Background 2.1 Hybrid Mamba-Transformer Architectures 
+
+Standard transformer attention requires 𝑂 (𝑛 2) compute for a se-quence of length 𝑛 , and the KV cache grows linearly with 𝑛 during 
+
+> 1
+> arXiv:2605.22416v1 [cs.LG] 21 May 2026 An Xuan Nguyen
+
+decoding. Conversely, State Space Models (SSMs) like Mamba oper-ate with 𝑂 (𝑛 ) compute and require an 𝑂 (1) cache per layer [ 3, 6]. The SSM state size remains fixed and strictly independent of the se-quence length. Hybrid architectures combine these two approaches to combine SSM efficiency with attention reasoning. For example, Jamba mixes attention and Mamba layers at a 1:7 ratio, supporting a 256K token context window with approximately 12B active parameters in a Mixture-of-Experts (MoE) configuration [ 8]. Other variations adopt similar hybrid structures with different attention-to-SSM ratios [ 1, 4, 5, 11 ]. This architectural combination forces inference engines to manage two fundamentally different memory cache types within a single model. 
+
+## 2.2 KV Cache and SSM State Management 
+
+Standard transformer inference manages the Key-Value (KV) cache using paged memory allocation [ 7 ], often combined with IO-aware attention kernels [ 2, 12 ]. The KV cache requires a system that han-dles variable block sizes, supports append-only operations during decoding, and allows dynamic eviction or recomputation when memory pressure increases. In contrast, the SSM state maintains a fixed size per layer, strictly defined by state_dim multiplied by 
+
+bytes_per_element . This state updates in place and persists across tokens. Unlike KV blocks, the SSM state cannot be paged because it lacks a temporal token structure to evict [ 3]. It requires a single, contiguous allocation per layer per sequence. Consequently, the memory access patterns diverge significantly: KV cache operations rely on paged scatter-gather memory lookups, while SSM state operations require contiguous read and write access. This structural asymmetry is the root cause of fragmentation and overestimation in existing cache pool designs. 
+
+## 2.3 Limits of Existing Pool Designs 
+
+Current inference systems attempt to manage hybrid mod-els using either unified or static dual-pool designs, both of which fail in two ways. Unified pools, such as the vLLM 
+
+HybridKVCacheCoordinator approach [ 7], force the SSM state to pad up to the attention page size, causing severe capacity overesti-mation (vLLM issue #37121; quantitative figures in §3.1). The root cause is the system capacity estimator, which incorrectly multiplies the 𝑂 (1) SSM state by the sequence token count. Alternatively, static dual-pool architectures like SGLang pre-allocate two physical regions (HybridReqToTokenPool 
+
+and HybridLinearKVPool ) at engine startup [20 ]. This de-sign assigns memory using a fixed parameter, such as a
+
+mamba_full_memory_ratio defaulting to 0.9. The system cannot rebalance capacity between pools without a full process restart. When the prompt distribution shifts, static pools perform poorly. As we demonstrate in §4, a default 0.9 ratio triggers 1221 OOM events compared to 552 OOMs at a 0.5 ratio on identical workloads. Neither unified padding nor static allocation handles runtime workload shifts dynamically, motivating a memory management system that supports asymmetric cache types and adapts to shifting prompt distributions. 
+
+## 3 Method 3.1 Asymmetric Virtual Page Table 
+
+Hybrid models mixing Mamba and Transformer architectures re-quire two distinct memory types: variable-size Key-Value (KV) blocks that scale with sequence length, and fixed-size State Space Model (SSM) state that remains independent of sequence length [ 3, 8]. Existing unified pools pad SSM state to match attention page sizes, causing capacity overestimation, which leads to over-admission of requests, triggering OOM at runtime. As reported in vLLM issue #37121, this padding results in a 7.3 × KV cache over-estimation on Qwen3.5-4B-AWQ, leaving 13.7% effective VRAM utilization at peak memory. We introduce the Asymmetric Virtual Page Table (AVMP) to reduce this waste by decoupling the virtual address space from heterogeneous physical backing slabs. The AVMP design provisions two distinct physical regions: a 
+
+KVPagesStore and an SSMBlocksStore , managed by a unified multi-resolution page table. Memory allocations return an opaque 32-bit VirtualHandle . This handle contains a tag indicating the target pool identifier (KV or SSM). The VirtualPageTable resolves the handle to a physical offset within the respective backing store. We assign native page sizes per pool. KV pages scale by 
+
+attention_page_tokens multiplied by per_token_bytes , de-faulting to 16 tokens per page. SSM blocks match the exact 
+
+state_dim multiplied by bytes_per_element . We enforce strict alignment rules: 128-byte slab alignment globally and 16-byte page alignment within slabs (Figure 1). Unlike PagedAttention [ 7], which uses uniform page sizes, this multi-resolution approach extends GPU virtual memory concepts [ 16 ] to support hybrid cache abstrac-tions. We use two metrics throughout the rest of the paper. 𝑁 OOM de-notes the count of out-of-memory events triggered during a bench-mark cell, aggregated per workload or summed cross-workload as noted in each caption. 𝐵 denotes the migration_batch_size 
+
+configuration parameter that bounds the per-rebalance migration step; we sweep 𝐵 ∈ { 1, 2, 4, 8, 16 , 32 , 64 , 128 , 256 } in §4.5. 
+
+## 3.2 Dynamic Pool Rebalancing 
+
+Static dual pools [ 20 ] pre-allocate physical regions using a fixed ratio, such as a –mamba-full-memory-ratio default of 0.9, which cannot change without a system restart. We show in Table 1 that fixed allocations fail to generalize across diverse prompt distribu-tions. fixed_dual_mr05 records 552 cross-workload OOMs versus 
+
+fixed_dual_mr09 ’s 1221.3 OOMs, but neither wins on all workload mixes. We design a dynamic rebalancing mechanism to migrate capacity between the KV and SSM pools at runtime. The system tracks pool pressure using a state machine with three states: BALANCED , KV_PRESSURED / SSM_PRESSURED , and 
+
+REBALANCING (Figure 2). We evaluate state transitions strictly within the CapacityError exception handler of the allocate() 
+
+path. If an allocation triggers a CapacityError in one pool, and the other pool maintains a free fraction greater than threshold_high 
+
+(0.30), the allocator starts capacity migration. We place the trigger in the CapacityError handler rather than as a pre-emptive sam-pling hook, because pre-emptive triggers fire on transient pressure that resolves without migration, while CapacityError fires only when allocation would otherwise fail.                
+
+> 2Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference
+> VirtualHandle (32-bit)
+> pool_id page_id
+> VirtualPageTable
+> h_0 →KV[3]
+> h_1 →SSM[1]
+> h_2 →KV[7]
+> KVPagesStore
+> p0 p1 p2 p3 p4 · · · p7
+> SSMBlocksStore
+> b0 b1 b2
+> lookup
+
+Figure 1: AVMP virtual handle resolution. A 32-bit handle is tagged by pool identifier and indexed into the page ta-ble, which dispatches to either the KVPagesStore, with fine-grained pages, or the SSMBlocksStore, with per-layer con-tiguous blocks.   
+
+> BALANCED
+> KV_PRESSURED SSM_PRESSURED
+> REBALANCING
+> kv_free  < th_low
+> ssm_free  < th_low
+> ssm_free  > th_high
+> kv_free  > th_high
+> migration complete
+> free recovers free recovers
+
+Figure 2: Pool rebalancing state machine. The alloca-tor tracks per-pool free fractions and transitions to RE-BALANCING only when one pool raises CapacityError while the other has slack capacity above threshold_high 
+
+(0.30). Edges are labelled by per-pool free-fraction con-ditions on kv_free , ssm_free , threshold_low (th_low ), and 
+
+threshold_high (th_high ); all transitions fire inside the 
+
+CapacityError handler of allocate() rather than from a pre-emptive sampling hook, so migration costs are paid only when allocation would otherwise fail. 
+
+During migration, the allocator calls resize_capacity() on the donor pool, shrinking it at the high end of its address space, and the recipient pool grows. In the current Python prototype, mi-gration updates virtual page table entries and adjusts pool capacity counters; the backing tensors are oversized at initialization to span both pools’ maximum possible capacity, so no physical data copy occurs. A future cuMemMap -backed implementation would perform on-demand physical page remapping (§4.6). The wasted bytes per migration equal the donor bytes freed modulo the recipient page size. We throttle rebalancing using a logical operation counter to guarantee deterministic behavior, requiring a minimum interval of 1000 operations ( min_rebalance_interval_ops ) between migra-tions. In partial failure scenarios, the allocator executes a rollback of the migration state. This dynamic rebalancing yields a 7.6% Out-of-Memory (OOM) reduction (510 OOMs versus 552) and a 13.3 ×
+
+goodput improvement on uniform short workloads compared to the best static configuration. 
+
+## 3.3 Implementation Choices 
+
+Our prototype is pure Python, focused on allocator semantics rather than kernel-level performance; Triton kernel integration is future work. We evaluate the allocator’s response to workload-driven memory pressure using synthetic trace generation rather than di-rect model integration. Our experiments show AVMP wins primarily via faster re-covery from OOM events rather than sustained concurrency. 
+
+effective_batch_size_p50 matches across all five variants within each workload (129, 132, and 284 for agentic_burst ,
+
+mixed_long , and uniform_short respectively), indicating that the metric is workload-dominated rather than allocator-dependent. The performance gain comes from reduced cumulative time in OOM-rejected states. Parameter sweeps also show that the migration batch size ( migration_batch_size = 128) acts as the dominant performance axis, while specific low and high threshold tuning yields marginal differences. Our implementation incurs a 2 × VRAM footprint trade-off, peak-ing at 9 GiB on a 4 GiB pool, compared to 5 GiB for static baselines. We size the backing store to the maximum possible capacity of both pools combined to enable dynamic migration without reallocating the underlying tensors. Integrating cuMemMap would remove this overhead by mapping virtual addresses to physical pages dynami-cally, removing the need for oversized backing tensors. 
+
+## 4 Evaluation 4.1 Experimental Setup 
+
+We evaluate the Asymmetric Virtual Page Table (AVMP) allocator on a single NVIDIA RTX 3060 12GB GPU running CUDA 13.0, PyTorch 2.12.0+cu130, and Python 3.10.19 on WSL2 Ubuntu. We execute an experimental sweep across 180 cells: 5 allocator variants, 3 synthetic workloads, 2 model specifications ( jamba_1_5_mini 
+
+and mamba2_1b3 ), 2 total memory pool sizes (1 GiB and 4 GiB), and 3 random seeds. The entire sweep completes in 16 minutes and 14 seconds of wall time. Two supplementary V1.5 sweeps on the same hardware add the wall-clock decomposition data (180 cells, 18:46) and the ShareGPT trace replay (60 cells, 1:56). We enforce determinism by using a logical operation counter for migration throttling rather than wall-clock time. This ensures byte-identical reproducibility across reruns for event-deterministic fields. We include effective_batch_size_p50 in the deterministic sub-set by construction. We exclude goodput and time_to_first_oom 
+
+> 3An Xuan Nguyen
+
+from strict reproducibility requirements as they depend on wall-clock execution speed. We report 95% confidence intervals from paired bootstrap re-sampling for the headline claims (Table 2). For each comparison we form matched pairs over the (workload, model, pool, seed) grid and resample the per-cell delta or ratio-of-means 10,000 times. Vari-ants share random seeds across cells, so the comparison is paired by construction. Pre-registered RNG seed 20260520 makes the CIs byte-stable across reruns of scripts/bootstrap_ci.py .We generate synthetic workloads to capture three distinct prompt distributions. The uniform_short workload simulates KV-heavy traffic with low concurrency variance. The mixed_long 
+
+workload simulates long context requests that generate high SSM pressure and lower batch density. The agentic_burst workload tests allocator responsiveness using a mix of short and long contexts with variable arrival loads. 
+
+Baseline fidelity. We model two production systems as allocator-level baselines rather than reproducing full inference en-gines. The padded_unified baseline implements the unified pool padding behavior documented in vLLM issue #37121, where SSM state is padded to attention page granularity. The fixed_dual_mr05 and fixed_dual_mr09 baselines model SGLang’s HybridReqToTokenPool and HybridLinearKVPool with the mamba_full_memory_ratio parameter at 0.5 and the default 0.9, respectively [ 20 ]. These baselines isolate allocator behavior from kernel execution and request scheduling, which our prototype does not implement. A full reproduction against vLLM main or SGLang main would require integrating AVMP into those engines, which we leave to future work. 
+
+## 4.2 Baseline Comparison 
+
+We compare the dynamic AVMP allocator against static dual-pool baselines [ 20 ] and unified pool baselines [ 7 ]. Table 1 presents the cross-workload aggregated results. The avmp_dynamic_b128 variant records the lowest cross-workload OOM count at 510, a 7.6% reduction relative to the best static baseline, fixed_dual_mr05 , which records 552 OOMs. The paired bootstrap on the per-cell delta over the 36-cell grid puts the 95% confidence interval at [− 5.83 , −1.39 ] OOMs per cell, equivalent to a 3.0–12.7% cross-workload reduction and excluding the null. The 
+
+avmp_static_mr05 variant ties the fixed_dual_mr05 baseline at 552 OOMs (bootstrap CI [0, 0]), validating that our virtual handle abstraction introduces no measurable overhead relative to direct pool access. The cross-workload reduction is concentrated on the long-context and bursty workloads. The per-cell delta on mixed_long 
+
+has 95% CI [− 10 .3, −1.3] OOMs and agentic_burst has 
+
+[− 9.3, −1.3]; both exclude zero. On uniform_short the per-cell delta is +0.4 with 95% CI [0.0, +1.3], so the comparison is statisti-cally inconclusive on that workload, consistent with the within-1.7-OOM tie shown in Figure 3. AVMP wins where the workload shifts pressure between pools; on the KV-only workload it is statistically indistinguishable from the best static partition. Conversely, the padded_unified variant performs worst, trig-gering 1567.7 OOM events (bootstrap CI on the per-cell delta vs 
+
+fixed_dual_mr05 : [+ 46 .2, +128 ]). This confirms that our modeled uniform short mixed long agentic burst    
+
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> 600
+> Total OOM events
+> 483
+> 573
+> 512
+> 7.3
+> 387
+> 157
+> 7.3
+> 387
+> 157
+> 9.0
+> 364
+> 137
+> Cross-allocator OOM comparison
+> padded_unified fixed_dual (mr=0.5) AVMP static (mr=0.5) AVMP dynamic (b=128)
+
+Figure 3: Cross-allocator OOM totals per workload ( ↓ lower is better). Each bar sums per-cell means over 12 cells (2 mod-els × 2 pool budgets × 3 seeds). avmp_dynamic_b128 wins on 
+
+mixed_long (364 vs 387) and agentic_burst (137 vs 157), and ties the static baselines on uniform_short within ≈ 2 OOMs (9.0 vs 7.3); padded_unified loses on every workload. 
+
+unified padding baseline fails under hybrid architecture constraints due to capacity overestimation, consistent with the behavior re-ported in vLLM issue #37121. Furthermore, the fixed_dual_mr09 
+
+variant, matching the default 0.9 ratio used in SGLang, records 1221.3 OOMs (bootstrap CI on the per-cell delta: [+ 29 .2, +86 .9]), demonstrating that static default ratios perform poorly on mixed workloads. As a design trade-off, AVMP maintains a 2 × VRAM footprint, peaking at 9216 MiB reserved compared to 5120 MiB for static baselines. 
+
+## 4.3 Throughput Analysis 
+
+We measure system throughput using goodput, defined as com-pleted requests per second. Our pre-registered protocol dictates that dynamic allocation is justified if the goodput exceeds 1.10 × the best baseline on at least one workload. AVMP passes this threshold across all three workloads. Table 3 summarizes per-workload goodput. AVMP records 434.24 req/s on uniform_short versus 32.65 req/s for fixed_dual_mr05 ,a 13.30 × ratio (paired bootstrap 95% CI on the ratio of means: 
+
+[11 .18 , 16 .00 ]). On mixed_long , 65.07 vs 27.25 req/s gives 2.39 ×
+
+(95% CI [1.70 , 3.04 ]). On agentic_burst , 46.91 vs 25.69 req/s gives 1.83 × (95% CI [1.42 , 2.60 ]). All three CIs exclude both the unit ratio and the pre-registered 1.10 × threshold. We explicitly report per-workload ratios rather than a cross-workload mean because static baselines exhibit high variance across distinct prompt distributions. The fixed_dual_mr05 good-put ranges narrowly from 25.69 to 32.65 req/s across the workloads. Mean aggregation obscures this variance and misleads interpreta-tions of allocator resilience. AVMP maintains consistently higher goodput by adapting dynamically. The median effective batch size ( effective_batch_size_p50 )is strictly identical across all 5 variants per workload: 129 for 
+
+agentic_burst , 132 for mixed_long , and 284 for uniform_short .Bootstrap CIs on the per-cell batch-size delta are [0, 0] on every 
+
+> 4Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference
+
+Table 1: Cross-workload OOM totals per variant ( ↓ lower is better). Each row sums per-(model, pool, seed) cell means over the 12-cell grid; 𝜎 propagates per-cell std across cells as √︃ Í𝑖 𝜎 2 
+
+> 𝑖
+
+. avmp_dynamic_b128 records 510 cross-workload OOMs, 7.6% under the best static baseline ( fixed_dual_mr05 at 552); bootstrap CI excludes the null (see Table 2). Bold = best per column; underline = second; Δ% is vs padded_unified .
+
+Variant uniform_short mixed_long agentic_burst Total Δ% vs padded_unified padded_unified 482.7 ± 21.9 573.0 ± 41.0 512.0 ± 42.1 1567.7 ± 62.7 —fixed_dual_mr05 7.3 ± 1.8 387.3 ± 11.3 157.3 ± 12.5 552.0 ± 16.9 −64.8% fixed_dual_mr09 522.0 ± 20.4 492.0 ± 42.7 207.3 ± 13.1 1221.3 ± 49.1 −22.1% avmp_static_mr05 7.3 ± 1.8 387.3 ± 11.3 157.3 ± 12.5 552.0 ± 16.9 −64.8% avmp_dynamic_b128 9.0 ± 1.8 364.3 ± 15.2 136.7 ± 10.6 510.0 ± 18.6 −67.5% 
+
+Table 2: Paired bootstrap 95% CIs for the V1 headline claims (B=10000, RNG seed 20260520). Each row resamples matched (workload, model, pool, seed) tuples and reports either the per-tuple delta or the ratio of means. The V1 point estimates (13.30 ×,2.39 ×, 1.83 ×, −7.6% ) all sit inside their bootstrap CIs; the OOM delta on uniform_short alone is inconclusive (CI [0, +1.25 ] per cell). Significant = CI excludes the null (0 for deltas, 1 for ratios). Reproducible via scripts/bootstrap_ci.py .
+
+Comparison Workload 𝑛 Point 95% CI Significant avmp_dynamic_b128 - fixed_dual_mr05 (OOM count) uniform_short 12 0.42 [0.00, 1.25] no avmp_dynamic_b128 - fixed_dual_mr05 (OOM count) mixed_long 12 -5.75 [-10.3, -1.33] yes 
+
+avmp_dynamic_b128 - fixed_dual_mr05 (OOM count) agentic_burst 12 -5.17 [-9.25, -1.33] yes 
+
+avmp_dynamic_b128 - fixed_dual_mr05 (OOM count) cross_workload 36 -3.50 [-5.83, -1.39] yes 
+
+avmp_dynamic_b128 / fixed_dual_mr05 (goodput ratio) uniform_short 12 12.93 [11.18, 16.00] yes 
+
+avmp_dynamic_b128 / fixed_dual_mr05 (goodput ratio) mixed_long 12 2.19 [1.70, 3.04] yes 
+
+avmp_dynamic_b128 / fixed_dual_mr05 (goodput ratio) agentic_burst 12 1.83 [1.42, 2.60] yes 
+
+avmp_static_mr05 - fixed_dual_mr05 (OOM count, equivalence) cross_workload 36 0.00 [0.00, 0.00] no fixed_dual_mr09 - fixed_dual_mr05 (OOM count) cross_workload 36 55.8 [29.2, 86.9] yes 
+
+padded_unified - fixed_dual_mr05 (OOM count) cross_workload 36 84.6 [46.2, 128] yes 
+
+avmp_dynamic_b128 - fixed_dual_mr05 (effective_batch_size_p50) uniform_short 12 0.00 [0.00, 0.00] no avmp_dynamic_b128 - fixed_dual_mr05 (effective_batch_size_p50) mixed_long 12 0.00 [0.00, 0.00] no avmp_dynamic_b128 - fixed_dual_mr05 (effective_batch_size_p50) agentic_burst 12 0.00 [0.00, 0.00] no 
+
+Table 3: Per-workload goodput, AVMP vs the best static baseline ( ↑ higher is better). Goodput columns are mean req/s across the 12-cell (model, pool, seed) grid; ratio is 𝑔 AVMP /𝑔 baseline . AVMP wins all three: 13.30 × on uniform_short (95% CI [11 .18 , 16 .00 ]), 2.39 × on mixed_long ([1.70 , 3.04 ]), 1.83 × on agentic_burst ([1.42 , 2.60 ]); CIs from Table 2. Bold = winner per row. 
+
+Workload fixed_dual_mr05 (req/s, ↑) avmp_dynamic_b128 (req/s, ↑) Ratio uniform_short 32.65 434.24 13.30 ×
+
+mixed_long 27.25 65.07 2.39 ×
+
+agentic_burst 25.69 46.91 1.83 ×
+
+workload (Table 2). Operational batch sizes are therefore workload-dominated rather than allocator-dominated, ruling out sustained-concurrency differences as the source of the goodput gap. To probe the actual mechanism we instrument the harness with a four-bucket wall-clock decomposition (service / OOM retry / migration / idle, schema 1.3.0) and rerun the throughput sweep on the same 90-cell grid (Figure 4). Two distinct mechanisms appear, not one. On the long-context and bursty workloads, where static par-titions OOM repeatedly, the mechanism is exactly the one V1 hypothesized: AVMP reduces the share of wall time spent recovering from OOM-rejected allocations. For mixed_long ,
+
+fixed_dual_mr05 spends 26.3% of wall time in OOM retry vs 8.5% for avmp_dynamic_b128 . For agentic_burst the figures are 10.0% vs 2.1%. Migration time for avmp_dynamic_b128 on these work-loads is well under 1% of wall time, so the dynamic rebalancer pays for itself. On uniform_short , where no variant OOMs at meaningful rates, OOM retry is negligible for both and cannot explain the 13.30 ×
+
+goodput ratio. The decomposition reveals a second mechanism: 
+
+fixed_dual_mr05 ’s allocate / free latency is higher on the KV-heavy workload (32.2 s of cumulative service time for 512 requests               
+
+> 5An Xuan Nguyen PU FD9 FD5 AS AD PU FD9 FD5 AS AD PU FD9 FD5 AS AD
+
+## 0% 
+
+## 20% 
+
+## 40% 
+
+## 60% 
+
+## 80% 
+
+## 100% 
+
+> Wall-clock fraction
+
+## * * *
+
+## uniform short mixed long agentic burst 
+
+# Wall-clock phase decomposition (median across model/pool cells)    
+
+> AD = avmp dynamic b128 (ours)
+> Service (excl. migration) OOM retry Migration Idle
+
+Figure 4: Wall-clock phase decomposition per (variant, workload) cell ( ↓ lower OOM-retry is better). Each bar shows service / OOM retry / migration / idle as fractions of cell wall time, median across 12 (model, pool, seed) cells. AVMP cuts OOM-retry from 26% to 8.5% on mixed_long and from 10% to 2.1% on agentic_burst ; on uniform_short both variants idle at ≈ 0% OOM-retry, exposing the per-call service mechanism (see §4.3). 
+
+at the 4 GiB pool budget vs 2.1 s for avmp_dynamic_b128 ). The vir-tual handle abstraction in avmp_static_mr05 alone closes most of this gap (2.2 s service time at the same cell), so the speedup is attrib-utable to the virtual address-space layer rather than the dynamic rebalancer. We refine the V1 framing accordingly: AVMP wins via OOM-retry reduction on workloads with capacity pressure and via faster per-call service on the workloads without it. We treat the per-call speedup as an observation of the prototype implementation rather than a load-bearing design claim; quantifying its share of the 13.30 × would require an additional ablation that we leave to future work. 
+
+## 4.4 ShareGPT Trace Replay 
+
+The three synthetic workloads target distinct stress axes (KV pressure, SSM pressure, burst variance) but do not match any particular real prompt distribution. We add a fourth workload, 
+
+sharegpt_replay , that samples prompt-token counts from 5,000 first-human-turn prompts in the ShareGPT-Vicuna corpus [ 13 ]. To-ken counts are a word-count proxy ( 1.3 × words ) and are clamped to [16 , 4096 ] so a single pathological 6,708-token prompt cannot exceed the 4 GiB pool budget. Generation lengths are log-normally distributed (mean 4.5, sigma 1.0, clipped to [32 , 2048 ]) and arrival times are deterministically staggered. The clamp floor activates on 
+
+≈ 36 % of draws, reflecting ShareGPT’s short-prompt skew (median 25, p95 810 tokens); we report this faithfully rather than filtering. We rerun the throughput-v2 variant set on sharegpt_replay 
+
+alone (5 variants × 2 models × 2 pool budgets × 3 seeds = 60 cells, 1:56 wall time). Table 4 reports per-variant aggregates with paired bootstrap CIs against fixed_dual_mr05 . Figure 5 contrasts the per-workload goodput ratios. The replay confirms the §4.3 mechanism story rather than the V1 framing. avmp_dynamic_b128 records 2.33 OOMs per cell, identi-cal to fixed_dual_mr05 (bootstrap CI on the per-cell delta: [0, 0]), so the 2.36 × goodput ratio cannot arise from OOM avoidance. 
+
+avmp_static_mr05 produces an almost identical 2.48 × ratio with 
+
+> 6Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference
+
+Table 4: ShareGPT trace replay: per-variant aggregates with paired bootstrap CIs vs fixed_dual_mr05 (↑ higher goodput is better). 60 cells (5 variants × 2 models × 2 pool budgets × 3 seeds, 1:56 wall time, B=10000); * marks CIs that exclude the null. All AVMP variants tie fixed_dual_mr05 on OOM count (per-cell delta CI [0, 0]); the 2.36 × goodput advantage comes from faster per-call service, not OOM avoidance (see §4.4). 
+
+Variant ¯𝑁 OOM Goodput (req/s) ¯𝐵 𝑝 50 Δ𝑁 OOM vs fixed_dual_mr05 (95% CI) Goodput ratio (95% CI) padded_unified 78.4 1129 155 76.1 [32.2, 127] * 4.62 × [2.45, 11.4] *
+
+fixed_dual_mr05 2.33 244 155 – –fixed_dual_mr09 67.8 270 155 65.5 [37.3, 94.8] * 1.10 × [0.58, 2.53] avmp_static_mr05 2.33 606 155 0.00 [0.00, 0.00] 2.48 × [1.42, 6.05] *
+
+avmp_dynamic_b128 2.33 578 155 0.00 [0.00, 0.00] 2.36 × [1.33, 5.65] *uniform short  
+
+> mixed long
+> agentic burst
+> sharegpt replay
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> 12
+> 14
+> 16
+> avmp\_dynamic\_b128 / fixed\_dual\_mr05 goodput
+> 12.93x
+> 2.19x 1.83x
+> 2.36x
+> AVMP goodput advantage on synthetic and ShareGPT workloads
+
+Figure 5: AVMP goodput ratio vs fixed_dual_mr05 per work-load ( ↑ higher is better; dashed line = unity). Error bars are paired bootstrap 95% CIs. ShareGPT lands at 2.36 ×, be-tween agentic_burst ’s 1.83 × and mixed_long ’s 2.39 ×, and well under the synthetic uniform_short extreme of 13.30 ×.The synthetic short-prompt workload inflates the headline; ShareGPT is the realistic central-tendency estimate. 
+
+the same zero OOM delta, consistent with the §4.3 finding that the per-call speedup is attributable to the virtual-handle layer rather than the dynamic rebalancer. The 95% CI on the dynamic ratio is wide ( [1.33 , 5.65 ]) due to the heavy-tailed prompt distribution producing high per-cell variance, but it cleanly excludes the unit ratio. ShareGPT’s 2.36 × ratio is much smaller than the synthetic 
+
+uniform_short headline of 13.30 ×. The synthetic workload’s uni-form 128–1024 prompt-token distribution is a deliberate stress test for the KV pool path and overstates the per-call service gap; ShareGPT’s heavy-tailed but predominantly short prompts (median 25 tokens, p95 810) trigger the same mechanism but at a more real-istic magnitude. We treat the 2.36 × as the primary point estimate for prompt distributions in the ShareGPT shape, and the 13.30 ×
+
+synthetic figure as an upper bound for the same allocator on a workload tuned to maximize the effect. 
+
+## 4.5 Sensitivity Analysis 
+
+We conduct a two-stage sensitivity analysis to identify the dominant parameters governing the dynamic rebalancing state machine. 1 2 4 8 16 32 64 128 256 
+
+> Migration batch size B (log2 scale)
+> 0
+> 50
+> 100
+> 150
+> 200
+> 250
+> 300
+> 350
+> 400
+> Total OOM events
+> Stage 1 sweep of OOM events vs migration batch size B (per workload)
+> uniform short
+> mixed long
+> agentic burst
+
+Figure 6: 𝑁 OOM variance as a function of migration batch size 
+
+𝐵 ∈ { 1, . . . , 256 } (↓ lower is better). Solid lines plot AVMP per workload; dotted reference lines mark the fixed_dual_mr05 
+
+static baseline for the same workload. 
+
+In Stage 1, we sweep the migration_batch_size parameter across 9 values ranging from 1 to 256. The results confirm our hy-pothesis that migration batch size acts as the dominant performance axis. We select b128 as the default. Cross-workload, b128 records 510.0 OOMs versus b256’s 509.3 OOMs, a 0.7 OOM gap within per-cell standard deviation (0.8 to 3.0). However, b128 migrates 298.67 MiB versus b256’s 336.00 MiB per cell on average, a 11.1% reduc-tion in migration churn. Per-workload optima vary slightly (b4 for 
+
+uniform_short , b128 for mixed_long , b256 for agentic_burst ), but all values within b64, b128, b256 cluster within 13 OOMs cross-workload. We choose b128 as the conservative point (Figure 6). Table 5 details the complete Stage 1 distributions. In Stage 2, we evaluate trigger threshold sensitivity at the b128 
+
+configuration. We sweep four variants combining threshold_high 
+
+(0.10, 0.20) and threshold_low (0.02, 0.10). We pre-registered hy-potheses that lower high thresholds would benefit mixed_long and lower low thresholds would benefit bursty workloads. The data rejects both hypotheses. All four threshold variants result in iden-tical OOM counts (510.0), identical rebalance event counts, and byte-identical total migrated bytes. Thresholds have a marginal effect within the sampled ranges (Figure 7). Table 6 confirms the performance invariance across threshold bounds. This negative result narrows the design space: 
+
+> 7An Xuan Nguyen
+
+Table 5: Stage 1 sweep over migration batch size 𝐵 : per-workload 𝑁 OOM for 𝐵 ∈ { 1, . . . , 256 } (↓ lower is better). Cells report mean ±𝜎 
+
+where 𝜎 is propagated across 12 cells via √︃ Í𝑖 𝜎 2 
+
+> 𝑖
+
+from per-cell std across 3 seeds. Bold = best per column; underline = second best (ranked on means). 
+
+batch_size uniform_short mixed_long agentic_burst Total 1 7.0 ± 1.2 389.3 ± 12.2 155.7 ± 13.8 552.0 ± 18.4 2 8.0 ± 1.8 390.3 ± 14.4 156.0 ± 14.2 554.3 ± 20.3 4 6.7 ± 1.9 386.0 ± 17.5 159.3 ± 10.4 552.0 ± 20.5 8 8.3 ± 1.3 389.3 ± 20.7 153.3 ± 12.2 551.0 ± 24.1 16 7.7 ± 1.5 387.3 ± 18.3 154.0 ± 12.2 549.0 ± 22.1 32 8.0 ± 1.3 372.3 ± 14.8 144.3 ± 10.0 524.7 ± 17.9 64 8.0 ± 1.3 375.0 ± 16.6 138.3 ± 9.5 521.3 ± 19.1 128 9.0 ± 1.8 364.3 ± 15.2 136.7 ± 10.6 510.0 ± 18.6 256 7.3 ± 1.8 366.0 ± 20.3 136.0 ± 10.4 509.3 ± 22.9 AVMP dynamic (b=128)     
+
+> th_high=0.10
+> th_high=0.20
+> th_low=0.02
+> th_low=0.10
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> Total OOM events (cross-workload)  510.0 510.0 510.0 510.0 510.0
+> Stage 2 sweep where threshold variants all tie with stage 1 b128 reference
+
+Figure 7: Stage 2 threshold sensitivity ( ↓ lower is better). Bars are total 𝑁 OOM across 12 cells × 3 workloads = 36 measure-ments for each of 4 threshold variants plus the b128 reference. All five bars land at 510.0, confirming the stage-2 null result: threshold tuning within the sampled ranges has no measur-able effect on OOM count at fixed 𝐵 = 128 .
+
+future work on AVMP should focus on migration batch size rather than threshold tuning. 
+
+## 4.6 Limitations 
+
+We note four limitations in the current AVMP prototype design. First, the system requires a 2 × VRAM footprint trade-off (Fig-ure 8). We size the backing stores to the maximum possible capacity of both pools combined. AVMP peaks at 9 GiB on a 4 GiB pool budget to enable zero-copy migration. Integrating cuMemMap would remove this overhead by dynamically mapping virtual addresses to physical pages, similar to the approach in vTensor [16]. Second, we execute the allocator as a pure Python prototype without Triton or CUDA kernels. This validates allocator semantics; integration with Triton kernels and real model runtime is future work. Third, our evaluation supplements synthetic prompts with a ShareGPT-Vicuna trace replay (§4.4), which lands the AVMP-vs-baseline goodput ratio at 2.36 × (95% CI [1.33 , 5.65 ]) - well below the padded_unified 
+
+> fixed_dual (mr=0.5)
+> AVMP static (mr=0.5)
+> AVMP dynamic (b=128)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> 10000
+> Peak reserved VRAM (MiB)
+> 4,779 ± 1,132
+> 5,120 ± 0
+> 8,875 ± 1,132
+> 9,216 ± 0
+> Peak reserved memory shows AVMP's 2x physical-footprint cost
+
+Figure 8: Peak reserved VRAM trade-off for dynamic alloca-tion; lower VRAM is better in absolute terms, but AVMP inten-tionally trades 2 × VRAM for capacity migration headroom. Bars show mean across 12 cells with error bars at ±1𝜎 (cross-cell standard deviation), and value labels report mean ± 𝜎 .
+
+synthetic 13 .30 × on uniform_short and consistent with the 2.39 ×
+
+on mixed_long . The ShareGPT replay uses a word-count proxy for token lengths and a deterministic per-tick arrival schedule, so it captures the prompt-length distribution faithfully but not the temporal arrival semantics of real production traffic. Adversarial workloads, multi-tenant scheduling effects, and SLO-driven admis-sion control remain unevaluated; Alpaca [ 14 ] and full HuggingFace conversation streams are natural next-step traces. Finally, we test strictly on a single GPU. Extending AVMP to multi-GPU environments requires implementing tensor parallelism with cross-device virtual pool sizing synchronization. 
+
+Failure modes. AVMP does not help in several allocator regimes. When both pools simultaneously approach saturation, the rebalanc-ing trigger fires but finds no donor pool with free fraction above 
+
+threshold_high , so the allocator cannot rebalance and falls back to the current partition’s admission behavior; in this regime AVMP provides no additional capacity advantage over a static partition. When migration_batch_size is mistuned to extreme values, the 
+
+> 8Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference
+
+Table 6: Stage 2 threshold sweep at b128 ( ↓ lower total_oom is better): all four threshold variants and the b128 reference yield byte-identical OOM means and identical rebalance counts. The ± values on total_oom propagate per-cell std across 12 cells via √︃ Í𝑖 𝜎 2 
+
+> 𝑖
+
+and are also identical, confirming the tie at the distribution level. 
+
+Variant threshold_low threshold_high total_oom ( ↓) rebalance_count avmp_dynamic_b128 0.05 0.30 510.0 ± 18.6 84 avmp_dynamic_b128_th_high_010 0.05 0.10 510.0 ± 18.6 84 avmp_dynamic_b128_th_high_020 0.05 0.20 510.0 ± 18.6 84 avmp_dynamic_b128_th_low_002 0.02 0.30 510.0 ± 18.6 84 avmp_dynamic_b128_th_low_010 0.10 0.30 510.0 ± 18.6 84 allocator either migrates too slowly to recover from CapacityError (at 𝐵 = 1) or incurs higher migration churn without proportional OOM improvement (at 𝐵 ≥ 256 , see Figure 6 and Table 5). Invalid configurations where threshold_low ≥ threshold_high produce undefined transition semantics; the prototype includes a validation check but does not formally prove allocator invariants. The logical operation counter uses a 64-bit integer with no wraparound risk in realistic deployment lifetimes, but distributed multi-instance deployments would require additional synchronization beyond the current single-process design. 
+
+## 4.7 Reproducibility 
+
+The full sweep harness, generated tables and figures, paper source, and pre-registered analysis protocol are available at https://github. com/codepawl/cachepawl. The 180-cell sweep completes in 16:14 wall time on a single NVIDIA RTX 3060 12GB. Event-deterministic fields (OOM counts, rebalance events, migrated bytes) reproduce byte-identically across reruns; goodput and time-to-first-OOM de-pend on wall-clock execution speed and are not subject to byte-identical reproducibility. 
+
+## 5 Related Work 5.1 Cache Management for LLM Inference 
+
+Production inference engines optimize transformer serving through paged memory allocation. Systems like PagedAttention and vLLM [ 7] manage the KV cache by dividing sequences into fixed-size blocks, reducing fragmentation and enabling efficient scatter-gather memory access. High-performance kernel libraries, such as Flash-Infer [ 17 ], and production execution engines, like TensorRT-LLM, adopt similar block-based abstractions. These systems handle a sin-gle, homogeneous cache type well. They assume uniform memory access patterns and predictable block scaling tied directly to se-quence length. AVMP extends this page-based paradigm to support two physically heterogeneous cache types. AVMP complements existing attention managers by adding a second pool type, not replacing them. 
+
+## 5.2 Hybrid Architecture Serving 
+
+Recent systems extend inference engines to support hybrid ar-chitectures containing both State Space Model and transformer layers [ 3 –5, 8, 11 ]. SGLang provides production serving for these models using a static dual-pool approach [ 20 ]. It provisions a 
+
+HybridReqToTokenPool for attention and a HybridLinearKVPool 
+
+for SSM state. Operators configure the partition at engine startup via the mamba_full_memory_ratio parameter. This rigidity causes capacity failures when prompt distributions shift. As we demon-strate in §4, a default 0.9 ratio triggers 1221 OOM events compared to 552 OOMs at a 0.5 ratio on identical workloads. Alternatively, vTensor introduces GPU virtual memory manage-ment for KV caches using hardware features to decouple physical memory mapping from virtual address spaces [ 16 ]. While vTensor targets a single cache type to reduce fragmentation, AVMP applies this virtual abstraction to two heterogeneous pools. AVMP con-tributes a unified virtual handle system combined with runtime capacity rebalancing, addressing both the correctness requirements and the adaptivity challenges in hybrid serving. 
+
+## 5.3 Dynamic Resource Allocation 
+
+Inference engines use runtime adaptation to maximize hardware utilization. Continuous batching strategies adapt batch sizes dynam-ically at iteration boundaries to increase throughput [ 18 ]. AVMP adapts pool capacity at request-level boundaries, using a more con-servative trigger placed strictly in the allocation path. Memory eviction strategies, such as sliding window attention and atten-tion sink retention [ 15 ], discard older tokens dynamically under memory pressure. Token-importance heuristics like H2O retain heavy-hitter tokens [ 19 ]. These techniques operate within a single pool; AVMP migrates capacity across two heterogeneous pools. At the framework level, tools like the PyTorch 
+
+expandable_segments allocator manage dynamic segment growth directly in CUDA. This allocator operates below the inference engine abstractions. AVMP operates at the pool level, translating application-level CapacityError exceptions into phys-ical capacity migrations between distinct cache implementations. AVMP’s CapacityError-triggered migration is conservative: it fires only when allocation would otherwise fail, not preemptively on transient pressure. Recent work on workload-aware request placement, such as Splitwise [ 9 ], separates prompt and decode phases across hardware to exploit phase-specific resource demands. AVMP is orthogonal to phase splitting and could combine with such schedulers. 
+
+## 5.4 Virtual Memory for ML Serving 
+
+AVMP can be understood as applying the virtual/physical decou-pling approach of vAttention and vTensor to a heterogeneous two-pool setting, with added runtime capacity migration between pools. 
+
+> 9An Xuan Nguyen
+
+Recent work explores GPU virtual memory primitives for ML work-loads. vAttention [ 10 ] uses CUDA virtual memory APIs ( cuMemMap )to dynamically map physical pages without contiguous tensor reser-vation, addressing fragmentation in KV cache management. vTen-sor [ 16 ] extends this approach to flexible tensor management with hardware virtual memory features. Both target a single homoge-neous cache type. AVMP differs by managing two heterogeneous pools (KV and SSM) under one virtual address space and provid-ing dynamic capacity rebalancing across them. The current AVMP prototype implements virtual handle indirection in software; in-tegrating cuMemMap -backed physical mapping is future work to address the 2 × VRAM overhead reported in §4.6. 
+
+## 6 Discussion 6.1 Paper Configuration 
+
+We select avmp_dynamic_b128 as the default configuration; see §4.5 for the migration-batch-size sweep that motivates this choice. 
+
+## 6.2 Future Work 
+
+We plan to explore workload-prediction heuristics for proactive capacity rebalancing before allocation exceptions occur. Triton kernel integration and a third heterogeneous pool (e.g., dedicated KV-prefix-cache) are planned extensions. 
+
+## 6.3 Production Hypothesis 
+
+We frame the production impact of AVMP as a hypothesis to be tested, not a measured outcome. A Jamba 1.5 Mini deployment requires approximately 24 GiB VRAM per H100 80GB instance for model weights and activations, leaving approximately 56 GiB for KV cache and SSM state combined. Under static dual-pool partition-ing at the SGLang default mamba_full_memory_ratio of 0.9, our cross-workload data records 1221 OOM events versus 552 OOMs at the mr=0.5 ratio, indicating that default static configurations under-utilize one pool while the other saturates. Our dynamic rebalancing reduces OOM by an additional 7.6% (510 versus 552 cross-workload) over the best static configuration, with paired-bootstrap 95% CI on the per-cell delta of [− 5.83 , −1.39 ] OOMs/cell ( [3.0% , 12 .7% ]
+
+reduction). The ShareGPT trace replay (§4.4) recovers a 2.36 × good-put ratio against fixed_dual_mr05 ([1.33 , 5.65 ]) with zero OOM delta, indicating that the per-call service mechanism observed on 
+
+uniform_short also holds for real prompt distributions, though at lower magnitude than the synthetic extreme. Going from this hypothesis to a production SLA claim still requires a cuMemMap -backed implementation to remove the current 2× VRAM overhead, integration with a real scheduler, and trace-driven evaluation with admission control, output-length distributions, and tenant mix. OOM count reduction does not directly translate to concurrent sequence capacity, which depends on scheduler admission policy, prefill/decode split, latency SLO, output length distribution, and model kernel behavior outside our evaluation scope. We do not project absolute dollar savings here because real-world cost de-pends on instance pricing, utilization rates, and workload mix, all outside our evaluation scope. 
+
+## 7 Conclusion 
+
+Hybrid models require memory management systems capable of serving physically asymmetric cache types under dynamic load. We presented Asymmetric Virtual Memory Paging (AVMP), an alloca-tor that provides a unified virtual handle space spanning heteroge-neous backing stores and dynamically rebalances capacity triggered strictly by allocation exceptions. Our dynamic allocator records a 13.3 × goodput improvement on uniform_short workloads and a 7.6% cross-workload Out-of-Memory reduction compared to the best static baselines. Future work integrates this dynamic memory abstraction directly into production inference engines to support long-context hybrid models. 
+
+## Acknowledgments 
+
+We thank the authors of vLLM, SGLang, and vTensor for prior systems work that informed this design. We also acknowledge issue #37121 reporters in the vLLM repository for documenting the hybrid memory overestimation behavior that motivates this paper. 
+
+## References                         
+
+> [1] Aleksandar Botev, Soham De, Samuel L. Smith, Anushan Fernando, George-Cristian Muraru, Ruba Haroun, Leonard Berrada, Razvan Pascanu, Pier Giuseppe Sessa, Robert Dadashi, Leonard Hussenot, Johan Ferret, Sertan Girgin, Olivier Bachem, Alek Andreev, Kathleen Kenealy, Thomas Mesnard, Cassidy Hardin, Surya Bhupatiraju, Shreya Pathak, Laurent Sifre, Morgane Riviere, Mihir Sanjay Kale, Juliette Love, Pouya Tafti, Armand Joulin, Noah Fiedel, Evan Senter, Yu-tian Chen, Srivatsan Srinivasan, Guillaume Desjardins, David Budden, Arnaud Doucet, Sharad Vikram, Adam Paszke, Trevor Gale, Sebastian Borgeaud, Charlie Chen, Andy Brock, Antonia Paterson, Jenny Brennan, Meg Risdal, Raj Gundluru, Nesh Devanathan, Paul Mooney, Nilay Chauhan, Phil Culliton, Luiz Gustavo Martins, Elisa Bandy, David Huntsperger, Glenn Cameron, Arthur Zucker, Tris Warkentin, Ludovic Peran, Minh Giang, Zoubin Ghahramani, Clément Farabet, Koray Kavukcuoglu, Demis Hassabis, Raia Hadsell, Yee Whye Teh, and Nando de Frietas. 2024. RecurrentGemma: Moving Past Transformers for Efficient Open Language Models. arXiv preprint arXiv:2404.07839 (2024). arXiv:2404.07839 [2] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems (NeurIPS) , Vol. 35. 16344– 16359. arXiv:2205.14135 [3] Tri Dao and Albert Gu. 2024. Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality. In Proceedings of the 41st International Conference on Machine Learning (ICML) . arXiv:2405.21060 [4] Xin Dong, Yonggan Fu, Shizhe Diao, Wonmin Byeon, Zijia Chen, Ameya Sunil Ma-habaleshwarkar, Shih-Yang Liu, Matthijs Van Keirsbilck, Min-Hung Chen, Yoshi Suhara, Yingyan Lin, Jan Kautz, and Pavlo Molchanov. 2024. Hymba: A Hybrid-head Architecture for Small Language Models. arXiv preprint arXiv:2411.13676
+> (2024). arXiv:2411.13676 [5] Paolo Glorioso, Quentin Anthony, Yury Tokpanov, Anna Golubeva, Vasudev Shyam, James Whittington, Jonathan Pilault, and Beren Millidge. 2024. The Zamba2 Suite: Technical Report. arXiv preprint arXiv:2411.15242 (2024). arXiv:2411.15242 [6] Albert Gu and Tri Dao. 2023. Mamba: Linear-Time Sequence Modeling with Selective State Spaces. arXiv preprint arXiv:2312.00752 (2023). arXiv:2312.00752 [7] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP ’23) .ACM. arXiv:2309.06180 [8] Opher Lieber, Barak Lenz, Hofit Bata, Gal Cohen, Jhonathan Osin, Itay Dalmedi-gos, Erez Safahi, Shaked Meirom, Yonatan Belinkov, Shai Shalev-Shwartz, Omri Abend, Raz Alon, Tomer Asida, Amir Bergman, Roman Glozman, Michael Gokhman, Avshalom Manevich, Nir Ratner, Noam Rozen, Erez Shwartz, Mor Zus-man, and Yoav Shoham. 2024. Jamba: A Hybrid Transformer-Mamba Language Model. arXiv preprint arXiv:2403.19887 (2024). arXiv:2403.19887 [9] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. In Proceedings of the 51st Annual Interna-tional Symposium on Computer Architecture (ISCA) . 118–132. arXiv:2311.18677 doi:10.1109/ISCA59077.2024.00019 10
+
+Asymmetric Virtual Memory Paging for Hybrid Mamba-Transformer Inference 
+
+[10] Ramya Prabhu, Ajay Nayak, Jayashree Mohan, Ramachandran Ramjee, and Ashish Panwar. 2025. vAttention: Dynamic Memory Management for Serving LLMs without PagedAttention. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), Volume 1 . 1133–1150. arXiv:2405.04437 doi:10.1145/3669940. 3707256 [11] Liliang Ren, Yang Liu, Yadong Lu, Yelong Shen, Chen Liang, and Weizhu Chen. 2025. Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling. In International Conference on Learning Representations (ICLR) . arXiv:2406.07522 [12] Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. 2024. FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision. In Advances in Neural Information Processing Systems (NeurIPS) .arXiv:2407.08608 [13] ShareGPT. 2023. ShareGPT: Share Your Wildest ChatGPT Conversations with One Click. https://sharegpt.com/. Deprecated public conversation sharing service; accessed 2026-05-20. [14] Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li, Carlos Guestrin, Percy Liang, and Tatsunori B. Hashimoto. 2023. Stanford Alpaca: An Instruction-following LLaMA Model. https://github.com/tatsu-lab/stanford_ alpaca. [15] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In International Conference on Learning Representations (ICLR) . arXiv:2309.17453 [16] Jiale Xu, Rui Zhang, Cong Guo, Weiming Hu, Zihan Liu, Feiyang Wu, Yu Feng, Shixuan Sun, Changxu Shao, Yuhong Guo, Junping Zhao, Ke Zhang, Minyi Guo, and Jingwen Leng. 2024. vTensor: Flexible Virtual Tensor Management for Efficient LLM Serving. arXiv preprint arXiv:2407.15309 (2024). arXiv:2407.15309 [17] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. 2025. FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving. In Proceedings of Machine Learning and Systems (MLSys) , Vol. 7. arXiv:2501.01005 [18] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’22) . 521–538. [19] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H 2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In Advances in Neural Information Processing Systems (NeurIPS) , Vol. 36. arXiv:2306.14048 [20] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems (NeurIPS) . arXiv:2312.07104 11
