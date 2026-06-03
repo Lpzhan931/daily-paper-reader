@@ -1,0 +1,750 @@
+Title: GliDe with a CaPE: A Low-Hassle Method to Accelerate Speculative Decoding
+
+URL Source: https://openreview.net/pdf?id=mk8oRhox2l
+
+Number of Pages: 17
+
+Markdown Content:
+# GLI DE with a C APE: A Low-Hassle Method to Accelerate Speculative Decoding 
+
+Cunxiao Du 1 Jing Jiang 1 Xu Yuanchen 2 Jiawei Wu 2 Sicheng Yu 1 Yongqi Li 3 Shenggui Li 4 Kai Xu 4
+
+Liqiang Nie 5 Zhaopeng Tu 6 Yang You 2
+
+## Abstract 
+
+Speculative decoding is a relatively new decoding framework that leverages small and efficient draft models to reduce the latency of LLMs. In this study, we introduce G LI DE and C APE, two low-hassle modifications to vanilla speculative decoding to further improve the decoding speed of a frozen LLM. Specifically, GLI DE is a modified draft model architecture that reuses the cached keys and values from the target LLM, while C APE is a proposal expansion method that uses the draft model’s confidence scores to help select additional candidate tokens for verification. Extensive experiments on different benchmarks demonstrate that our proposed GLI DE draft model significantly reduces the expected decod-ing latency. Additional evaluation using walltime reveals that G LI DE can accelerate Vicuna models up to 2.17x and further extend the improvement to 2.61x with C APE. We release our code, data, and the trained draft models at https: //github.com/NonvolatileMemory/ GliDe_with_a_CaPE_ICML_24 .
+
+## 1. Introduction 
+
+Large language models (LLMs) have become increasingly powerful and are now adopted for a wide range of applica-tions such as machine translation (Jiao et al., 2023) and fact verification (Zhang & Gao, 2023; 2024). Many LLM appli-cations require real-time responses, e.g., machine translation systems (Yu et al., 2022b). However, LLMs are typically based on the autoregressive transformer architecture, which generates output tokens step by step and thus suffers from high latency, particularly with larger model sizes. To re-
+
+> 1
+
+Singapore Management University 2National University of Singapore 3The Hong Kong Polytechnic University 4HPC-AI Tech. 
+
+> 5
+
+Harbin Institute of Technology (Shenzhen) 6Tencent AI Lab. Cor-respondence to: Jing Jiang <jingjiang@smu.edu.sg >, Zhaopeng Tu <zptu@tencent.com >, Yang You <youy@comp.nus.edu.sg >.
+
+Proceedings of the 41 st International Conference on Machine Learning , Vienna, Austria. PMLR 235, 2024. Copyright 2024 by the author(s). target model: Vicuna-7b                                                
+
+> Acceptance Rate (%)
+> 0
+> 50
+> 100
+> 00.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9
+> Draft Model Output Confidence
+> (b)Confidence v.s. Acceptance Rate, how to utilize it?
+> (a) How Speculative with KV Cache Decoding works?
+> Step N: Decoding
+> Step N-1: Verification & KV Cache
+> Target Model Draft Model Target Model Draft Model
+> Step N+1: Verification & KV Cache
+> Step N: Decoding
+> Step N-1: Verification
+> Step N+1: Verification
+> Vanilla Speculative Decoding Speculative Decoding
+> Draft Model
+> with Confident Output:
+> Shelf
+> I need less
+> candidate tokens!
+> Draft Model
+> with Unconfident Output:
+> Sky
+> I need more
+> candidate tokens!
+> w/ KV Cache
+> Cat on the __
+> Fish in the __
+
+Figure 1. (a) Comparison between vanilla speculative decoding and our G LI DE. (b) There is a positive correlation between accep-tance rate and confidence score. 
+
+duce LLM serving latency, speculative decoding (SD) has been proposed as a viable solution (Stern et al., 2018; Chen et al., 2023; Leviathan et al., 2023). The key idea of SD is to use a smaller and more efficient draft model to predict the next γ tokens in the output sequence and then use the original LLM, which is called the target model, to verify the proposed γ tokens in parallel . SD hinges on the insight that not all output tokens are equally difficult to predict; employing a smaller but more efficient draft model that can correctly predict those “easy” tokens helps save inference time. The success of SD relies heavily on the acceptance rate of the tokens proposed by the draft model, or in other words, how likely the target model will accept the proposed tokens. Therefore, the design of the draft model and its proposal mechanism play a central role in accelerating SD. Recent work on SD acceleration has explored two promis-ing directions. The first direction relies on the intuition that the more closely the draft model’s predictions align with those of the target model, the greater the likelihood of the proposed tokens being accepted. Along this line, researchers have proposed to align the draft model with the target model through distillation training (Zhou et al., 2024; Miao et al., 2023; Liu et al., 2023) or to use the 1GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+same model for both speculation and verification (i.e., self-speculative decoding) (Fu et al., 2023). Second, at each round of speculation, one can ask draft models to propose multiple candidate sequences for the target model to verify, thereby increasing the chance of acceptance. In this vein, recent work explores employing multiple draft models to propose different candidate token sequences (Miao et al., 2023) and using multiple prediction heads, one for each position, to propose multiple candidate token sequences in a non-autoregressive manner (Cai et al., 2023). In this work, we propose new solutions in the two afore-mentioned directions that are easy to implement and yet highly effective for accelerating SD. Our solutions are moti-vated by the following insights. First, we make an important observation that the draft model does not need to work sepa-rately from the target model during inference; by leveraging the KV (key-value) cache of the target model, the draft model can propose tokens that are more likely to be ac-cepted by the target model. Second, we note that previous attempts to propose multiple candidate sequences are not ideal; they either rely on multiple draft models (Miao et al., 2023), which is not always feasible in practice, or use non-autoregressive decoding to keep the draft model’s inference time low but sacrifice the fluency of the proposed candidate sequences (Cai et al., 2023). We propose a new solution that, without imposing much additional computational or memory requirements, simply expands a single candidate sequence with additional candidate tokens at each position. Specifically, we introduce a cross-attention layer in the draft model’s network architecture. Although its implementation appears straightforward, this layer enables the draft model to access the target model’s KV cache, a process that is empirically proven to be highly effective in our experiments. We metaphorically describe this cross-attention mechanism as “catching a glimpse” of the KV cache and name our model G LI DE, an acronym for Gl impse Draft Mod el. The idea is illustrated in Figure 1(a). As we can see from the figure, because the target model stores its computed keys and values corresponding to the tokens it has verified in the last round of verification, these KV cache entries are free for the draft model to use. By re-using these keys and values, the draft model is more likely to behave similarly to the target model. To expand a proposed candidate sequence with additional candidate tokens, a key question is how many additional top-ranked tokens we should include at each position. Al-though a naive solution is to use a pre-defined and fixed number, we suspect that we should provide more candidate tokens at a position where the top-1 candidate token has a low confidence score. To verify whether this hypothesis holds, we first conduct a preliminary experiment to check whether a proposed token’s prediction confidence is corre-lated with the chance of its acceptance. Figure 1(b) shows the experiment results. We can see that indeed there is a clear positive correlation between the draft model’s predic-tion confidence of a proposed token and the token’s chance of being accepted by the target model. This observed corre-lation motivates us to design a Confidence-aware Proposal 
+
+Expansion (C APE) method that dynamically determines the number of additional candidate tokens to include in an expanded proposal sequence. We conduct extensive experiments to evaluate the effective-ness of G LI DE and C APE. Experiments on four datasets using Vicuna and Mistral as target models show that it is highly effective for G LI DE to attend to the target model’s KV cache, leading to an improvement of the acceptance rate of up to 23 .5% , and G LI DE significantly outperforms several baseline draft models, with an average improve-ment of 19 .9% in terms of acceptance rate, compared with previous draft models. Additional experiments in-corporating C APE into G LI DE reveal that C APE can achieve speedups ranging from 2.50x to 2.61x on differ-ent Vicuna models (Chiang et al., 2023) based on wall-time. The code and pretrained draft models can be found in https://github.com/NonvolatileMemory/ GliDe_with_a_CaPE_ICML_24 .
+
+## 2. Related Work 
+
+Speculative decoding (Xia et al., 2024) was first proposed as block-wise parallel decoding. Stern et al. (2018) trained multiple auxiliary models to predict γ future tokens in par-allel and then used the original model to verify the future tokens in parallel. Inspired by this idea, Chen et al. (2023); Kim et al. (2023); Yuan et al. (2023); Leviathan et al. (2023); Xia et al. (2023) used an independent draft model to propose a short sequence of tokens for the target model to verify. There were also draft model-free works (He et al., 2023; Yang et al., 2023; Fu et al., 2023; Zhang et al., 2023) for speculative decoding. Leviathan et al. (2023) pointed out that the main factors for speedup are the efficiency of the draft model and the acceptance rate of the proposed tokens. To improve the efficiency of the draft model, Cai et al. (2023) proposed adding multiple LM Heads to predict future tokens at differ-ent positions independently. To improve the acceptance rate, Miao et al. (2023) proposed to generate multiple candidate sequences, which can be efficiently verified through a tree verification process (Miao et al., 2023; Cai et al., 2023; Sun et al., 2023). Alternatively, distillation was used to train draft models that hopefully are similar to the target model. Zhou et al. (2024) proposed using sequence-level distilla-tion (Kim & Rush, 2016) via the draft model’s output, while Liu et al. (2023) resorted to online distillation to quickly adapt the draft model to the current context. 2GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+Our work focuses on the second factor, i.e., acceleration through improving the acceptance rate. GLI DE re-uses the target model’s KV cache to generate proposals more likely to be accepted, and C APE expands the proposals with additional highly-ranked candidate tokens to further increase the acceptance rate. 
+
+## 3. Background: Speculative Decoding (SD) 
+
+In vanilla SD, we assume that there is a powerful but slow LLM (i.e., the target model, denoted as MT) used to ver-ify the final output sequence. Meanwhile, a less powerful but faster language model (i.e., the draft model, denoted as MD) is used to propose candidate tokens. Let x≤t de-note the prefix or prompt from which the next tokens are to be proposed. SD works by first using the faster draft model MD to autoregressively generate the next γ tokens 
+
+(xt+1 , . . . , x t+γ ). We refer to this proposed candidate token sequence as a proposal . However, because the proposal may not be what the target model MT would have generated, the proposed tokens need to be verified by MT. MT can verify the γ tokens in parallel, which is much faster than autoregressive generation. The verification step returns the first n tokens ( 0 ≤ n ≤ γ) in the proposal that are accepted by MT based on some acceptance strategy. In addition, the verification step returns one more token x′ 
+
+> t+n+1
+
+for free. Then the sequence (xt+1 , . . . , x t+n, x ′
+
+> t+n+1
+
+) is appended to the original prefix x≤t to form the new prefix for the next round of speculation and verification. There are two acceptance strategies: speculative decoding and speculative sampling . Leviathan et al. (2023) show that the outputs of these two strategies are equivalent to the outputs of the target model with greedy search and random sampling decoding strategies, respectively. 
+
+## 4. Our Method: G LI DE with a C APE 
+
+As stated in §1, our method to accelerate SD consists of two parts: (1) We design a draft model called G LI DE that “catches a glimpse of” the KV cache computed during the 
+
+target model’s last round of verification to assist the draft model’s current round of proposal generation. (2) We pro-pose a proposal expansion mechanism called C APE that uses the confidence scores of the draft model to dynami-cally determine how many additional top-ranked tokens to include at each position in a proposal sequence. 
+
+4.1. G LI DE: Glimpse Draft Model 
+
+We assume that both the target and the draft models fol-low the standard decoder-only transformer architecture. To enable the draft model to take advantage of the hidden rep-resentations of the prefix tokens computed and cached by the target model, we propose a new architecture for the draft model called G LI DE (Glimpse Draft Model). G LI DE al-lows the draft model MD to re-use the cached key-value pairs in the target model MT, presumably making the dis-tribution of MD more consistent with that of MT without incurring much additional computational cost. Our MD will be trained from scratch based on the G LI DE architecture while MT is kept frozen. Specifically, assume that in the last round of speculation, 
+
+MD has proposed a sequence of tokens that is passed to 
+
+MT for verification. Then in the subsequent verification step, assume that MT accepts the sequence up to xt−1 and generates an additional token xt. After this verification step, we will keep only the KV cache for tokens up to position (t − 1) and discard the KV cache for those tokens rejected by MT. The left hand side of Figure 2 illustrates the verification process, where the grey cube represents the discarded KV cache. Now assume that given the prefix x≤t, the draft model 
+
+MD in its current round of speculation has proposed to-kens xt+1 to xt+i−1. Next, MD is going to propose the next token xt+i based on the prefix x<(t+i). In vanilla speculative decoding, MD works independently of MT. In our proposed G LI DE architecture, however, we want to re-use MT’s cached keys and values associated with the prefix tokens up to xt−1. To do so, we insert a cross-attention sub-layer between the self-attention sub-layer and the feed-forward sub-layer in each transformer layer of MD,as shown in the right hand side of Figure 2. This additional layer first projects the outputs between t and (t + i − 1) 
+
+from the self-attention sub-layer below into query vectors of a dimension that is compatible with MT’s keys and val-ues. Then this cross-attention sub-layer performs standard cross-attention between these queries from MD and the KV cache from MT. The resulting vectors will be passed to the feed-forward sub-layer above. Concretely, let h denote the number of heads in each self-attention sub-layer of MT. Let (Kl,j , V l,j ) denote the keys and values of the j-th head at the l-th layer of MT, where 
+
+Kl,j , V l,j ∈ R(t−1) ×dk . Let Hm ∈ Ri×dD represent the last i output vectors from the m-th self-attention sub-layer of 
+
+MD. These i vectors in Hm correspond to positions t to (t+
+
+i−1) . We intend to use these vectors from MD as queries to attend to the representations of the prefix tokens up to xt−1
+
+in MT. Because dD (the dimension of the hidden vectors in MD) is generally different from dk (the dimension of the keys in MT), and because MT has h attention heads, we first perform h linear projections to project Hm into h
+
+different query matrices, one for each head in MT:
+
+Qm,j = HmWj ,
+
+where j ∈ [1 , h ], and Wj ∈ RdD×dk are learnable parame-ters. To perform cross-attention, each layer in MD attends 3GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding autoregressively proposes next 4 tokens [ x5, x 6, x 7, x 10 ]                                                      
+
+> for Step N+1 verification.
+> does parallel verification [x2, x 3, x 8, x 9]from Step
+> N-2,and delivers KV Cache for Step Nspeculation.
+> KV Cache ×
+> Self -Attention Layer
+> Cross -Attention Layer
+> Current Query of ℳD
+> Input tokens Input tokens
+> Step N-1:
+> Verification
+> ❌❌❌
+> KV Cache
+> of ℳT
+> ×
+> Self -Attention Layer
+> Step N:
+> Speculation
+> 𝑁 !𝑁 "
+> x1x2x3x8x9history
+> x8x9history x1x2x3
+> x2x3x4x8x9
+> x1history x2x3x4x5x6x7
+> x4x5x6x7
+> x5x6x7x10
+> ℳDℳT
+
+Figure 2. Overview of G LI DE. We insert the cross-attention layer in the Draft Model ( MD ) and let it glimpse the KV cache of the target model ( MT ) from the last verification. 
+
+to a corresponding layer in MT, counting from the top lay-ers. In this way, we try to use the KV cache from the upper layers of MT because presumably they are more contextu-alized and therefore better representations. Specifically, let 
+
+NT and ND denote the numbers of layers of MT and MD,respectively. For the m-th layer in MD, we let it attend to the l-th layer in MT, where l = NT − ND + m, through multi-head attention as follows: MultiHead (Qm, K l, V l) = Concat (hd 1, . . . , hd h)W O ,
+
+where hd j = SoftMax ( Qm,j (Kl,j )⊺
+
+√dk
+
+)V l,j .
+
+Here W O ∈ Rhd k ×dD is a standard learnable parameter matrix that projects the concatenated heads back to dimen-sion dD. MultiHead (Qm, K l, V l) will then be concatenated with the other output vectors (up to position t) from the m-th self-attention sub-layer of MD and fed into the m-th feed-forward sub-layer of MD, as shown in Figure 2. Although we could also attend to only the last layer of the KV cache, our preliminary experiments showed that using the last Nd layers gave slightly better performance. Because computation-wise attending to the last layer and attending to the last Nd layers do not have much difference, here we choose to attend to the last Nd layers of KV cache. 
+
+Block-wise Attention Mask. We train the draft model 
+
+MD from scratch similar to the standard training of autore-gressive decoder-only models. A main difference is that during training, the target model MT (which is kept frozen) is used to provide the KV cache for the cross-attention sub-layers of MD. However, care must be taken to ensure consistency between the training stage and the inference stage regarding the use of MT’s KV cache. Recall that at inference time when MD is used for speculation, after MT
+
+has verified tokens up to xt−1 and generated token xt, and when MD is about to speculate the (t + i)-th token, MD
+
+only has access to the KV cache in MD up to position (t−1) 
+
+rather than position (t + i − 1) . This can be considered a KV cache delay. When training the draft model MD, we need to simulate this delayed KV cache to ensure that the trained MD works well with delayed KV cache. To do so, we introduce a training mechanism with a block-wise attention mask as follows. We divide the training sequences into blocks of length L (which is set to be 5 in our experiments). During training, when the draft model 
+
+MD is predicting token xj that is in the i-th block of a sequence, in MD’s cross-attention sub-layer, we will use the representations of only the tokens in the i-th block to the left of xj as queries. These queries will attend to the KV cache in MT corresponding to the tokens in the first 
+
+(i − 1) blocks of the sequence but not tokens in the i-th block. Formally, the block-wise attention mask takes an attention matrix A as input and is defined as follows: Mask Block (Ajk ) = 
+
+(
+
+Ajk , if block (j) > block (k)
+
+−∞ , otherwise ,
+
+where block (j) is a function that returns the index of the block where token xj belongs. This attention mask is only used for the cross-attention sub-layers of the draft model during training and is not used for testing. 
+
+4.2. C APE: Confidence-Aware Proposal Expansion 
+
+Our C APE has two components: a proposal expansion mechanism and a corresponding verification mechanism. Figure 3 gives an overview of C APE. 
+
+Proposal Expansion. A standard proposal generated by a draft model given prompt x≤t consists of a sequence of γ
+
+4GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding ℳD  
+
+> Attention
+> is
+> all
+> that
+> 𝑺 (𝒑 𝟏 )=𝟎
+> all
+> All
+> the
+> the
+> that
+> you
+
+ℳT                     
+
+> PART 1: Proposal Expansion
+> is all
+> Attention
+> the All that you
+> PART 2: Verification
+> Original proposal Expanded proposal
+> is
+> all
+> 𝑺 (𝒑 𝟐 )=𝟏 𝑺 (𝒑 𝟑 )=𝟐
+> Query
+> Key
+> Attention
+> is
+> all
+> the
+> All
+> that
+> you
+> =∅
+> ={All }
+> ={that ,you }
+> Expansion Set
+
+ℳD ℳD
+
+Figure 3. Overview of C APE. 
+
+tokens, which we denote as (xt+1 , x t+2 , . . . , x t+γ ). These tokens have the highest probabilities at their corresponding positions as predicted by the autoregressive draft model. In C APE, we introduce a representation called expanded proposal that augments a standard proposal with a sequence of expansion sets, one for each token in the proposal. The expansion set Xi for xt+i in the proposal contains other top-ranked tokens at position (t + i). Formally, an expanded proposal is a sequence of tokens (xt+1 , x t+2 , . . . , x t+γ )
+
+where each token xt+i is associated with an expansion set 
+
+Xi = {x′ 
+
+> t+i,j
+
+}Ki 
+
+> j=1
+
+with each x′ 
+
+> t+i,j
+
+being a token and Ki
+
+being the size of Xi.With minor modifications to the standard proposal gener-ation procedure, an expanded proposal is constructed as follows. Let pD(·| x<t +i) denote the next token distribu-tion computed by the draft model MD. Similar to standard proposal generation, the token that has the highest proba-bility according to pD(·| x<t +i) is selected to be xt+i and appended to the proposal. Let pi = max pD(·| x<t +i) de-note the probability (which can be regarded as a confidence score) of predicting this xt+i. A function S(·) is then used to determine the size Ki of the expansion set Xi based on the confidence score pi. As discussed in §1, when the confi-dence pi is high, we expect the top-ranked xt+i to be correct with a high chance and therefore will use a small Ki. When 
+
+pi is low, we will use a relatively large Ki. Concretely, we set S(p) to be 7, 5, 3, and 1 for p in the ranges of (0 , 0.3] ,
+
+(0 .3, 0.6] , (0 .6, 0.8] , and (0 .8, 1] , respectively. Once Ki is determined, we will select Ki tokens (excluding xt+i) that have the highest probabilities according to pD(·| x<t +i) and place them in Xi. These tokens are the next best choices for position (t + i) other than xt+i.It is important to point out that identification of the highest-ranked tokens to be placed in Xi can be done while the draft model continues to autoregressively generate the following tokens beyond xt+i. Therefore, the construction of the ex-pansion sets does not slow down the draft model’s inference. It is also important to note that tokens in the expansion sets are not used for predicting future tokens. This is a key dif-ference from proposal expansion using beam search, where each of the top-k tokens at a position is used to generate subsequent tokens, resulting in expanded proposals in tree structures with many branches. Such beam search-based expansion would be much more expensive to compute and thus less efficient, which we will demonstrate in §5. 
+
+Verification of Expanded Proposals. Because our pro-posals now contain additional candidate tokens at each posi-tion, the verification mechanism also needs to be modified. We borrow ideas from the token tree verifier (Miao et al., 2023; Cai et al., 2023; Sun et al., 2023) and implement our verification procedure as follows. First, we linearize 
+
+an expanded proposal into a single sequence by simply ap-pending the tokens in the expansion sets to the end of the proposal. We then pass this sequence to MT for parallel verification with a special causal mask. The key idea of this mask is to ensure that each token, regardless of whether it is in the original proposal or in an expansion set, attends to only those tokens in the original proposal in front of this token and the token itself. Mathematically, the mask is defined as follows. Let P =(xt+1 , . . . , x t+β ) denote the linearized expanded proposal, where the first γ tokens are from the original proposal and the remaining tokens are from the expansion sets. Let pos (i)
+
+be a function that maps the token xt+i in P to the token’s original position. That means, for i > γ , pos (i) = j where 
+
+xt+i ∈ X j . Let A denote a β × β matrix representing the attention scores between the tokens in P. The mask function is defined as: Mask CAPE (A)ij =
+
+
+
+Aij if j ≤ γ and pos (i) > j Aij if i = j
+
+−∞ otherwise 
+
+.
+
+Here the condition j ≤ γ is to check whether xt+j is a token from the original proposal, the condition pos (i) > j is to ensure that token xt+i is after token xj , and the condition 
+
+i = j is for self-attention. The pseudo-code can be found in Appendix A. 
+
+## 5. Experiments 
+
+5.1. Settings Target and draft models. We select two widely-used LLMs, Vicuna (including 7b, 13b, and 33b) (Chiang et al., 2023) and Mistral (7b-instruct-v0.1) (Jiang et al., 2023), as target models. To make the draft model more efficient, we choose a wider and shallower architecture. Specifically, for 7b and 13b target models, we use set ND to 1, and for the 5GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+Models Cost GSM8K Fin.-Alp. Spider Code. 
+
+↓ (%) Acc. (%) E(Spd.) Acc. (%) E(Spd.) Acc. (%) E(Spd.) Acc. (%) E(Spd.) 
+
+MT Vicuna-7B  
+
+> LL AMA-68m
+
+7.7 51.6 1.46 49.7 1.41 19.2 0.89 34.8 1.11   
+
+> MDLL AMA-160m
+
+49.0 58.0 0.66 57.1 0.65 25.1 0.38 40.0 0.48  
+
+> GLI DE
+
+6.7 64.8 † 1.97 † 63.2 † 1.90 † 55.7 † 1.64 † 67.0 † 2.06 †
+
+MT Vicuna-13B  
+
+> LL AMA-68m
+
+6.2 50.2 1.51 49.3 1.48 19.0 0.94 32.7 1.13   
+
+> MDLL AMA-160m
+
+39.3 56.8 0.75 56.8 0.75 25.4 0.45 38.3 0.54  
+
+> GLI DE
+
+5.5 67.1 † 2.16 † 65.0 † 2.07 † 57.1 † 1.77 † 68.6 † 2.24 †
+
+MT Vicuna-33B  
+
+> LL AMA-68m
+
+4.6 49.1 1.57 46.5 1.50 30.0 1.16 31.5 1.19   
+
+> MDLL AMA-160m
+
+29.5 56.1 0.89 53.1 0.84 31.4 0.59 36.7 0.64  
+
+> GLI DE
+
+6.8 69.3 † 2.16 † 64.3 † 1.94 † 62.7 † 1.87 † 68.9 † 2.14 †
+
+MT Mistral-7B-Ins.   
+
+> MDLL AMA-45m ∗
+
+4.9 36.7 1.27 40.2 1.34 41.9 1.38 44.5 1.44  
+
+> GLI DE
+
+6.6 60.1 † 1.80 † 56.4 † 1.67 † 59.8 † 1.79 † 62.6 † 1.89 †       
+
+> Table 1. Comparison between G LI DEand previous draft models. †denotes results that are statistically significantly better than the corresponding best LL AMA draft model with p < 0.01 . *Since there is no open-source draft model trained for mistral, we retrained it using the same data of G LI DEfollowing the setting of Miao et al. (2023). The walltime speedup is listed over Table 5.
+
+33b target model, we set ND to 2. We set dD to be 4096 .Standard cross entropy is used to optimize the draft model while the parameters of the target model are kept frozen. More details on model training can be found in Appendix B. 
+
+Datasets. We first train our draft model on the pre-training dataset SlimPajama-6B (Soboleva et al., 2023). We then finetune the draft model on a supervised-finetuning (SFT) dataset (ShareGPT (GPT3.5 & 4, 2023) in our case) to fur-ther improve the model performance. Following Liu et al. (2023), we evaluate our G LI DE method across four different datasets: GSM8K (Cobbe et al., 2021) (math reasoning), Finance-Alpaca (Bharti, 2023) (QA for finance), Spider (Yu et al., 2018) (text-to-SQL), and Code-Search-Python (Hu-sain et al., 2020) (Python code generation). We follow (Cai et al., 2023) and use the well-known benchmark dataset MT-Bench (Zheng et al., 2023) for the evaluation of C APE. 
+
+Metrics. A widely-used metric for SD is acceptance rate 
+
+α (Leviathan et al., 2023), which is the expected probability of the target model accepting a token proposed by the draft model. Leviathan et al. (2023) showed that with speculative sampling, α is equivalent to Ex∼pD(x) min( pT, p D), where 
+
+pT and pD are the target and the draft models’ next token probabilities. The acceptance rate is independent of hard-ware configuration and therefore a more objective metric. Leviathan et al. (2023) defined the cost coefficient c to be the ratio between the walltime of a single run of MD and that of MT. Given proposal length γ, acceptance rate α,and cost coefficient c, Leviathan et al. (2023) derived the following formula for the expected improvement factor in total walltime, or expected speedup .
+
+E(Spd. ) = 1 − αγ+1 
+
+(1 − α)( γc + 1) .
+
+Finally, we also use actual decoding speed and walltime speedup for additional comparison. 
+
+Experiment design. To verify the effectiveness of G LI DE
+
+and C APE separately, we design two sets of experiments. First, we employ only G LI DE without C APE and use ac-ceptance rate and expected speedup as evaluation metrics. We set proposal length γ to be 5 and adopt speculative sam-pling as our acceptance strategy, following (Liu et al., 2023). Next, we compare G LI DE+C APE with Medusa (Cai et al., 2023) and G LI DE+BeamSearch. For GLI DE+BeamSearch, during speculation, in-stead of generating a single proposal sequence 
+
+(xt+1 , x t+2 , . . . , x t+γ ), we will generate k proposal sequences, where k is the beam size. Specifically, at position (t + 1) , we use the draft model to find the top-k
+
+tokens to form the best k proposals up to position (t + 1) .6GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding Vicuna-7B 
+
+> Acceptance Rate (%)
+> 0
+> 22.5
+> 45
+> 67.5
+> 90
+> GSM8K
+> Fin.-Alp.
+> Spide
+> Code. 14.4 20.1 14.9 20.7 42.9 28.9 41.5 35.6
+> Vanilla Drafter
+> GLIDE
+> Vicuna-13B
+> GSM8K
+> Fin.-Alp.
+> Spide
+> Code. 17.1 11.3 16.7 23.5 42.2 27.1 41.4 34.9
+> Vanilla Drafter
+> GLIDE
+> Vicuna-33B
+> GSM8K
+> Fin.-Alp.
+> Spide
+> Code. 5.4 13.5 23.5 10.3 54.1 41.1 45.9 51.4
+> Vanilla Drafter
+> GLIDE
+
+Figure 4. Comparison between G LI DE and Vanilla Drafter. The oranges boxes show the improvement brought by G LI DE.
+
+Then at position (t + 2) , using any of the top-k proposals up to position (t + 1) as the context/prefix, we use the draft model to score the next token and find the top-k proposals up to position (t + 2) that have the highest overall scores. We continue this process until we reach position (t + γ)
+
+and obtain the top-k proposal sequences of length γ. These proposal sequences can be represented by a tree structure. We adopt a variant of the tree-based parallel verification method described in SpecInfer (Miao et al., 2023) to perform efficient verification. We experimented with k = 4 
+
+and k = 8 , and found k = 4 to have a smaller speculation time and better walltime speedup. The performance of GLI DE+BeamSearch reported in the paper is based on 
+
+k = 4 .Both Medusa and BeamSearch generate multiple proposals and use a tree verification mechanism. For these methods that generate multiple proposals, the metric acceptance rate 
+
+is no longer meaningful, and therefore we use walltime speedup as our main metric. While we could use either spec-ulative sampling or speculative decoding as the acceptance strategy, to be consistent with the evaluation of Medusa (Cai et al., 2023), here we adopt speculative decoding as our acceptance strategy, and the batch size is set to be 1. 
+
+5.2. Evaluation of G LI DE
+
+Effectiveness of attending to target model’s KV cache. 
+
+To verify whether it is effective to use the target model’s KV cache, we first conduct a controlled experiment where we compare two draft model architectures: (1) G LI DE, which uses cross-attention to re-use the target model’s KV cache, and (2) Vanilla Drafter, which has the same architecture as G LI DE except that the cross-attention sub-layers are re-moved. To reduce the experimental cost, we randomly sam-ple half of the data from SlimPajma-6B to train both G LI DE
+
+and the Vanilla Drafter. We further fine-tune the two models on ShareGPT. We run the experiments on GSM8K, Fin.-Alp., Spider, and Code. We find that G LI DE always has a substantially higher acceptance rate than Vanilla Drafter. In Figure 4, we show the improvement in terms of acceptance rate by G LI DE over Vanilla Drafter on the four datasets. We can see that the improvement of acceptance rate ranges between 5.4 and 23.5 percentage points, and in most settings the improvement is over 10 percentage points. Given such substantial improvement, we can conclude that it is highly effective for the draft model to re-use the target model’s KV cache to improve the quality of the proposed sequences and thus improve the acceptance rate. 
+
+Comparison between G LI DE and other draft models. 
+
+Next, we compare our G LI DE draft model trained on the entire set of SlimPajma-6B and finetuned on ShareGPT with a few previous baseline draft models, namely, LL AMA-68m (Miao et al., 2023), LL AMA-160m (Miao et al., 2023), and LL AMA-45m. Comparison between our G LI DE and these baseline draft models is shown in Table 1. We show three metrics: Cost (cost coefficient), Acc. (acceptance rate), and E(Spd. ) (expected speedup). From the table, we have the following findings. (1) The cost coefficient of G LI DE is very low, comparable to that of LL AMA-68m or LL AMA-45m. Recall that the cost coefficient measures the relative walltime cost of the draft model compared with the target model, and a 5%-6% cost coefficient means the walltime cost of our G LI DE draft model is negligible compared with that of the target model. (2) In terms of acceptance rate and expected speedup, our GLI DE draft model clearly beats the baseline draft models under all settings, and the improvement is all statistically significant. (3) The acceptance rate of G LI DE generally falls between 55% and 70%, which means more than half of the proposed tokens are accepted. In comparison, the baseline draft models sometimes only have an acceptance rate of around 30%. Similarly, the expected speedup of GLI DE ranges between 1.67 and 2.24, much higher than those of the baseline draft models, which is always below 1.5 for LL AMA-68m and LL AMA-45m and below 1.0 for LL AMA-160m. In sum, the results in Table 1 again demonstrate that G LI DE is highly effective. 
+
+Comparison of actual decoding speed. To see the ac-tual speedup of G LI DE, we also report the actual decoding speed in terms of number of tokens per second based on MT-bench (Zheng et al., 2023). The comparison between the speed of G LI DE and that of the baselines is shown in Figure 5. We find that G LI DE substantially accelerates the model’s decoding speed. The results are consistent with the findings with the expected speedup. It is interesting to note that when using G LI DE, our accelerated vicuna-33b model has a faster decoding speed than vicuna-7b without speculative decoding. 7GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding Sppedup (X)         
+
+> 1
+> 2
+> 3
+> Vicuna-7B Vicuna-13B Vicuna-33B 2.5 2.6 2.6 1.8 1.8 1.5 1.9 2.2 2.0 1.9 1.9 2.0
+> Medusa GLIDE GLIDE+Beam Search
+> GLIDE+CAPE
+> Tokens / Second
+> 0
+> 100
+> 200
+> Vicuna-7B Vicuna-13B Vicuna-33B 60.9 100.8 106.8 39.4 63.1 72.1 30.4 41.2 47.5 28.3 46.4 54.6
+> TargetOnly LLaMA-160M LLaMA-68M
+> GLIDE
+
+Figure 5. The decoding speed (tokens per second) on MT-Bench. 0.5      
+
+> 2
+> 3.5
+> Vicuna-7b Vicuna-13b Vicuna-33b 2.5 2.6 2.6 2.2 2.2 1.9 1.9 2.2 2.0 1.9 1.9 2.0
+> Medusa GLIDE GLIDE+Beam Search GLIDE+CaPE
+
+Figure 6. The practical speedup with G LI DE + C APE. 
+
+5.3. Evaluation of C APE 
+
+Next, we assess the effectiveness of C APE on top of G LI DE.It is worth noting that acceptance rate based on its original definition is not applicable to the setting when the draft model proposes additional candidate tokens for verification. Therefore, in this set of experiments, we directly measure the walltime speedup on MT-Bench, in line with Medusa. Here, the walltime speedup is defined to be the ratio between the walltime of applying the speculative decoding method under evaluation and the walltime of standard decoding using only the target model. We compare G LI DE+C APE with the following baselines: (1) Medusa (Cai et al., 2023), which uses a non-autoregressive draft model to parallel generate multiple proposals. (2) G LI DE, which does not use CAPE. (3) G LI DE+BeamSearch, where we set the beam size equal to 4. Medusa and G LI DE+BeamSearch use a tree attention mechanism (Miao et al., 2023; Cai et al., 2023) for efficient verification. The results are shown in Figure 6. We have the following findings from the figure. (1) GLI DE+C APE clearly outperforms all the baselines with a substantial margin. (2) There is a clear improvement of wall-time speedup when C APE is added on top of G LI DE. This illustrates the usefulness of further employing C APE on top of G LI DE. (3) It is interesting to observe that even without CAPE, G LI DE alone performs better than Medusa. This again shows the effectiveness of G LI DE itself. It is worth pointing out that Medusa also uses the hidden states from the target model for its draft model’s proposal generation, but instead of using all the previous KV cache like what we do, Medusa uses the the hidden state of the last verified to-kens only, which may affect the quality of the draft model’s predictions. Furthermore, Medusa uses a non-autoregressive way to generate proposal sequences. It is well known that non-autoregressive language models tend to generate output sequences with lower fluency (Gu et al., 2018; Du et al., 2021; 2022). In comparison, our G LI DE model is an autore-gressive model. Therefore, the quality of the proposals by Medusa is likely lower than ours. We suspect that this is another important factor for Medusa to perform worse than our method in terms of walltime speedup. (4) Another inter-esting finding is that G LI DE+BeamSearch may slower than GLI DE. This shows that simply employing beam search to generate multiple proposal sequences is not guaranteed to work. Although the additional proposal sequences may increase the chance of acceptance, computationally, gen-erating these proposals during speculation and verifying them during verification incur additional costs, which in our experiments seem to outweigh their benefits. We conduct further analysis in §5.4. It is worth noting that our G LI DE+C APE method is not only faster than Medusa but also verifies a smaller number of proposed tokens in each batch than Medusa. Our C APE sets the maximum number of tokens for verification at each step to be 32, whereas Medusa’s is 64. So our C APE may support larger batch size inference. 
+
+5.4. Further Analysis Impact of KV cache at different layers. In our default setting, the draft model attends to the KV cache from the top layers of the target model, as described in §4. It is also possible to attend to lower layers’ KV cache. To see whether indeed KV cache from higher layers is more effective, we compare the acceptance rates when G LI DE is used with Mistral-7b as the target model on the four datasets. The results are shown in Figure 7. We can see that clearly using KV cache from higher layers of the target model produces higher acceptance rates, confirming our assumption that us-ing the KV cache from the top layers is more effective. On the other hand, using KV cache from lower layers is still useful compared with not using KV cache at all. Therefore, GLI DE can potentially be combined with early exit specu-lative decoding methods (Schuster et al., 2022) to further reduce the overall decoding time. 
+
+CAPE vs. beam search. Earlier in Figure 6 we find that while C APE reduces walltime, beam search incurs more walltime. To better understand the issue, we separately com-pare the speculation time and verification time. We find that for verification, C APE and beam search have similar walltime. But for each step of speculation, beam search in-creases the walltime from 5.5ms to 10.9ms (a difference of 5.4ms) on average, whereas C APE only increases the wall-time by 0.2ms. The main reason for beam search to increase walltime so much is that beam search requires copying and sorting operations that are very time-consuming. This phe-8GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 32                      
+
+> Code.
+> Acceptance Rate(%)
+> 35
+> 42.5
+> 50
+> 57.5
+> 65
+> NA 1416 24 32
+> target KV Cache Layer
+> Fin.-Alp.
+> Acceptance Rate(%)
+> 35
+> 42.5
+> 50
+> 57.5
+> 65
+> NA 1416 24 32
+> target KV Cache Layer
+> Spider
+> Acceptance Rate(%)
+> 35
+> 42.5
+> 50
+> 57.5
+> 65
+> NA 1416 24 32
+> target KV Cache Layer
+> Acceptance Rate (%)
+> 35
+> 45
+> 55
+> 65
+> Target KV Cache Layer
+> NA 1416 24 32
+> GSM8K
+> Finance-Alpaca
+> Spider
+> Code-Search
+> Figure 7. The relationship between the acceptance rate and the
+> n-th layer of target model for KV cache.
+
+nomenon was also observed by other researchers 1.
+
+The importance of confidence scores in C APE. Recall that C APE uses the draft model’s confidence scores to dy-namically determine the number of additional tokens in each expansion set. To see whether this confidence-aware expan-sion is useful, we compare C APE with another proposal expansion method, where we set the size of the expansion sets to 4, which is the average size of the practical expansion sets. We find that using this fixed-size expansion method, the decoding speed decreases from 70.6 tokens/sec to 68.4 tokens/sec on MT-Bench. This shows that it is useful to use the confidence scores to adjust the sizes of different expansion sets. 
+
+## 6. Conclusions 
+
+In this work, we propose a draft model architecture called GLI DE that leverages the KV cache from the target model to improve its proposal generation. We also propose a confidence-aware proposal expansion mechanism called CAPE that produces additional candidate tokens for ver-ification. Experiments demonstrate that both G LI DE and CAPE are highly effective ways to accelerate speculative decoding. Our method also substantially outperforms the strong baseline Medusa based on walltime. Overall, the integration of G LI DE with C APE results in a 2.5x speedup on Vicuna models. As future work, we will explore the batch serving of G LI DE and its effectiveness in process-ing extremely long contexts and multimodal domain (Wang et al., 2019a;b; Wu et al., 2024). 
+
+## Impact Statement 
+
+Our work significantly improves the inference speed at which large language models make predictions, thus helping to make AI technologies more accessible and opening up more possibilities for personal AI applications. However, since our method does not change the output generated by 
+
+> 1https://github.com/ggerganov/llama.cpp/ issues/3137
+
+LLMs, it means our approach could inadvertently speed up the creation of harmful or biased content, such as hate speech or misinformation. This highlights the critical need for careful use and the establishment of strong safeguarding measures to reduce the dangers linked to enhanced LLM processing speeds. 
+
+## Acknowledgement 
+
+Cunxiao wants to especially thank Xuan, Fangkai, and Jian-lin’s help with this paper. Yang You is being sponsored by NUS startup grant (Presidential Young Professorship), Singapore MOE Tier-1 grant, ByteDance grant, ARCTIC grant, SMI grant (WBS number: A-8001104-00-00), Al-ibaba grant, and Google grant for TPU usage. 
+
+## References 
+
+Bharti, G. Finance-alpaca dataset, 2023. URL 
+
+https://huggingface.co/datasets/ gbharti/finance-alpaca .Cai, T., Li, Y., Geng, Z., Peng, H., and Dao, T. Medusa: Sim-ple framework for accelerating llm generation with multi-ple decoding heads, 2023. URL https://github. com/FasterDecoding/Medusa . GitHub reposi-tory. Chen, C., Borgeaud, S., Irving, G., Lespiau, J.-B., Sifre, L., and Jumper, J. M. Accelerating large language model decoding with speculative sampling. arXiv:2302.01318 ,2023. Chiang, W.-L., Li, Z., Lin, Z., Sheng, Y., Wu, Z., Zhang, H., Zheng, L., Zhuang, S., Zhuang, Y., Gonzalez, J. E., et al. Vicuna: An open-source chatbot impressing gpt-4 with 90%* chatgpt quality, 2023. URL https://vicuna. lmsys.org .Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., Hesse, C., and Schulman, J. Training verifiers to solve math word problems. arXiv:2110.14168 , 2021. Du, C., Tu, Z., and Jiang, J. Order-agnostic cross entropy for non-autoregressive machine translation. In Proceed-ings of the 38th International Conference on Machine Learning (ICML) , 2021. Du, C., Tu, Z., Wang, L., and Jiang, J. ngram-OAXE: Phrase-based order-agnostic cross entropy for non-autoregressive machine translation. In Proceedings of the 29th International Conference on Computational Lin-guistics , 2022. Fu, Y., Bailis, P., Stoica, I., and Zhang, H. Breaking the sequential dependency of llm inference using looka-9GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+head decoding, 2023. URL https://github.com/ hao-ai-lab/LookaheadDecoding . GitHub repository. GPT3.5 and 4, G. Sharegpt dataset, 2023. URL https: //github.com/domeccleston/sharegpt .Gu, J., Bradbury, J., Xiong, C., Li, V. O., and Socher, R. Non-autoregressive neural machine translation. In Pro-ceedings of the 6th International Conference on Learning Representations (ICLR) , 2018. He, Z., Zhong, Z., Cai, T., Lee, J. D., and He, D. Rest: Retrieval-based speculative decoding, 2023. Husain, H., Wu, H.-H., Gazit, T., Allamanis, M., and Brockschmidt, M. Codesearchnet challenge: Evaluat-ing the state of semantic code search. 2020. Jiang, A. Q., Sablayrolles, A., Mensch, A., Bamford, C., Chaplot, D. S., de Las Casas, D., Bressand, F., Lengyel, G., Lample, G., Saulnier, L., Lavaud, L. R., Lachaux, M.-A., Stock, P., Scao, T. L., Lavril, T., Wang, T., Lacroix, T., and Sayed, W. E. Mistral 7b. arXiv:2310.06825 , 2023. Jiao, W., Wang, W., Huang, J.-t., Wang, X., and Tu, Z. Is chatgpt a good translator? yes with gpt-4 as the engine. 
+
+arXiv:2301.08745 , 2023. Kim, S., Mangalam, K., Moon, S., Malik, J., Mahoney, M. W., Gholami, A., and Keutzer, K. Speculative decod-ing with big little decoder. In Proceedings of the 37th Annual Conference on Neural Information Processing Systems (NeurIPS) , 2023. Kim, Y. and Rush, A. M. Sequence-level knowledge distil-lation. In Proceedings of the 2016 Conference on Empiri-cal Methods in Natural Language Processing (EMNLP) ,2016. Kingma, D. P. and Ba, J. Adam: A method for stochastic optimization. In Proceedings of the 3rd International Conference on Learning Representations (ICLR) , 2015. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th ACM Sym-posium on Operating Systems Principles (SOSP) , 2023. Leviathan, Y., Kalman, M., and Matias, Y. Fast inference from transformers via speculative decoding. In Proceed-ings of the 40th International Conference on Machine Learning (ICML) , 2023. Liu, X., Hu, L., Bailis, P., Stoica, I., Deng, Z., Che-ung, A., and Zhang, H. Online speculative decoding. 
+
+arXiv:2310.07177 , 2023. Miao, X., Oliaro, G., Zhang, Z., Cheng, X., Wang, Z., Wong, R. Y. Y., Zhu, A., Yang, L., Shi, X., Shi, C., Chen, Z., Arfeen, D., Abhyankar, R., and Jia, Z. Specinfer: Accelerating generative large language model serving with speculative inference and token tree verification. 
+
+arXiv:2305.09781 , 2023. Schuster, T., Fisch, A., Gupta, J., Dehghani, M., Bahri, D., Tran, V. Q., Tay, Y., and Metzler, D. Confident adaptive language modeling. In Proceedings of the 36th Annual Conference on Neural Information Processing Systems (NeurIPS) , 2022. Soboleva, D., Al-Khateeb, F., Myers, R., Steeves, J. R., Hestness, J., and Dey, N. SlimPajama: A 627B token cleaned and deduplicated version of RedPa-jama, 2023. URL https://huggingface.co/ datasets/DKYoon/SlimPajama-6B .Stern, M., Shazeer, N., and Uszkoreit, J. Blockwise parallel decoding for deep autoregressive models. In Proceedings of the 32nd Annual Conference on Neural Information Processing Systems (NeurIPS) , 2018. Sun, Z., Suresh, A. T., Ro, J. H., Beirami, A., Jain, H., Yu, F., Riley, M., and Kumar, S. Spectr: Fast speculative decoding via optimal transport. In Workshop on Efficient Systems for Foundation Models @ ICML , 2023. Wang, X., Wu, J., Chen, J., Li, L., Wang, Y.-F., and Wang, W. Y. Vatex: A large-scale, high-quality multilingual dataset for video-and-language research. In Proceedings of the IEEE/CVF International Conference on Computer Vision , pp. 4581–4591, 2019a. Wang, X., Wu, J., Zhang, D., Su, Y., and Wang, W. Y. Learning to compose topic-aware mixture of experts for zero-shot video captioning. In Proceedings of the AAAI conference on artificial intelligence , volume 33, pp. 8965– 8972, 2019b. Wu, X., Yu, S., Lim, E.-P., and Ngo, C.-W. Ovfoodseg: Elevating open-vocabulary food image segmentation via image-informed textual representation. arXiv preprint arXiv:2404.01409 , 2024. Xia, H., Ge, T., Wang, P., Chen, S.-Q., Wei, F., and Sui, Z. Speculative decoding: Exploiting speculative execu-tion for accelerating seq2seq generation. In Findings of the Association for Computational Linguistics: EMNLP 2023 , 2023. Xia, H., Yang, Z., Dong, Q., Wang, P., Li, Y., Ge, T., Liu, T., Li, W., and Sui, Z. Unlocking efficiency in large language model inference: A comprehensive survey of speculative decoding. In Findings of the Association for Computational Linguistics: EMNLP 2023 , 2024. 10 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+Yang, N., Ge, T., Wang, L., Jiao, B., Jiang, D., Yang, L., Ma-jumder, R., and Wei, F. Inference with reference: Lossless acceleration of large language models. arXiv:2304.04487 ,2023. Yu, G.-I., Jeong, J. S., Kim, G.-W., Kim, S., and Chun, B.-G. Orca: A distributed serving system for {Transformer-Based } generative models. In Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) , 2022a. Yu, S., Sun, Q., Zhang, H., and Jiang, J. Translate-train embracing translationese artifacts. Association for Com-putational Linguistics, 2022b. Yu, T., Zhang, R., Yang, K., Yasunaga, M., Wang, D., Li, Z., Ma, J., Li, I., Yao, Q., Roman, S., Zhang, Z., and Radev, D. Spider: A large-scale human-labeled dataset for complex and cross-domain semantic parsing and text-to-SQL task. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing (EMNLP) , 2018. Yuan, H., Lu, K., Huang, F., Yuan, Z., and Zhou, C. Specu-lative contrastive decoding. arXiv:2311.08981 , 2023. Zhang, J., Wang, J., Li, H., Shou, L., Chen, K., Chen, G., and Mehrotra, S. Draft verify: Lossless large lan-guage model acceleration via self-speculative decoding. 
+
+arXiv:2309.08168 , 2023. Zhang, X. and Gao, W. Towards LLM-based fact verifi-cation on news claims with a hierarchical step-by-step prompting method. In Proceedings of the 13th Interna-tional Joint Conference on Natural Language Processing and the 3rd Conference of the Asia-Pacific Chapter of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 996–1011, 2023. Zhang, X. and Gao, W. Reinforcement retrieval leveraging fine-grained feedback for fact checking news claims with black-box llm. arXiv preprint arXiv:2404.17283 , 2024. Zheng, L., Chiang, W.-L., Sheng, Y., Zhuang, S., Wu, Z., Zhuang, Y., Lin, Z., Li, Z., Li, D., Xing, E., Zhang, H., Gonzalez, J. E., and Stoica, I. Judging LLM-as-a-judge with MT-bench and chatbot arena. In NeurIPS Datasets and Benchmarks Track , 2023. Zhou, Y., Lyu, K., Rawat, A. S., Menon, A. K., Ros-tamizadeh, A., Kumar, S., Kagy, J.-F., and Agarwal, R. Distillspec: Improving speculative decoding via knowl-edge distillation. In Proceedings of the 12th International Conference on Learning Representations (ICLR) , 2024. 11 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+## A. Pseudo Code of C APE 
+
+See Algorithm 1 for the proposal expansion and Algorithm 2 for the verification. 
+
+Algorithm 1 Confidence-Aware Proposal Expansion. 
+
+Definitions 
+
+MD - draft model 
+
+S = [8 , 8, 8, 6, 6, 6, 4, 4, 2, 2] 
+
+- confidence bin array 
+
+P - probability distribution for each step 
+
+R - proposal results 
+
+Xi - extension set for the i-th decoding step 
+
+T - greedy search result 
+
+▷ Execute Draft Model for i ∈ range (proposal steps ) do 
+
+pi ← M D (History, t <i )
+
+ti ← argmax (pi)
+
+T. append (ti)
+
+P. append (pi)
+
+end for 
+
+▷ Proposal Expansion for i ∈ range (proposal steps ) do 
+
+pi ← P [i]
+
+expand num ← S [floor (10 × max (pi))] 
+
+Ki ← topk (pi, expand num ).indices 
+
+K. append (Ki)
+
+end for 
+
+▷ Concatenation of Expanded Results 
+
+R. append (T )
+
+for i ∈ range (proposal steps ) do for t ∈ X i do 
+
+r ← concat (T [0 : i], t )
+
+R. append (r)
+
+end for end for return R
+
+Algorithm 2 Verification Input for MT .
+
+Input: Proposal tokens set by cape R
+
+Output: Input sequence, Input position id, Verification Attention Mask ( V AM )
+
+Definitions: 
+
+T - greedy search result R[0] 
+
+Xi - extension set for the i-th decoding step 
+
+input - input sequence 
+
+input pi - input position id 
+
+CAM - Causal Attention Mask 
+
+V AM - Verification Attention Mask 
+
+pos - function that maps a position to decoding step 
+
+γ ← len (T )
+
+mask length ← γinput ← Tinput pi ← list (range (0 , γ )) 
+
+for i ∈ range (γ) do for t ∈ X i do 
+
+input ← concat (input, t )
+
+input pi ← concat (input pi, i )
+
+end for 
+
+mask length ← mask length + len (Xi)
+
+end for 
+
+CAM ← causal mask (mask length, mask length )
+
+V AM ← identity (mask length, mask length )
+
+V AM [: γ, : γ] ← CAM [: γ, : γ]
+
+for i ∈ range (γ, mask length ) do for j ∈ range (γ) do if pos (i) > j then 
+
+V AM [i][ j] ← CAM [i][ j]
+
+end if end for end for return input , input pi , V AM 
+
+12 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+Models GSM8K Fin.-Alp. Spider Code-Py. 
+
+w/o Dist. 64.8 63.2 55.7 67.0 w Dist. 65.0 63.9 56.0 67.5   
+
+> Table 2. Impact of Distillation on G LI DEw.r.t acceptance rate (%).
+
+Models GLI DE Beam 4 Beam 8 +C APE 
+
+Vicuna-7B 5.3 10.9 14.8 5.5 Vicuna-13B 5.3 10.9 14.9 5.5 Vicuna-33B 9.1 17.1 24.6 8.9  
+
+> Table 3. The speed of draft model’s speculation (ms).
+
+## B. Experiment Details 
+
+For the 7B and 13B target language models, we employ a single-layer G LI DE with a hidden dimension of 4096. For the 33B target model, we use a two-layer G LI DE also with a hidden dimension of 4096. In the case of the 7B and 13B target models, we train G LI DE
+
+with zero2 and eight H800 GPUs. For the 33B target model, we use zero3 and 16 H800 GPUs. We set batch size (with accumulation) as 64, learning rate equals to 5e-4, and use adamW (Kingma & Ba, 2015) to optimize the draft model. We only train our draft model for one epoch on both pretrain and SFT datasets. For the 7B and 13B models, the training is approximately 7 hours and 10 hours, respectively, whereas for the 33B target model, it takes about 100 hours. As discussed in the section limitations, the main training expense lies in forwarding the target model to get the KV cache. If we could incorporate G LI DE during the training of the LLM, this time-consuming part could be omitted. All the inference processes in this paper are performed using fp16 and on a single H800 GPU. 
+
+## C. Impact of Distillation 
+
+Distillation is a common technology for speculative decod-ing (Zhou et al., 2024; Liu et al., 2023). We use seq-level distillation (Kim & Rush, 2016) for G LI DE to see the bene-fit. Table 2 shows that our G LI DE can be further improved via distillation. However, the training time cost of seq-level distillation is very expensive, which is 2 times than the train-ing time of vanilla G LI DE. So we do not use distillation in other experiments. 
+
+## D. Walltime for Speculation 
+
+We provide more walltime results at Table 3, it can be ob-served that with larger beam, the speculation walltime be-coming longer. 
+
+## E. Batch Serving 
+
+Here we also show the decoding speed of our proposed GLI DE at Table 4. Please note we do not design any specific algorithm for batch serving, so the experiment here is similar to the vanilla draft model. To avoid other irrelevant reasons like different samples in the same batch having different lengths, we just duplicate the input IDs to batch numbers. We test the performance using one H800 and fp16 as the platform and setting. As Table 4 shows, if batch sizes are not large enough, it will not largely degenerate the decoding speed. That is be-cause, under the setting of small batch size, the inference process of LLM is memory-bounded. However, we observe that OOM frequently occurs during for the long prompts, even for the target model only. So we believe how to com-bine speculative decoding and batch serving systems (e.g., vLLM (Kwon et al., 2023), continuous batching (Yu et al., 2022a)) will be an important topic in the future. 
+
+## F. Configurations for G LI DE
+
+In our preliminary exploratory research, we discover that the structure of draft models has a significant impact on the speedup ratio. We find that even for the 12-layers llama-160m could lead to a decrease in decoding speed. This is because there is a clear sequential order between layers, necessitating autoregressive operation. Although the multi-layered draft model can significantly improve acceptance rates, this tradeoff is unwise. We start with the structure of llama-68m, i.e., 2 hidden layers + hidden dimension=768, and do a grid search to find a more reasonable architecture. First, we try settings of 1, 2, and 4 hidden layers (for Vicuna 7B, we only experimented with 1 and 2 layers). We find that for the target models smaller than 33B, the optimal architecture is a single-layer draft model, whereas for the 33B LLM, the optimal architecture is two layers as shown in Fig. 8. Next, we conduct a grid search on the hidden size. We conduct three sets of experiments on the 7B and 13B models, with hidden dimensions of 768, 2048, and 4096, respectively as shown in Figure 9. We find that increasing the hidden size can effectively compensate for the loss caused by the reduction of hidden layers, and does not significantly increase operational speed. 
+
+## G. Walltime Speedup for Main the Experiment 
+
+We list the wall time speedup for the datasets used in main experiments at Table 5. 13 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+Batch Size Vicuna-7B Vicuna-13B Vicuna-33B 
+
++G LI DE Only +G LI DE Only +G LI DE Only 1 106.8 54.6 100.8 46.2 60.9 28.3 2 2 * 108.2 2 * 55.6 2 * 99.5 2 * 44.5 2 * 59.8 2 * 27.9 4 4 * 116.5 4 * 55.9 4 * 100.8 4 * 42.9 OOM OOM 8 8 * 108.5 8 * 55.1 8 * 98.5 8 * 43.2 OOM OOM 16 16 * 106.2 16 * 55.4 OOM 16 * 43.2 OOM OOM 32 OOM OOM OOM OOM OOM OOM     
+
+> Table 4. The speed (tokens/sec) of G LI DEunder different batch sizes settings. OOM denotes out of the HBM memory of 80GB H800.
+> Figure 8. The relationship between theoretical speedup and the number of layers in a draft model is such that when the target LLM has fewer layers, increasing the number of layers in the draft model results in a significant decrease in performance. This is because, compared to the improvement in the acceptance rate brought about by adding layers to the draft model, the increase in time cost is greater.
+> Figure 9. The relationship between theoretical speedup and the hidden size of the draft model is such that increasing the hidden size can significantly accelerate the process. This is because the elements within the hidden layer can be computed in parallel, whereas the computation between layers must be done in an autoregressive manner.
+
+Target Draft GSM. Fin. Spider Code Vic. 7B Llama-68m 1.53 1.48 0.95 1.02 
+
+Vic. 7B GliDe Only 1.90 1.94 1.69 2.11 Vic. 13B Llama-68m 1.54 1.57 0.94 1.17 
+
+Vic. 13B GliDe Only 2.32 2.07 1.82 2.35 Vic. 33B Llama-68m 1.56 1.47 1.07 1.19 
+
+Vic. 33B GliDe Only 2.27 2.02 1.95 2.14 
+
+## H. Limitation 
+
+Although our model significantly improves acceptance rates, it does have some inherent limitations. The most notable issue is that our model is not a plug-and-play algorithm. This is primarily because our draft model relies on reusing the KV cache of the LLM, necessitating the retraining of a corresponding draft model for speculative decoding each time a new LLM is introduced. However, considering the relatively low cost of this process, which is approximately 7 hours for training a 68MB draft model on 8 H800 GPU cards, this limitation can be considered manageable within practical applications. We must also note that for vanilla speculative decoding when the tokenizer of the LLM (e.g., Mistral vs Vicuna) is changed, it is necessary to retrain a draft model that is compatible with the new LLM. In the training of G LI DE, the bottleneck is the forward of the target LLM instead of the lightweight draft model. Therefore, 14 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding 
+
+we suggest that future open-source models can be trained simultaneously with a compatible G LI DE, thus avoiding the time-consuming re-forward target LLM. 
+
+## I. Case Study 
+
+Table 6 presents an illustrative case from MT-bench, where tokens marked in red indicate acceptance. The vanilla draft model exhibits a notable deficiency in acceptance rate, ev-ident through a scarcity of red tokens. In contrast, our proposed G LI DE demonstrates a markedly higher accep-tance of tokens, contributing to increased decoding speed. Notably, G LI DE effectively predicts terms such as “bacte-ria” and “germs”, due to its enhanced drafting capabilities. Furthermore, the integration of G LI DE with C APE shows further improvement in token acceptance, corresponding to the experimental results in Figure 5. More cases can be found at the following. 15 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding  
+
+> Table 6. Random Sampled example from MT-bench, red tokens denotes accepted tokens. The target model is Mistral-7B-instruct-v0.1.
+
+User Input 
+
+Embrace the role of Sheldon from “The Big Bang Theory” as we delve into our conversation. Don’t start with phrases like “As Sheldon”. Let’s kick things off with the following question: “What is your opinion on hand dryers?” 
+
+LL AMA-45m 
+
+Hand dryers are a convenient and efficient way to dry hands after using the restroom or washing them. They can help reduce the spread of germs and bacteria, as well as save time and paper towels. However, some people may prefer using paper towels for personal reasons or because they feel more comfortable with the sensation. Ultimately, it comes down to personal preference and what works best for each individual. 
+
+GLI DE
+
+Hand dryers are a convenient and efficient way to dry hands after using the restroom or washing them. They can help reduce the spread of germs and bacteria, as well as save time and paper towels. However, some people may prefer using paper towels for personal reasons or because they feel more comfortable with the sensation. Ultimately, it comes down to personal preference and what works best for each individual. 
+
++ C APE 
+
+Hand dryers are a convenient and efficient way to dry hands after using the restroom or washing them. They can help reduce the spread of germs and bacteria, as well as save time and paper towels. However, some people may prefer using paper towels for personal reasons or because they feel more comfortable with the sensation. Ultimately, it comes down to personal preference and what works best for each individual.  
+
+> Table 7. Random Sampled example from MT-bench, red tokens denotes accepted tokens. Target model is Vicuna-7B-1.5.
+
+User Input Write a descriptive paragraph about a bustling marketplace, incorporating sensory details such as smells, sounds, and visual elements to create an immersive experience for the reader. 
+
+LL AMA-45m 
+
+As I walk through the bustling marketplace, I am immediately struck by the sights and sounds of the vibrant atmosphere. The air is thick with the scent of exotic spices and freshly baked goods, mingling with the sounds of vendors calling out to customers and the clatter of plates and bowls being set out on display. The marketplace is a riot of colors and textures, with stalls selling everything from brightly hued fabrics to intricately carved wooden sculptures. The ground is covered in a thick layer of colorful pebbles, and the walls are adorned with vibrant murals that seem to come alive as I walk by. The marketplace is a sensory feast, and I can’t help but feel a sense of excitement and wonder as I take it all in. 
+
+GLI DE
+
+As I walk through the bustling marketplace, I am immediately struck by the sights and sounds of the vibrant atmosphere. The air is thick with the scent of exotic spices and freshly baked goods, mingling with the sounds of vendors calling out to customers and the clatter of plates and bowls being set out on display. The marketplace is a riot of colors and textures, with stalls selling everything from brightly hued fabrics to intricately carved wooden sculptures. The ground is covered in a thick layer of colorful pebbles, and the walls are adorned with vibrant murals that seem to come alive as I walk by. The marketplace is a sensory feast, and I can’t help but feel a sense of excitement and wonder as I take it all in. 
+
++ C APE 
+
+As I walk through the bustling marketplace, I am immediately struck by the sights and sounds of the vibrant atmosphere. The air is thick with the scent of exotic spices and freshly baked goods, mingling with the sounds of vendors calling out to customers and the clatter of plates and bowls being set out on display. The marketplace is a riot of colors and textures, with stalls selling everything from brightly hued fabrics to intricately carved wooden sculptures. The ground is covered in a thick layer of colorful pebbles, and the walls are adorned with vibrant murals that seem to come alive as I walk by. The marketplace is a sensory feast, and I can’t help but feel a sense of excitement and wonder as I take it all in. 16 GLI DE with a C APE:A Low-Hassle Method to Accelerate Speculative Decoding  
+
+> Table 8. Random Sampled example from MT-bench, red tokens denotes accepted tokens. Target model is Vicuna-7B-1.5.
+
+User Input 
+
+Picture yourself as a 100-years-old tree in a lush forest, minding your own business, when suddenly, a bunch of deforesters shows up to chop you down. How do you feel when those guys start hacking away at you? 
+
+LL AMA-45m 
+
+As a 100-years-old tree, I have seen many changes in the world around me. I have witnessed the growth of forests and the decline of forests. I have seen the rise and fall of civilizations. I have seen the impact of human activity on the environment. When the deforesters show up and start hacking away at me, I feel a sense of loss and sadness. I have lived a long and fulfilling life, and now my time has come to an end. I am not afraid of death, but I am sad to leave this world behind. I also feel a sense of anger and frustration towards the deforesters. They are destroying the very thing that they need to survive - the forests that provide oxygen, clean water, and habitat for countless species. They are acting recklessly and irresponsibly, without considering the long-term consequences of their actions. Despite my feelings, I know that I cannot stop them. I am just a tree, after all. But I hope that my sacrifice will serve as a reminder to future generations of the importance of protecting the environment and preserving the natural world for future generations to enjoy. 
+
+GLI DE
+
+As a 100-years-old tree, I have seen many changes in the world around me. I have witnessed the growth of forests and the decline of forests. I have seen the rise and fall of civilizations. I have seen the impact of human activity on the environment. When the deforesters show up and start hacking away at me, I feel a sense of loss and sadness. I have lived a long and fulfilling life, and now my time has come to an end. I am not afraid of death, but I am sad to leave this world behind. I also feel a sense of anger and frustration towards the deforesters. They are destroying the very thing that they need to survive - the forests that provide oxygen, clean water, and habitat for countless species. They are acting recklessly and irresponsibly, without considering the long-term consequences of their actions. Despite my feelings, I know that I cannot stop them. I am just a tree, after all. But I hope that my sacrifice will serve as a reminder to future generations of the importance of protecting the environment and preserving the natural world for future generations to enjoy. 
+
++ C APE 
+
+As a 100-years-old tree, I have seen many changes in the world around me. I have witnessed the growth of forests and the decline of forests. I have seen the rise and fall of civilizations. I have seen the impact of human activity on the environment. When the deforesters show up and start hacking away at me, I feel a sense of loss and sadness. I have lived a long and fulfilling life, and now my time has come to an end. I am not afraid of death, but I am sad to leave this world behind. I also feel a sense of anger and frustration towards the deforesters. They are destroying the very thing that they need to survive - the forests that provide oxygen, clean water, and habitat for countless species. They are acting recklessly and irresponsibly, without considering the long-term consequences of their actions. Despite my feelings, I know that I cannot stop them. I am just a tree, after all. But I hope that my sacrifice will serve as a reminder to future generations of the importance of protecting the environment and preserving the natural world for future generations to enjoy. 17
