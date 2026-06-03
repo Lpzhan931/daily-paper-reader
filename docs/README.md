@@ -6,68 +6,71 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-05 ~ 2026-06-03
-- 运行时间：2026-06-03 02:44:44 UTC
+- 最新运行日期：2026-06-03
+- 运行时间：2026-06-03 22:34:16 UTC
 - 运行状态：成功
-- 本次总论文数：15
-- 精读区：0
-- 速读区：15
+- 本次总论文数：17
+- 精读区：6
+- 速读区：11
 
 ### 今日简报（AI）
-1) 本期日报精选15篇论文，重点关注大模型推理加速方法。  
-2) 最值得关注的两大方向：投机解码与稀疏注意力融合（SpecSA），以及无训练自适应令牌剪枝（OccamToken）。  
-3) 建议优先阅读UniVer中对多步投机解码的统一视角，为后续高效推理研究打基础。
-- 详情：[/20260505-20260603/README](/20260505-20260603/README)
+今天共处理17篇论文，精读6篇、速读11篇，核心聚焦推测解码与多模态推理效率优化。最值得精读的两篇满分论文《DREAM-S》和《TreeFlash》分别从搜索式草稿与并行近似角度大幅提升推测解码速度。建议普通读者重点关注速读中的视觉token压缩与动态稀疏技术，能直接加速多模态大模型的推理。
+- 详情：[/202606/03/README](/202606/03/README)
 
 ### 精读区论文标签
-- 本次无精读推荐。
+1. [DREAM-S: Speculative Decoding with Searchable Drafting and Target-Aware Refinement for Multimodal Generation](/202606/03/2606.00535v1-dream-s-speculative-decoding-with-searchable-drafting-and-target-aware-refinement-for-multimodal-generation)  
+   标签：评分：10.0/10、query:vlm-spec
+   evidence：应用于视觉语言模型的投机解码
+2. [TreeFlash: Parallel AR-Approximation for Faster Speculative Decoding](/202606/03/2606.03819v1-treeflash-parallel-ar-approximation-for-faster-speculative-decoding)  
+   标签：评分：10.0/10、query:llm-sd
+   evidence：新型投机解码方法，并行自回归近似
+3. [Speculative Decoding Across Languages](/202606/03/2605.30580v1-speculative-decoding-across-languages)  
+   标签：评分：9.0/10、query:llm
+   evidence：研究跨语言场景下大语言模型的投机解码效率，直接相关于LLM推理加速
+4. [Hybrid Verified Decoding: Learning to Allocate Verification in Speculative Decoding](/202606/03/2606.01019v1-hybrid-verified-decoding-learning-to-allocate-verification-in-speculative-decoding)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：投机解码中的验证分配策略
+5. [LocateAnything: Fast and High-Quality Vision-Language Grounding with Parallel Box Decoding](/202606/03/2605.27365v1-locateanything-fast-and-high-quality-vision-language-grounding-with-parallel-box-decoding)  
+   标签：评分：8.0/10、query:vlm-spec
+   evidence：并行框解码加速VLM基础模型推理
+6. [CIVIC: End-to-End Sequence Compactness for Efficient Vision-Language Models](/202606/03/2605.28115v1-civic-end-to-end-sequence-compactness-for-efficient-vision-language-models)  
+   标签：评分：8.0/10、query:vlm-spec
+   evidence：端到端序列紧凑性加速VLM推理
 
 ### 速读区论文标签
-1. [UniVer: A Unified Perspective for Multi-step and Multi-draft Speculative Decoding](/20260505-20260603/2605.04543v1-univer-a-unified-perspective-for-multi-step-and-multi-draft-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：多步多草稿投机解码验证的统一视角
-2. [SpecSA: Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference](/20260505-20260603/2605.19893v1-specsa-bridging-speculative-decoding-and-sparse-attention-for-efficient-llm-inference)  
-   标签：评分：9.0/10、query:llm
-   evidence：结合投机解码与稀疏注意力实现高效大语言模型推理
-3. [OccamToken: Efficient VLM Inference with Training-Free and Budget-Adaptive Token Pruning](/20260505-20260603/2605.29657v1-occamtoken-efficient-vlm-inference-with-training-free-and-budget-adaptive-token-pruning)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：面向高效VLM推理的免训练令牌剪枝框架
-4. [DREAM-S: Speculative Decoding with Searchable Drafting and Target-Aware Refinement for Multimodal Generation](/20260505-20260603/2606.00535v1-dream-s-speculative-decoding-with-searchable-drafting-and-target-aware-refinement-for-multimodal-generation)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：专为VLM设计的投机解码框架，包含可搜索草稿和目标感知精炼
-5. [CASCADE: Context-Aware Relaxation for Speculative Image Decoding](/20260505-20260603/2605.07230v1-cascade-context-aware-relaxation-for-speculative-image-decoding)  
-   标签：评分：8.0/10、query:llm-sd
-   evidence：自回归生成中投机解码的宽松验证机制
-6. [Future Validity is the Missing Statistic: From Impossibility to $Φ$-Estimation for Grammar-Faithful Speculative Decoding](/20260505-20260603/2605.07698v1-future-validity-is-the-missing-statistic-from-impossibility-to--estimation-for-grammar-faithful-speculative-decoding)  
-   标签：评分：8.0/10、query:llm
-   evidence：分析并修正语法约束投机解码中的分布偏差
-7. [Dynamic Execution Commitment of Vision-Language-Action Models](/20260505-20260603/2605.11567v1-dynamic-execution-commitment-of-vision-language-action-models)  
+1. [PARCEL: Pool-Anchored Resampling with Conditioned Elastic Queries for Efficient Vision-Language Understanding](/202606/03/2605.30126v1-parcel-pool-anchored-resampling-with-conditioned-elastic-queries-for-efficient-vision-language-understanding)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：面向视觉-语言-动作模型的自我投机前缀
-8. [Rotation-Aligned Key Channel Pruning for Efficient Vision-Language Model Inference](/20260505-20260603/2605.19218v1-rotation-aligned-key-channel-pruning-for-efficient-vision-language-model-inference)  
+   evidence：弹性视觉令牌压缩用于高效VLM推理
+2. [VisionPulse: Dynamic Visual Sparsity for Efficient Multimodal Reasoning](/202606/03/2605.31457v1-visionpulse-dynamic-visual-sparsity-for-efficient-multimodal-reasoning)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：面向VLM推理KV缓存压缩的关键通道剪枝
-9. [SSV: Sparse Speculative Verification for Efficient LLM Inference](/20260505-20260603/2605.19893v2-ssv-sparse-speculative-verification-for-efficient-llm-inference)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向LLM推理加速的稀疏投机验证框架
-10. [CIVIC: End-to-End Sequence Compactness for Efficient Vision-Language Models](/20260505-20260603/2605.28115v1-civic-end-to-end-sequence-compactness-for-efficient-vision-language-models)  
+   evidence：动态视觉稀疏性实现高效多模态推理
+3. [Improving Visual Token Reduction via Rectifying Distortions for Efficient Multimodal LLM Inference](/202606/03/2606.01711v1-improving-visual-token-reduction-via-rectifying-distortions-for-efficient-multimodal-llm-inference)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：端到端序列紧凑性以实现高效VLM推理
-11. [AsymVLM: Asymmetric Token Pruning for Efficient Vision-Language Model Inference](/20260505-20260603/2605.29535v1-asymvlm-asymmetric-token-pruning-for-efficient-vision-language-model-inference)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：非对称令牌剪枝实现高效VLM推理
-12. [SAFE-Pruner: Semantic Attention-Guided Future-Aware Token Pruning for Efficient Vision-Language-Action Manipulation](/20260505-20260603/2605.29662v1-safe-pruner-semantic-attention-guided-future-aware-token-pruning-for-efficient-vision-language-action-manipulation)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：面向高效VLA推理的未来感知令牌剪枝
-13. [Bastion: Budget-Aware Speculative Decoding with Tree-structured Block Diffusion Drafting](/20260505-20260603/2605.29727v1-bastion-budget-aware-speculative-decoding-with-tree-structured-block-diffusion-drafting)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向大语言模型的预算感知树结构扩散草稿投机解码
-14. [BudgetDraft: Acceptance-Aware Multi-View Training for Sparse-KV Speculative Decoding](/20260505-20260603/2606.00144v1-budgetdraft-acceptance-aware-multi-view-training-for-sparse-kv-speculative-decoding)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向高效大语言模型推理的稀疏KV投机解码
-15. [LASER: Loss-Aware Singular-value Decomposition and Rank Allocation for Efficient Low-Precision Vision-Language Models](/20260505-20260603/2606.00573v1-laser-loss-aware-singular-value-decomposition-and-rank-allocation-for-efficient-low-precision-vision-language-models)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：低秩分解加速VLM推理
+   evidence：通过纠正失真的视觉令牌减少实现高效多模态大语言模型推理
+4. [ETC: Extreme Token Compression via Task-aware Visual Information Distillation in VLMs](/202606/03/2606.00543v1-etc-extreme-token-compression-via-task-aware-visual-information-distillation-in-vlms)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：通过极端令牌压缩和KV缓存减少加速视觉语言模型推理
+5. [EvoCut: Multi-Layer Evolution-Aware Visual Token Compression for Efficient Large Vision-Language Models](/202606/03/2606.01756v1-evocut-multi-layer-evolution-aware-visual-token-compression-for-efficient-large-vision-language-models)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：视觉token压缩提升LVLM推理效率
+6. [Cost-Aware Diffusion Draft Trees for Speculative Decoding](/202606/03/2606.01813v1-cost-aware-diffusion-draft-trees-for-speculative-decoding)  
+   标签：评分：7.0/10、query:llm-sd
+   evidence：面向LLM投机解码的成本感知扩散草稿树
+7. [LocateAnything: Fast and High-Quality Vision-Language Grounding with Parallel Box Decoding](/202606/03/2605.27365v2-locateanything-fast-and-high-quality-vision-language-grounding-with-parallel-box-decoding)  
+   标签：评分：6.0/10、query:llm
+   evidence：并行框解码加速VLM推理
+8. [Beyond Surrogate Gradients: Fully Differentiable Token Pruning for Vision-Language Models](/202606/03/2605.28051v1-beyond-surrogate-gradients-fully-differentiable-token-pruning-for-vision-language-models)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：完全可微的视觉令牌剪枝，避免代理梯度，提升训练和推理效率
+9. [PrunePath: Towards Highly Structured Sparse Language Models](/202606/03/2605.28283v1-prunepath-towards-highly-structured-sparse-language-models)  
+   标签：评分：6.0/10、query:llm
+   evidence：结构化剪枝用于高效LLM推理
+10. [DeepLatent: Think with Images via Parallel Latent Visual Reasoning](/202606/03/2606.00562v1-deeplatent-think-with-images-via-parallel-latent-visual-reasoning)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：提出并行潜在视觉推理以减少VLM推理延迟
+11. [Mitigating Hallucinations in Large Language Models Via Decoder Layer Skipping](/202606/03/2606.00819v1-mitigating-hallucinations-in-large-language-models-via-decoder-layer-skipping)  
+   标签：评分：6.0/10、query:llm
+   evidence：解码器层跳过实现高效LLM推理与幻觉缓解
 
 
 <div class="dpr-home-promo-card">
