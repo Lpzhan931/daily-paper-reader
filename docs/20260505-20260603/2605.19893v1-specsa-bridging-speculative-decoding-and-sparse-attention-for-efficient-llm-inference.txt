@@ -1,0 +1,1229 @@
+Title: SpecSA: Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference
+
+URL Source: https://arxiv.org/pdf/2605.19893v1
+
+Published Time: Wed, 20 May 2026 01:40:00 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# SpecSA: Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference 
+
+Zhibin Wang 
+
+State Key Laboratory for Novel Software Technology Nanjing University Nanjing, China 
+
+Ziyu Zhong 
+
+State Key Laboratory for Novel Software Technology Nanjing University Nanjing, China 
+
+Nuo Shen 
+
+State Key Laboratory for Novel Software Technology Nanjing University Nanjing, China 
+
+Yuhang Zhou 
+
+State Key Laboratory for Novel Software Technology Nanjing University Nanjing, China 
+
+Rong Gu 
+
+State Key Laboratory for Novel Software Technology Nanjing University Nanjing, China 
+
+Sheng Zhong 
+
+State Key Laboratory for Novel Software Technology Nanjing University Nanjing, China 
+
+Abstract 
+
+Speculative decoding and dynamic sparse attention are two complementary approaches for accelerating long-context LLM inference: the former amortizes target-model execution across multiple verifier queries, while the latter reduces each query’s KV-cache working set. Directly combining them, however, exposes a structural mismatch: speculative ver-ification relies on cross-query commonality, whereas dy-namic sparse attention assigns query-specific sparse lay-outs. This mismatch limits KV-block reuse, amplifies NSA’s branch-wise overheads, and makes verification strategy se-lection input- and regime-dependent. We present SpecSA, a sparse speculative-verification framework that turns dy-namic sparse attention into a verification-oriented workload. SpecSA combines overlap-aware grouped-query execution, refresh/reuse-based NSA kernel fusion, and profile-guided prompt-adaptive orchestration to improve cross-query reuse, reduce selected-index and branch-fusion overheads, and se-lect effective draft-verification strategies under user-specified precision classes. Experiments on NVIDIA H100 GPUs show that SpecSA achieves up to 3.49 × end-to-end throughput over autoregressive NSA decoding and up to 6.86 × kernel speedups for sparse speculative verification. 
+
+Keywords: speculative decoding, sparse attention, large lan-guage model inference, kernel optimization, long-context inference 
+
+1 Introduction 
+
+Attention [ 30 ] is the core mechanism of large language mod-els (LLMs) that enables them to capture long-range depen-dencies in text. During autoregressive decoding, generating each new token requires loading the entire accumulated key-value (KV) cache from memory to compute attention, which results in a heavy memory bandwidth cost, especially as the increasingly demanding of long-context applications [ 10 , 17 ]. Typically, for Llama-3.1-8B-Instruct [ 14 , 24 ] with a 64K con-text on an NVIDIA H100 PCIe GPU [ 27 ], the attention com-putation accounts for 97.20% of each decoding step. To re-lieve the pressure of KV-cache access, two complementary optimizations have emerged: speculative decoding [ 7 , 20 ]mitigates the bandwidth bottleneck by increasing arithmetic intensity, while sparse attention [ 15 ] directly reduces the volume of accessed KV cache. Speculative decoding shifts the target model’s execution toward the compute-bound by enlarging the effective query batch size. Instead of invoking the target model for each newly generated token, a lightweight draft model proposes candidate continuations, and the target model verifies mul-tiple candidates in parallel. In dense verification, these ver-ifier queries access the same committed-prefix KV cache simultaneously, amortizing the expensive KV-cache loads across multiple candidates. Many frameworks further or-ganize candidates into draft trees [ 6 , 21 , 22 , 25 ] to improve the acceptance rate. However, tree-structured verification introduces complex tree masks and speculative path depen-dencies. As the context size increases, these irregularities may also increase the access cost of KV cache. Sparse attention takes another approach of shrinking the per-query KV working set. Instead of performing attention over the full KV history, dynamically selected sparse atten-tion [ 11 , 13 , 15 , 23 , 33 ] routes each query to a subset of relevant context blocks, reducing both computation and KV-cache access in long-context decoding. Taking the Native Sparse Attention (NSA) [ 33 ] as an example, it combines block-level dynamic selection, compressed long-range context, and dense local windows with hardware-friendly sparse execu-tion. Specifically, NSA first compresses the KV cache into blocks and selects the Top-𝑛 relevant blocks for each query, while also preserving a sliding window of recent tokens. These branches are fused with learned gates to preserve complementary context while reducing KV access.  
+
+> 1
+> arXiv:2605.19893v1 [cs.OS] 19 May 2026 EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al.
+
+Intuitively, the two directions are naturally complemen-tary, but their direct integration exposes a fundamental mis-match: 
+
+The per-query selectivity of dynamic sparse attention con-flicts with the cross-query commonality of speculative verifi-cation. 
+
+This mismatch creates three practical challenges: (1) Cross-query reuse is hidden behind query-specific routing. We ob-serve that nearby verifier queries often select overlapping KV blocks, but decoding-oriented sparse kernels process each query independently and reload these blocks, while prefill-oriented kernels may fetch blocks unused by any verifier query. A practical verifier must exploit this over-lap without losing the option to preserve exact per-query selected-block semantics. (2) NSA’s branch structure frag-ments short verifier work. The compression, selection, and sliding-window branches are normally orchestrated through separate paths [ 33 ]. During verification, the query batch is larger than single-token decoding but still too small to amortize repeated kernel launches and intermediate materi-alization. (3) The best verification strategy is input-dependent. 
+
+Sparse verification changes how draft length, tree traversal, selected-block overlap, and refresh/reuse scheduling interact. As a result, a fixed speculative-decoding configuration can be suboptimal when acceptance behavior or sparse-kernel per-formance shifts across prompts and context-length regimes. To address these challenges, we present SpecSA, a sparse speculative-verification framework that integrates dynamic sparse attention into speculative decoding with three key mechanisms: First, SpecSA introduces an overlap-aware kernel design (Section 4) that flattens draft trees with selected traversal orders and groups up to 𝐶 adjacent verifier queries in one thread block. Each group can use an exact merged schedule that deduplicates overlapping selected blocks while preserv-ing per-query NSA semantics, or an approximate shared-index layout that reuses one representative query’s sparse layout for higher KV reuse. Second, SpecSA redesigns NSA kernel fusion around re-fresh and reuse layers (Section 5). Refresh layers recompute selected indices and partially fuse the downstream selection and sliding-window branches, reducing branch-output ma-terialization. Reuse layers inherit the nearest refresh indices, skip repeated index construction, and run a fully fused NSA path without intermediate branch writes. Third, SpecSA uses profile-guided prompt-adaptive or-chestration (Section 6) to search complete strategy tuples covering draft-tree shape, traversal order, coarsening mode and factor, and refresh/reuse schedule. The planner ranks candidates offline for each context regime and precision class, then uses accepted-token observations to refine the selected strategy when runtime behavior deviates from the offline profile for that prompt. In addition, SpecSA allows users to specify precision classes that trade off acceptance rate and speed, supporting strict accuracy-preserving execution and faster controlled-approximation modes, while optimizing verification for the chosen setting. In this paper, we make the following contributions: 
+
+• We propose SpecSA, a sparse speculative-verification frame-work that applies speculative decoding to dynamic sparse attention. SpecSA adapts draft-tree verification to NSA-style sparse attention while preserving sparse-layout se-mantics and speculative accept/reject behavior. 
+
+• We introduce three optimizations that make sparse specu-lative verification efficient: overlap-aware kernel design for cross-query KV reuse, refresh/reuse-based NSA kernel fusion to reduce branch fragmentation and index-construction overhead, and profile-guided prompt-adaptive orchestra-tion for complete strategy selection. 
+
+• We evaluate SpecSA on NVIDIA H100 GPUs across iso-lated kernels, target verification, EAGLE-3 integration, and profile-guided planning, showing up to 6.86 × kernel speedup, 1.45 × verification-stage speedup, 3.49 × end-to-end throughput speedup, and 33 .2% higher accepted-token throughput from planning. 
+
+2 Background 
+
+2.1 Speculative Decoding 
+
+Speculative Decoding (SD) [ 7 , 20 ] accelerates LLM inference via a "draft-and-verify" workflow (Figure 1(a)). A lightweight draft model first proposes multiple candidate tokens, which are then verified concurrently by a larger target model. By verifying multiple candidate positions in a single forward pass, these queries share the prefix and access the same KV cache during attention. This amortizes memory access and execution overhead across candidate tokens, thereby increasing the effective query batch size and GPU utilization. Recent research has further improved the acceptance rate by organizing candidates into trees [ 6, 21 , 22 , 25 ]. By al-lowing the draft model to expand multiple branches into a candidate tree, the target model can evaluate multiple poten-tial paths concurrently, resulting in a higher acceptance rate but more complex verification. Specifically, tree-based spec-ulation requires complex tree masks to track dependencies between draft tokens, which complicates attention execution. In addition, tree-based speculation increases the number of draft tokens per step, which requires more efficient kernel design to maintain the amortization benefits. 
+
+2.2 Sparse Attention 
+
+In long-context decoding, dense attention cost scales lin-early with the KV-cache length. Sparse attention reduces this cost by restricting computation to a smaller working set of context tokens or blocks. Early methods rely on static patterns, such as sliding windows or predefined strided con-nections (e.g., Longformer [ 4 ], BigBird [ 34 ]). However, static    
+
+> 2SpecSA : Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference EuroSys ’27, April 19–23, 2027, Rabat, Morocco (a) Speculative Decoding (b) Native Sparse Attention (c) SD+NSA challenge
+
+Figure 1. Background and mismatch when combining speculative decoding with sparse attention. patterns struggle to capture the complex semantic relation-ships; dynamic methods (e.g., Top-𝑘 attention [ 15 ]) have be-come the preferred standard. Recent systems often employ structured, hardware-aligned blockwise sparsity to better align KV-cache access with GPU execution [ 13 , 33 ]. Among them, Native Sparse Attention (NSA) [ 33 ] is a representative, and also the main focus of this paper. As illustrated in Figure 1(b), NSA [ 33 ] reduces KV access by fusing three complementary branches via learned gates: (1) Compression branch: Aggregates historical tokens into compressed blocks (length 𝑙 , stride 𝑑 ) to capture broad con-text. (2) Selection branch: Uses compressed representations to route queries to the Top-𝑛 relevant raw KV blocks (size 𝑙 ′). For a query 𝑞 𝑡 at layer 𝑗 , we denote these selected block in-dices as 𝐼 ( 𝑗 ) 
+
+> 𝑡
+
+. (3) Sliding-window branch: Retains dense access to the most recent 𝑤 tokens to preserve local semantics. By operating at block granularity, the compression and selection branches ensure hardware-friendly, contiguous KV-cache access. 
+
+Beyond NSA. Although SpecSA utilizes NSA as its con-crete backend, the architectural insights extend to other dy-namic sparse-attention frameworks that decouple routing from execution. Extending to methods like DeepSeek Sparse Attention (DSA) [ 23 ] is theoretically feasible but strictly con-ditioned. Specifically, transferring our approach requires: (1) explicitly exposed routing metadata, (2) the capability for query-level selection, and (3) sufficient cross-query in-dex overlap. In the absence of these precise conditions, a backend-specific redesign is mandatory. 
+
+2.3 Speculative Decoding Meets Sparse Attention 
+
+The preceding text shows that SD and NSA optimize orthog-onal dimensions of the attention bottleneck: SD amortizes target execution and dense KV-cache access across verifier queries, whereas NSA reduces the KV working set within each query. Intuitively, integrating them can provide a com-pounding acceleration for long-context inference. However, their direct combination exposes a structural mismatch: Speculative decoding depends on cross-query regular-ity , whereas dynamic sparse attention introduces query-specific sparse layouts .This structural mismatch arises because the two tech-niques extract efficiency from different forms of structure. Dense speculative verification benefits when many verifier queries remain aligned: they share the committed prefix, traverse the same KV-cache region, and therefore amortize target-model execution and KV-cache loads across the batch. Dynamic sparse attention, in contrast, derives efficiency from differentiating queries: each query independently selects a subset of relevant KV blocks, so its execution path is deter-mined by its own routing result rather than by the batch-wide shared prefix. In summary, combining them faces following challenges: 
+
+Heavy redundant access. As shown in Figure 1(c), existing sparse-attention kernels can be classified into two categories: 1) Decoding-oriented kernels [ 11 , 13 , 19 , 23 , 32 , 33 ] that exe-cute one query as well as load the corresponding KV blocks, and 2) Prefilling-oriented kernels [ 11 , 13 , 23 , 33 ] that load the entire KV cache and for each token’s KV, the query select-ing the corresponding token are combined into one thread block. However, both categories fail to support the verifica-tion workload: employing decoding-oriented kernels leads to duplicated KV-block loads across queries, while prefilling-oriented kernels may load many KV blocks that are irrelevant to any query. 
+
+Costly branch-wise kernel orchestration and interme-diate data movement. NSA inherently evaluates compres-sion, selection, and sliding-window branches and then com-bines their results. This structure is particularly awkward 
+
+> 3
+
+EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al. 
+
+for speculative verification. Unlike single-query decoding, verification involves multiple queries, which heavily ampli-fies branch-wise kernel launches and intermediate-result materialization. Unlike prefilling, the verifier batch is too small to amortize these fixed overheads, resulting in low arithmetic intensity per branch. As a result, kernel launches, intermediate writes and reads, and cross-branch data move-ment account for a disproportionate share of latency. Full fusion is further limited because each branch maintains its own normalization state before gated aggregation. 
+
+Input-dependent acceptance and varied kernel perfor-mance. Compared with speculative decoding with dense verification, the performance of sparse verification presents varied patterns related to the draft length. Dense attention uses a regular layout, whereas NSA changes the sparse exe-cution plan as the draft length changes: selected-block sets, index-construction overhead, and cross-query layout over-lap all depend on the generated draft positions. Even worse, we observe that the acceptance rate and kernel performance are both highly input-dependent (Table 2), which makes it difficult to select a single optimal configuration for all inputs. 
+
+3 System Overview 
+
+This section proposes SpecSA to address the above chal-lenges. We first summarize the design insights behind sparse speculative verification, and then show how SpecSA inte-grates the corresponding mechanisms into the draft–verify– accept workflow. 
+
+3.1 Design Insights Insight 1: Nearby verifier queries have highly overlap-ping selected blocks. Tree-based speculative verification processes multiple draft positions in the same target-model pass. Although dynamic sparse attention gives each query its own selected-block set, verifier queries that are close in posi-tion often have semantically similar contexts and therefore select many of the same KV blocks. Our profiling confirms this trend: as shown in Figure 2, under an 8K context, the selected-block overlap ratio between adjacent verifier queries typically remains around 50%–90% across most layers. This overlap suggests grouping positionally close queries for joint execution, while the kernel can either preserve each query’s own layout or use a faster approximate shared layout. 
+
+Insight 2: Cross-layer stability enables fully fused exe-cution. Selected-block layouts are often stable across nearby Transformer layers, consistent with prior observations [ 3 ,11 , 13 ]; our profiling confirms the same trend during specu-lative verification (Table 1). SpecSA therefore organizes exe-cution into Refresh/Reuse layers: refresh layers recompute selected indices and retain the routing-aware partial-fusion path, whereas reuse layers inherit the latest layout from the 10 20 30 40 50 60 70    
+
+> Token Position in Verification Batch
+> 0%
+> 20%
+> 40%
+> 60%
+> 80%
+> 100%
+> Overlap Ratio (%)
+> Layer 03 Layer 07 Layer 11 Layer 15
+
+Figure 2. Selected-block overlap ratio between adjacent ver-ifier queries (8K context). = (D, k, T, C, M, S)  
+
+> Profile-Guided Planner
+> Draft Construction
+> depth = D, branching = k
+> Sparse Verification
+> Acceptance /
+> Deferred Commit
+> input
+
+... q1 q2
+
+... q1
+
+... q1 q2     
+
+> Cross
+> query
+> overlap
+> Token
+> compression
+> Token
+> selection
+> Sliding
+> window
+> D, k, T C, M, S
+> runtime
+> adaption
+> verified
+> logits
+> tree-based
+> input
+> Verification-oriented fusion
+> SMEM / regs
+> Partial : selection + window
+> Full : compression + selection + window
+> Cross-query execution
+> Shared KV-block only loads once
+> (휃￿,휃￿)
+> sec 6
+> sec 4
+> sec 5
+
+Figure 3. Overview of SpecSA. nearest preceding refresh layer, bypass index derivation, and directly enter a fully fused kernel. 
+
+Insight 3: Long decode horizons enable prompt-aware adaptive planning. Speculative decoding typically spans many verification rounds when generating a response, which gives the system a natural adaptation window for each prompt. Rather than committing to one fixed strategy for the entire generation, SpecSA can start from a strong initial choice and refine it as prompt-specific acceptance behavior becomes ob-servable. This observation motivates SpecSA’s throughput-aware planner, which combines offline strategy preselection with low-overhead prompt-aware reselection during decod-ing. 
+
+3.2 Overview 
+
+Figure 3 illustrates how SpecSA integrates these mechanisms into the standard draft-verify-accept loop. While the outer interface remains unchanged, SpecSA fundamentally over-hauls the verification internals. Rather than naively replacing dense attention with an off-the-shelf sparse kernel, SpecSA treats verification as a jointly planned workload: the planner synergizes draft construction with sparse verification, while 
+
+4SpecSA : Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference EuroSys ’27, April 19–23, 2027, Rabat, Morocco 10 20 30 40    
+
+> Query Distance
+> 40%
+> 50%
+> 60%
+> 70%
+> 80%
+> 90%
+> Overlap Ratio (%)
+> Layer 03 Layer 07 Layer 11 Layer 15
+
+Figure 4. Selected-block overlap ratio versus absolute token-position distance Δ (8K context). The cross-query overlap consistently peaks at small Δ and decays as queries become further apart in the sequence. the verifier exploits cross-query index overlap and fused execution to maximize hardware efficiency. 
+
+Overlap-aware cross-query execution (Section 4). The first optimization module targets redundant KV-block traf-fic inside sparse verification. SpecSA groups nearby verifier queries according to the draft traversal order and executes them within a shared thread block, so overlapping selected blocks are loaded once and reused across queries. Depend-ing on the deployment precision budget, this module either preserves per-query sparse layouts through an exact merged schedule or uses a faster approximate shared-index layout for highly overlapping query groups. 
+
+Verification-oriented kernel fusion (Section 5). The sec-ond module reduces the branch fragmentation introduced by NSA’s compression, token-selection, and sliding-window paths. In refresh layers, SpecSA keeps the routing-dependent compression path separate but fuses token selection, sliding-window attention, and gated aggregation into a downstream kernel. In reuse layers, stable selected-block indices remove the routing dependence, enabling a fully fused kernel that computes all NSA branches with on-chip intermediate state and writes back only the final output. 
+
+Profile-guided adaptive planning (Section 6). The third module coordinates draft construction and sparse verifica-tion as one strategy-selection problem. An offline profiler ranks joint configurations over draft-tree shape, traversal or-der, cross-query coarsening, and refresh/reuse schedules for each context regime and precision class. At runtime, SpecSA starts from the profiled best strategy and refines it during the early decoding window when prompt-specific acceptance or kernel behavior deviates from the profile. 
+
+4 Overlap-Aware Kernel Design 
+
+Insight 1 and Figure 4 show that verifier queries that are close in sequence position tend to select overlapping KV blocks, with overlap decreasing as token-position distance grows. Ex-ploiting this spatial locality, SpecSA employs overlap-aware cross-query coarsening, grouping adjacent queries into a sin-gle thread block to amortize KV-block loads and scheduling overheads. We develop two variants of kernel execution: an 
+
+exact merged-schedule variant that preserves precise per-query selection semantics, and an approximate shared-index variant that aggressively reuses a single selected-block set across the group, trading exact selection semantics for lower scheduling overhead. 
+
+4.1 Cross-Query Grouping Grouping design. To balance cross-query KV reuse and kernel scheduling overhead, SpecSA avoids the extremes of single-query grouping (zero reuse) and all-query grouping (massive scheduling overhead and low parallelism). Instead, as shown in Figure 5(a), it employs a middle-ground strategy: partitioning verifier queries into thread blocks of up to 𝐶 
+
+adjacent queries. This design balances the tradeoff between reuse and overhead by keeping the group size 𝐶 manageable. While grouping is trivial for a flat draft sequence, tree-based speculation introduces structural differences. Specif-ically, a tree node can be grouped either with its siblings (candidates for the same position that are likely synony-mous) or with its parent and children (candidates across nearby positions with strong semantic proximity). In prac-tice, SpecSA reorganizes the draft tree into a flattened batch using two traversal orders [ 9 ]: breadth-first search (BFS) to enforce sibling-based grouping, and depth-first search (DFS) to enforce parent/child-based grouping. Because the optimal grouping strategy depends heavily on the specific verification setting and realized query ordering, no single tree-local rule is universally superior. Therefore, rather than using a static heuristic, SpecSA delegates this choice to the throughput-aware planner (Section 6), which adaptively selects the best traversal order based on offline profiles and runtime states. Driven by the selected traversal order, SpecSA partitions the flattened batch into groups of up to 𝐶 adjacent queries. Following the principle of thread coarsening [ 31 ], each group is processed in parallel by a single thread block. By sharing register tiles across query heads in grouped-query atten-tion (GQA) [ 1], this execution amortizes memory access and scheduling overheads without altering the logical tree masks or absolute positions. This grouped execution naturally ex-tends to the sliding-window branch, which advances a shared window scan while enforcing per-query local masks. After grouping verifier queries, the remaining question is how the kernel handles their non-identical selected-block sets. We will delve into two distinct execution variants. 
+
+> 5
+
+EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al. (a) Query Grouping                 
+
+> 푞￿
+> 푞￿
+> grouped
+> grouped
+> (b)Exact variant
+> 푞￿
+> 푞￿2712 18
+> 2812 18
+> ②merge
+> 2712 18
+> ✓
+> ✓
+> 푞￿
+> 푞￿
+> 8
+> -∞
+> -∞
+> ①designate q0 as rep.
+> Attention mask
+> ③load
+> shared KV
+> (c) Approximate variant
+> ③load
+> Shared KV 푞￿
+> 푞￿
+> grouped
+> …
+> Exact per -query selection; load each block once ✓
+> Approximate selection; no merge step
+
+≈            
+
+> ✓✓✓
+> ✓✓✓
+> 푞￿
+> 푞￿
+> 2712 18
+> ✓
+> ✓
+> 푞￿
+> 푞￿
+> Attention mask
+> ✓✓
+> ✓✓✓
+> ✓
+> 푞￿
+> 푞￿
+> bfs flatten
+> 2712 18
+> ②select
+> compressed
+> block
+> ①select
+> compressed
+> block
+
+Figure 5. Overlap-aware kernel design. 
+
+4.2 Exact Merged-Schedule Variant 
+
+The exact merged-schedule variant reduces memory traf-fic by jointly scheduling shared KV blocks without altering per-query selection semantics. As shown in Figure 5(b), the kernel achieves this through three steps: (1) Independent Selection: It computes the selected block-index set 𝐼 ( 𝑗 )
+
+𝑡 inde-pendently for each query in the group. (2) On-chip Merging: 
+
+It concatenates these per-query indices, sorts them, and per-forms a linear scan to deduplicate identical entries. This cre-ates a unified schedule containing the union of all selected blocks while tracking query-to-block ownership. (3) Shared Loading and Masking: Each unique KV block in the merged schedule is loaded from HBM exactly once and shared across the group. To preserve exact semantics, the kernel applies a row-wise mask during attention computation: logits are masked to −∞ if the key block does not belong to a specific query’s original selected set. This design effectively amortizes the HBM load costs of overlapping blocks while remaining semantically equivalent to independent query execution. 
+
+4.3 Approximate Shared-index Variant 
+
+Prior work [ 26 ] has shown that leveraging the same index for neighboring tokens barely affects model quality. There-fore, this variant aims to maximize reuse by forcing all 𝐶 
+
+queries in the group to share the same selected block set. As shown in Figure 5(c), instead of computing per-query indices and merging them, the kernel simply: 1) designates a single representative query for the group (e.g., the one with the longest prefix); 2) computes the selected block-index set 
+
+𝐼 ( 𝑗 )
+
+𝑡 solely for this representative; and 3) applies this shared layout to compute attention for the entire group. This strategy completely bypasses the sort-and-merge overhead and drastically reduces HBM traffic for KV-block loading. The approximation arises because non-representative queries may miss their individually preferred KV blocks. However, while the sparse-attention branch becomes approx-imate, the sliding-window branch remains entirely precise, 
+
+Table 1. Benchmark results (%) on a 1B NSA model, evalu-ated on PIQA, HellaSwag, ARC-Easy, and ARC-Challenge. “SpecSA + reuse layers” uses the training-free IndexCache-style [ 3] refresh/reuse schedule S = {3, 6, 7, 8, 12 , 13 , 14 , 15 },and “ 𝐶 = 4” denotes the approximate shared-index variant with grouping factor 4. 
+
+Benchmark SpecSA SpecSA + reuse SpecSA (𝐶 = 4)SpecSA + reuse (𝐶 = 4)
+
+PIQA / % 73.78 
+
+± 1.03 73.99 
+
+± 1.02 73.88 
+
+± 1.02 73.88 
+
+± 1.02 HellaSwag / % 58.37 
+
+± 0.49 58.55 
+
+± 0.49 58.53 
+
+± 0.49 58.47 
+
+± 0.49 ARC-Easy / % 69.49 
+
+± 0.94 69.57 
+
+± 0.94 69.82 
+
+± 0.94 69.82 
+
+± 0.94 ARC-Challenge / % 36.95 
+
+± 1.41 37.12 
+
+± 1.41 37.37 
+
+± 1.41 37.29 
+
+± 1.41 (a) Original NSA separate launches          
+
+> Compute path
+> HBM-resident values
+> fresh
+> indices
+> W/R
+> output
+> W/R
+> output
+> W/R
+> 표￿gating
+> cmp slc win
+> 푞￿
+> read branch
+> outputs
+> read idx
+> (b) Refresh layer: partial fusion 2 launches
+> fresh
+> indices
+> W/R
+> output
+> W/R
+> output
+> on-chip
+> output
+> on-chip
+> 표￿gating
+> cmp slc win
+> 푞￿
+> read
+> cmp
+> out put
+> read idx
+> (c) Reuse layer : full fusion 1 launch
+> output
+> on-chip
+> output
+> on-chip
+> output
+> on-chip
+> 표￿cmp slc win
+> 푞￿
+> final
+> output
+> W
+> read idx
+> reused
+> indices
+> R
+> in-register gating
+> Compute path
+> HBM-resident values
+> Compute path
+> HBM-resident values
+> output
+> W/R
+> final
+> output
+> W
+> final
+> output
+> W
+> on-chip
+> state
+> ①Routing
+> ②
+> Downstream
+> fusion
+> ③
+> Write-back
+> ①Skip routing
+> ③Reg. aggregation
+> ②
+> Full fusion
+
+Figure 6. Demonstration of three fusion strategies. enforcing strict per-row boundaries and causal masks using each query’s individual absolute position. 
+
+Accuracy evaluation. To validate its quality impact, we con-duct a model-integrity study on a 1B NSA target model [ 36 ,37 ]. We evaluate the variant using lm-evaluation-harness [ 12 ]on PIQA [ 5 ], HellaSwag [ 35 ], ARC-Easy, and ARC-Challenge [ 8](using 3-, 10-, and 25-shot, respectively). As shown in Ta-ble 1, the approximate variant ( 𝐶 = 4) exhibits negligible accuracy degradation compared to the exact SpecSA base-line. In practice, SpecSA applies this aggressive coarsening only in regimes with sufficient concurrent queries (typically at larger draft length 𝛾 ) where cross-query reuse heavily outweighs the approximation penalty. 
+
+6SpecSA : Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference EuroSys ’27, April 19–23, 2027, Rabat, Morocco 
+
+5 Kernel Fusion 
+
+Figure 6(a) illustrates the branch-wise execution challenge of the original NSA. While evaluating branches through sep-arate paths is tolerable in standard single-query decoding, it becomes a severe bottleneck in speculative verification. Be-cause a verifier pass consists of many short, heterogeneous queries, repeatedly materializing intermediate indices and branch outputs to HBM for gated aggregation incurs dispro-portionate kernel-launch and memory-bound overheads. To eliminate this fragmentation, SpecSA employs a two-tiered kernel fusion strategy guided by cross-layer index sta-bility (Insight 2) [ 3 ]: (1) Routing-aware partial fusion (Refresh layers): For layers that must compute fresh indices, SpecSA respects the strict data dependence between routing and selected attention. It isolates the compression/routing path while fusing the downstream token-selection and sliding-window branches. (2) Index-reuse-enabled full fusion (Reuse layers): For layers that inherit a stable selected-block layout from a preceding refresh layer, the data dependence is bro-ken. SpecSA bypasses index derivation entirely and deploys a fully fused kernel that computes all three NSA branches and their gated aggregation in a single launch. 
+
+5.1 Routing-Aware Partial Fusion 
+
+NSA leaves a natural partial-fusion opportunity: the token-selection and sliding-window branches both consume the same verifier query and can share one downstream kernel, provided their independent normalization states are pre-served. However, the compression/routing path must remain isolated in refresh layers for two reasons. First, there is a strict data dependency : selected attention cannot issue sparse KV loads until routing produces the Top-𝑛 indices. Second, they exhibit mismatched hardware execution patterns : rout-ing is bound by importance scoring and Top-𝑛 reduction, whereas downstream attention is optimized for sparse mem-ory gathering and attention accumulation. Forcing them into a monolithic kernel would couple conflicting resource requirements and offset the fusion benefits. To resolve this, SpecSA executes refresh layers using a two-launch strategy, as shown in Figure 6(b): (1) Routing Launch: 
+
+SpecSA first runs the compression/routing path to produce the compressed-branch output and the fresh selected indices. (2) Downstream Fusion: Once indices are available, SpecSA launches a partially fused kernel for the token-selection and sliding-window branches. It reads the newly generated in-dices, computes both attention branches alongside their in-dependent online softmax states, and performs gated aggre-gation directly in registers. (3) Unified Write-back: The kernel writes only the final aggregated layer output back to HBM, completely bypassing intermediate branch-output materi-alization. This removes downstream branch fragmentation but still leaves selected-index derivation outside the fused kernel, motivating the index-reuse-enabled full-fusion path introduced next. 
+
+5.2 Index-Reuse-Enabled Full Fusion 
+
+Prior cross-layer index reuse studies observe that sparse in-dices are often stable across adjacent Transformer layers [ 3,11 ]. Therefore, for reuse layers , the selected-block layout is inherited from the nearest preceding refresh layer [ 3 , 11 ]. This inheritance provides a controlled approximation that bypasses layer-specific recomputation overhead while pre-serving concrete sparse evaluation. To initialize the stream, the first layer acts as a mandatory refresh layer. As illustrated in Figure 6(c), SpecSA exploits this by en-abling a single-launch full-fusion path: (1) Zero-Overhead Routing: Because the sparse layout is already available, SpecSA completely bypasses the separate routing launch. (2) Mono-lithic Execution: It invokes a fully fused kernel that reads the inherited indices, interprets them under the current draft-position masks and compressed-block visibility constraints, and computes the compression, token-selection, and sliding-window branches in one unified pass. (3) In-Register Ag-gregation: The kernel keeps all intermediate branch outputs on-chip, performs gated aggregation directly in registers, and writes back only the final layer output to HBM. By transform-ing the expensive indices from a refresh layer into a reusable execution plan, this design drastically reduces launch over-head and avoids intermediate materialization. 
+
+Quality impact. Because index reuse is a controlled approx-imation, we evaluate its impact on model integrity using a 1B NSA target model [ 36 , 37 ]. We apply a IndexCache-style [ 3]greedy calibration to determine the optimal schedule, yield-ing the reuse pattern S = {3, 6, 7, 8, 12 , 13 , 14 , 15 }. Evaluated via lm-evaluation-harness [ 12 ] on PIQA, HellaSwag, ARC-Easy, and ARC-Challenge, both the standard index-reuse execution and its aggressive combination with approximate cross-query grouping ( 𝐶 = 4) exhibit negligible accuracy degradation (Table 1). This confirms that our schedule pre-serves reasoning capabilities while maximizing hardware efficiency. 
+
+6 Profile-Guided Prompt-Adaptive Orchestration 
+
+Compared with full-attention speculative decoding, sparse-attention speculative decoding introduces several changes as follows: 1) Different draft-length behavior. As shown in Figure 7, full attention and SpecSA variants show different forward-latency trends as the draft length 𝛾 changes, so the draft configuration preferred by a dense verifier may not be optimal for sparse verification; 2) Larger configuration space. Sparse verification introduces additional choices, in-cluding traversal order, coarsening mode, coarsening factor, and refresh/reuse schedule. These choices interact with draft construction because changing 𝛾 also changes the realized        
+
+> 7EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al. 050 100 150 200 250
+> Draft Length
+> 20
+> 30
+> 40
+> 50
+> 60
+> Latency (ms)
+> Full Attention SpecSA
+
+Figure 7. Forward latency versus draft length 𝛾 on a Llama3-1B backbone at 32K context; SpecSA uses the same backbone with its attention layers replaced by NSA-based sparse veri-fication. verifier batch size, the opportunity for cross-query coars-ening, and the extent to which sparse-routing and fusion overheads are amortized; and 3) Prompt-dependent preference. 
+
+As motivated by Insight 3 in Section 3.1, different prompts can favor different configurations because acceptance behav-ior and selected-index overlap are input-dependent. This section presents SpecSA’s profile-guided orchestra-tion policy, using EAGLE-3 [ 22 ] as the primary framework. We first formalize the joint strategy space and throughput objective, then describe how offline profiles preselect strong initial strategies, and finally introduce a lightweight runtime guard that dynamically refines choices to handle prompt-specific deviations. 
+
+6.1 Strategy Space and Optimization Problem Strategy space. SpecSA formulates sparse speculative verifi-cation as a joint strategy-selection problem. To navigate the interacting draft-side and target-side choices, we categorize the search space into three types of variables, denoted by 𝜃 𝑑 ,
+
+𝜃 𝑠 , and P:
+
+• Full-attention variables 𝜃 𝑑 = (𝐷, 𝑘, T ) : Draft-tree depth 
+
+𝐷 , branching width 𝑘 , and traversal order T . These dic-tate the number of verifier queries and their positional adjacency in the batch. 
+
+• Sparse-attention variables 𝜃 𝑠 = (𝐶, 𝑀, S) : Thread coars-ening factor 𝐶 , coarsening mode 𝑀 , and refresh/reuse schedule S. These control how overlapping KV blocks are shared across queries and how often selected indices are recomputed across layers. 
+
+• User-specified constraint P: A precision class P that bounds the valid subspace by restricting the strategy to one of four levels: Strict (exact coarsening, all-refresh schedule), Reuse-only (exact coarsening, conservative re-fresh/reuse schedule), Approx-only (approximate coarsen-ing, all-refresh schedule), or Approx+Reuse (both approx-imate coarsening and index reuse). This categorization explicitly balances exact sparse-attention semantics with peak verification efficiency. 
+
+Problem formulation. We formulate framework-level plan-ning as a constrained discrete optimization problem. For a context-length regime 𝑟 and user-specified precision class 
+
+P, SpecSA selects the strategy tuple (𝜃 𝑑 , 𝜃 𝑠 ) that maximizes the expected accepted-token throughput: 
+
+arg max   
+
+> (𝜃 𝑑 ,𝜃 𝑠 )
+
+E[𝐴 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P)] 
+
+E[𝑇 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P)] .
+
+where 𝐴 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P) is the number of accepted tokens per verification step, and 𝑇 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P) is the end-to-end step latency. E[·] denotes the expectation over prompts and verifier queries under regime 𝑟 and precision class P.
+
+6.2 Profile-Guided Strategy Preselection Profiling. To solve the optimization problem without run-time overhead, SpecSA builds an offline profiler on the target platform. Given a small calibration prompt set, the profiler evaluates the valid candidate strategies for each (𝑟, P) by run-ning the end-to-end speculative decoding workflow. During execution, it explicitly measures the expected accepted to-kens E[𝐴 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P)] and step latency E[𝑇 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P)] 
+
+to compute the accepted-token throughput objective. The resulting profile is organized as a lookup table indexed by the tuple (𝑟, P) . Each table entry contains a ranked list of valid strategy pairs (𝜃 𝑑 , 𝜃 𝑠 ) sorted by descending throughput. Alongside the strategy, the table stores the expected accep-tance rate E[𝐴 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P)] , which serves as the reference threshold for the runtime guard. 
+
+Preselection. In our implementation, the offline profile forms a compact 192-entry lookup table spanning four context-length buckets ( 0–4K, 4–8K, 8–12 K, and 12 –16 K), four pre-cision classes and 12 ranked candidates in each bucket. At runtime, SpecSA bypasses expensive online grid search via a direct 𝑂 (1) table lookup. Given the initial context length and user-specified precision class P, it maps them to the regime 
+
+𝑟 and retrieves the highest-ranked valid strategy (𝜃 ∗ 
+
+> 𝑑
+
+, 𝜃 ∗ 
+
+> 𝑠
+
+).This lookup gives a low-overhead initial configuration; since offline profiles rely on small calibration sets and coarse buck-ets, the runtime guard (Section 6.3) later refines the strategy when prompt-specific behavior deviates. 
+
+6.3 Prompt-Adaptive Strategy Refinement Prompt sensitivity. A small profiling slice under the same deployment setting shows that the best profiled strategy is not uniform across prompt types. As shown in Table 2,  
+
+> 8SpecSA : Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference EuroSys ’27, April 19–23, 2027, Rabat, Morocco
+
+Table 2. Prompt sensitivity of profiled strategies in the 0–4Kcontext bucket under P = Strict . Values report accepted-token throughput in tok/s, with the best result for each prompt shown in bold.                  
+
+> Prompt BFS-large-deep DFS-small-deep DFS-med-base (tok/s) (tok/s) (tok/s)
+> chat-gen. 229.7 229.8 233.4
+> chat-plan. 232.8 222.9 225.0 plain 202.3 225.9 210.2 code 242.2 266.7 259.2
+
+Algorithm 1 Prompt-adaptive runtime strategy refinement.  
+
+> 1:
+
+Input: Profile R, regime 𝑟 , precision class P 
+
+> 2:
+
+(𝜃 𝑑 , 𝜃 𝑠 ) ← Preselect (R , 𝑟, P)  
+
+> 3:
+
+for each verification step 𝑡 do  
+
+> 4:
+
+Run verification, obtain 𝐴 𝑡 ,𝑇 𝑡  
+
+> 5:
+
+if Within the early steps then  
+
+> 6:
+
+(𝜃 𝑑 , 𝜃 𝑠 ) ← Refine (R , 𝑟, P, 𝐴 𝑡 ,𝑇 𝑡 ) 
+
+> 7:
+
+end if  
+
+> 8:
+
+end for 
+
+different prompts select different profiled strategies. This mo-tivates prompt-aware reselection when observed acceptance deviates from the profile. 
+
+The early decoding window provides enough observations for runtime adaptation. 
+
+SpecSA therefore refines the preselected strategy only dur-ing the initial verification steps. At each step, it records the accepted tokens and step latency, then uses these observa-tions to decide whether the profile-selected strategy should be updated. 
+
+Prompt-aware runtime refinement. As outlined in Algo-rithm 1, SpecSA starts from the profile-preselected strategy and runs verification with the current (𝜃 𝑑 , 𝜃 𝑠 ). Each step produces the accepted-token count 𝐴 𝑡 and latency 𝑇 𝑡 , which are already available from speculative verification. During the early steps, SpecSA updates the context-length state as tokens are accepted and invokes Refine with the profile, regime, precision class, and the latest observations. Inside 
+
+Refine , SpecSA smooths the observed accepted-token counts and compares the smoothed value with the expected accep-tance E[𝐴 (𝜃 𝑑 , 𝜃 𝑠 | 𝑟, P)] stored for the active strategy. In our experiments, the smoothing coefficient is 𝛼 = 0.40 ; af-ter an 8-step warmup, if the smoothed value remains below 
+
+0.85 × the profiled expectation for 5 consecutive steps, Re-fine switches to the next highest-ranked valid strategy in the current profile. To avoid oscillation, SpecSA permits at most two profile transitions per request and selects the best config-uration explored in the current run if the mismatch persists. These constants are fixed across context buckets, precision classes, and held-out prompts. Since this policy relies only on statistics already emitted by verification, its negligible bookkeeping overhead is further evaluated in Section 7.4. 
+
+7 Evaluation 
+
+This section presents a comprehensive evaluation of SpecSA. We aim to investigate the following research questions to validate the effectiveness of our proposed optimizations: 
+
+• Q1: Integration with Speculative Frameworks. When integrated with a real speculative decoding framework such as EAGLE-3 [ 22 ], how much end-to-end generation throughput can the full SpecSA system achieve? 
+
+• Q2: Verification-Stage Performance. What is the im-pact of SpecSA on speculative verification latency? 
+
+• Q3: Kernel Performance Breakdown. How do the vari-ous implementations of the SpecSA kernel perform? What is the breakdown performance of SpecSA kernels? 
+
+• Q4: Effectiveness of Verification Planning. Does joint planning over draft construction and sparse verification improve accepted-token throughput over fixed configu-rations, and can lightweight runtime refinement recover from prompt-specific profile mismatch? 
+
+Evaluation setup. Unless otherwise stated, all experiments are conducted on an NVIDIA H100 PCIe GPU [ 27 ]. Our base-line starts from the public NSA Triton reference implemen-tation [ 18 , 29 ] and extends to the verification-oriented exe-cution. We instantiate the standard NSA configuration [33] with compression block size 𝑙 = 32 and stride 𝑑 = 16 , selected block size 𝑙 ′ = 64 and selected block count 𝑛 = 16 , and sliding-window size 𝑤 = 512 , together with 32 query heads, 8 KV heads, and head dimension 64. For end-to-end experiments, prompts are drawn from Children-Stories-Collection [ 2 ]. Unless specified, we use batch size 1 and bfloat16 preci-sion [ 16 ]. All reported latencies are measured with CUDA events via torch.cuda.Event [28]. 
+
+7.1 End-to-End Evaluation in EAGLE-3 (Q1) Configuration and metric. To evaluate whether SpecSA’s optimizations translate to visible end-to-end gains, we inte-grate vanilla NSA [ 18 ] and SpecSA into EAGLE-3 [ 22 ]. We evaluate a 1.2B-parameter NSA target model pretrained on Children-Stories-Collection [ 2 ]. All experiments use a 16K context length, temperature 0.0, and 256 generated tokens. Under this setting, the plain autoregressive decode baseline reaches 49 token/s, and serves as the common speedup refer-ence. We compare end-to-end throughput across draft-tree shapes parameterized by tree depth 𝐷 and branching width 𝑘 .For larger draft lengths ( 𝛾 ≥ 64 ), we enable the exact merged-schedule variant with grouping factor 𝐶 = 2. In the SpecSA with reuse layers setting, the refresh/reuse schedule is cal-ibrated using a training-free IndexCache-style policy [ 3 ], yielding S = {1, 2, 3, 6, 8, 10 , 11 , 15 }.
+
+> 9
+
+EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al. 1 2 3 4 5 6 7 8
+
+> Draft Branching Width
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> 8
+> 9
+> Tree Depth
+> 104
+> 2.13x
+> 114
+> 2.33x
+> 115
+> 2.34x
+> 116
+> 2.37x
+> 117
+> 2.38x
+> 113
+> 2.31x
+> 112
+> 2.28x
+> 104
+> 2.11x
+> 111
+> 2.27x
+> 125
+> 2.54x
+> 125
+> 2.55x
+> 127
+> 2.59x
+> 124
+> 2.54x
+> 120
+> 2.45x
+> 117
+> 2.38x
+> 106
+> 2.16x
+> 119
+> 2.43x
+> 130
+> 2.66x
+> 136
+> 2.77x
+> 134
+> 2.74x
+> 140
+> 2.85x
+> 127
+> 2.59x
+> 112
+> 2.28x
+> 106
+> 2.16x
+> 121
+> 2.48x
+> 134
+> 2.73x
+> 139
+> 2.84x
+> 136
+> 2.78x
+> 133
+> 2.71x
+> 119
+> 2.43x
+> 112
+> 2.29x
+> 105
+> 2.15x
+> 123
+> 2.51x
+> 134
+> 2.72x
+> 141
+> 2.88x
+> 142
+> 2.90x
+> 133
+> 2.71x
+> 125
+> 2.55x
+> 112
+> 2.28x
+> 101
+> 2.06x
+> 122
+> 2.49x
+> 137
+> 2.79x
+> 142
+> 2.89x
+> 139
+> 2.83x
+> 127
+> 2.59x
+> 118
+> 2.41x
+> 109
+> 2.22x
+> 98
+> 2.00x
+> 122
+> 2.50x
+> 132
+> 2.69x
+> 139
+> 2.83x
+> 139
+> 2.84x
+> 127
+> 2.59x
+> 114
+> 2.33x
+> 105
+> 2.14x
+> 91
+> 1.86x
+> 124
+> 2.53x
+> 138
+> 2.82x
+> 139
+> 2.83x
+> 137
+> 2.80x
+> 115
+> 2.34x
+> 115
+> 2.35x
+> 103
+> 2.09x
+> 91
+> 1.85x
+
+(a) Vanilla NSA 1 2 3 4 5 6 7 8 
+
+> Draft Branching Width
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> 8
+> 9
+> Tree Depth
+> 114
+> 2.32x
+> 126
+> 2.57x
+> 126
+> 2.56x
+> 128
+> 2.62x
+> 128
+> 2.61x
+> 122
+> 2.50x
+> 127
+> 2.60x
+> 121
+> 2.47x
+> 121
+> 2.48x
+> 135
+> 2.76x
+> 139
+> 2.84x
+> 140
+> 2.87x
+> 140
+> 2.87x
+> 137
+> 2.80x
+> 134
+> 2.73x
+> 125
+> 2.56x
+> 129
+> 2.63x
+> 141
+> 2.87x
+> 147
+> 2.99x
+> 148
+> 3.02x
+> 147
+> 3.00x
+> 140
+> 2.86x
+> 132
+> 2.69x
+> 124
+> 2.53x
+> 130
+> 2.65x
+> 143
+> 2.93x
+> 151
+> 3.08x
+> 150
+> 3.06x
+> 149
+> 3.04x
+> 142
+> 2.90x
+> 134
+> 2.73x
+> 126
+> 2.58x
+> 132
+> 2.69x
+> 144
+> 2.93x
+> 149
+> 3.03x
+> 156
+> 3.18x
+> 149
+> 3.05x
+> 140
+> 2.86x
+> 134
+> 2.74x
+> 123
+> 2.50x
+> 131
+> 2.68x
+> 144
+> 2.95x
+> 150
+> 3.06x
+> 155
+> 3.17x
+> 150
+> 3.05x
+> 136
+> 2.78x
+> 131
+> 2.67x
+> 118
+> 2.42x
+> 130
+> 2.65x
+> 144
+> 2.95x
+> 149
+> 3.05x
+> 153
+> 3.13x
+> 139
+> 2.83x
+> 133
+> 2.71x
+> 125
+> 2.55x
+> 116
+> 2.36x
+> 129
+> 2.63x
+> 147
+> 3.01x
+> 145
+> 2.95x
+> 150
+> 3.07x
+> 142
+> 2.89x
+> 135
+> 2.76x
+> 122
+> 2.49x
+> 107
+> 2.17x
+
+(b) SpecSA 1 2 3 4 5 6 7 8 
+
+> Draft Branching Width
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> 8
+> 9
+> Tree Depth
+> 122
+> 2.49x
+> 133
+> 2.72x
+> 135
+> 2.75x
+> 135
+> 2.75x
+> 134
+> 2.74x
+> 131
+> 2.67x
+> 139
+> 2.83x
+> 131
+> 2.66x
+> 127
+> 2.59x
+> 139
+> 2.83x
+> 142
+> 2.89x
+> 141
+> 2.89x
+> 152
+> 3.11x
+> 149
+> 3.03x
+> 144
+> 2.93x
+> 133
+> 2.71x
+> 135
+> 2.76x
+> 145
+> 2.97x
+> 152
+> 3.09x
+> 163
+> 3.32x
+> 159
+> 3.24x
+> 143
+> 2.93x
+> 138
+> 2.82x
+> 132
+> 2.69x
+> 138
+> 2.82x
+> 153
+> 3.11x
+> 158
+> 3.22x
+> 158
+> 3.23x
+> 156
+> 3.19x
+> 151
+> 3.07x
+> 143
+> 2.91x
+> 130
+> 2.66x
+> 137
+> 2.80x
+> 151
+> 3.09x
+> 154
+> 3.13x
+> 171
+> 3.49x
+> 160
+> 3.27x
+> 139
+> 2.84x
+> 139
+> 2.84x
+> 132
+> 2.69x
+> 138
+> 2.82x
+> 156
+> 3.19x
+> 159
+> 3.24x
+> 164
+> 3.34x
+> 160
+> 3.27x
+> 144
+> 2.95x
+> 137
+> 2.80x
+> 126
+> 2.58x
+> 136
+> 2.78x
+> 150
+> 3.06x
+> 163
+> 3.32x
+> 164
+> 3.34x
+> 150
+> 3.06x
+> 141
+> 2.88x
+> 126
+> 2.56x
+> 117
+> 2.39x
+> 136
+> 2.78x
+> 146
+> 2.99x
+> 158
+> 3.22x
+> 152
+> 3.10x
+> 144
+> 2.94x
+> 145
+> 2.97x
+> 129
+> 2.63x
+> 108
+> 2.21x
+
+(c) SpecSA with reuse layers 100 
+
+> 110
+> 120
+> 130
+> 140
+> 150
+> 160
+> 170
+> Throughput (token/s)
+
+Figure 8. End-to-end generation throughput under EAGLE-3 with different draft-tree shapes. Each cell shows throughput on the first line and speedup on the second line, where the speedup baseline is the NSA decode throughput (49 token/s). 
+
+Results. As shown in Figure 8, integrating sparse verifi-cation with speculative decoding yields large end-to-end gains over the 49 token/s decode baseline. Across the full grid of evaluated (𝐷, 𝑘 ) settings, vanilla NSA integrated with EAGLE-3 reaches 91–142 token/s, corresponding to 1.85 ×–
+
+2.90 × speedup. SpecSA consistently improves throughput across these tree shapes: without reuse layers, it reaches 107– 156 token/s, or 2.17 ×–3.18 × speedup, and enabling reuse lay-ers further boosts throughput to 108–171 token/s, or 2.21 ×–
+
+3.49 × speedup. The highest absolute throughput is achieved by SpecSA with reuse layers at (𝐷 = 6, 𝑘 = 4), where it reaches 171 token/s, or 3.49 × over the decode baseline. Overall, these results show that the combination of sparse attention with speculative decoding delivers substantial end-to-end acceler-ation, and that the additional optimizations in SpecSA, espe-cially reuse-layer execution, can further improve throughput across the evaluated draft-tree settings. 
+
+7.2 Verification-Stage Performance (Q2) Configuration and metric. To benchmark verification la-tency (Q2), we evaluate NSA target models adapted from Llama3-1B and Llama3-8B backbones [ 14 , 33 ]. We test se-quence lengths 𝑁 ∈ { 16 K, 32 K, 64 K} and draft lengths 𝛾 ∈{4, 64 , 128 }. For reuse layers, we apply an alternating sched-ule S = {1, 3, 5, . . . }. At larger draft lengths ( 𝛾 ∈ { 64 , 128 }), we also evaluate our most efficient grouped-query variants: exact merged-schedule ( 𝐶 = 2) and approximate shared-index ( 𝐶 = 4). We report verification latency and speedup over vanilla NSA [18]. 
+
+Results. As shown in Figure 9, SpecSA consistently acceler-ates verification, with performance gains stacking clearly as optimizations are combined. At a short draft length ( 𝛾 = 4), SpecSA without reuse layers yields modest 1.05 ×–1.07 ×
+
+speedups over vanilla NSA [ 18 ] on both models. Enabling reuse layers significantly boosts this to 1.24 ×–1.28 × (1B) and 
+
+1.17 ×–1.25 × (8B). For larger draft lengths ( 𝛾 ≥ 64 ), grouped-query execution brings additional independent gains. For instance, on the 1B model, the exact variant ( 𝐶 = 2) and approximate variant ( 𝐶 = 4) reach up to 1.10 × and 1.23 ×
+
+speedups, respectively. The 8B model follows the same trend, albeit with slightly more modest gains, up to 1.02 × and 1.12 ×.Crucially, the synergy of multiple optimizations delivers the strongest overall results, especially reuse layers plus the approximate shared-index variant. While combining reuse layers with the exact merged-schedule variant ( 𝐶 = 2) yields substantial speedups of 1.19 ×–1.26 × (1B) and 1.06 ×–1.12 ×
+
+(8B), upgrading to the approximate shared-index variant (𝐶 = 4) unlocks peak performance across the board. This ag-gressive combination achieves the highest overall speedups of 1.30 ×–1.45 × (1B) and 1.18 ×–1.23 × (8B). These results confirm that while individual mechanisms provide measur-able benefits, their synergy is required to unlock the largest practical acceleration for NSA verification. 
+
+7.3 SpecSA Kernel Benchmarking Results (Q3) Configuration and metric. To benchmark verification ker-nels (Q3), we evaluate draft lengths 𝛾 ∈ { 4, 64 } across se-quence lengths 𝑁 ∈ { 8K, 16 K, 32 K, 64 K}. We fix the selected-block count 𝑛 = 16 and control cross-query redundancy by varying the adjacent-query overlap 𝑠 = |𝐼 ( 𝑗 )
+
+𝑡 ∩ 𝐼 ( 𝑗 )
+
+𝑡 −1 | ∈ {3, 6, 10 }. This range explicitly covers both the theoretical lower bound ( 𝑠 = 3, due to mandatory initial/local blocks [ 33 ]) and representative high-overlap scenarios ( 𝑠 ∈ { 6, 10 }) ob-served in real EAGLE traces. We report speedups over the vanilla NSA baseline [18] in Fig. 10. 
+
+Comparison with Vanilla NSA. For short drafts ( 𝛾 = 4), the primary gains stem from kernel fusion. Compared to the vanilla NSA baseline [ 18 ], SpecSA without reuse lay-ers achieves a 1.14 ×–1.18 × speedup. Enabling full fusion in 
+
+10 SpecSA : Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference EuroSys ’27, April 19–23, 2027, Rabat, Morocco Vanilla NSA   
+
+> SpecSA (no grouping, refresh)
+> SpecSA (exact, refresh)
+> SpecSA (approximate, refresh)
+> SpecSA (no grouping, reuse)
+> SpecSA (exact, reuse)
+> SpecSA (approximate, reuse) 16K 32K 64K
+> Sequence Length
+> 0
+> 10
+> 20
+> Latency (ms)
+
+(a) Llama3-1B, 𝛾 = 416K 32K 64K  
+
+> Sequence Length
+> 0
+> 20
+> 40
+> Latency (ms)
+
+(b) Llama3-8B, 𝛾 = 416K 32K 64K 
+
+> Sequence Length
+> 0
+> 10
+> 20
+> Latency (ms)
+
+(c) Llama3-1B, 𝛾 = 64 16K 32K 64K  
+
+> Sequence Length
+> 0
+> 20
+> 40
+> 60
+> Latency (ms)
+
+(d) Llama3-8B, 𝛾 = 64 16K 32K 64K 
+
+> Sequence Length
+> 0
+> 10
+> 20
+> Latency (ms)
+
+(e) Llama3-1B, 𝛾 = 128 16K 32K 64K  
+
+> Sequence Length
+> 0
+> 20
+> 40
+> 60
+> Latency (ms)
+
+(f) Llama3-8B, 𝛾 = 128 
+
+Figure 9. Speculative verification latency on NSA target models built from Llama3-1B and Llama3-8B backbones un-der different draft lengths 𝛾 and sequence lengths 𝑁 . We compare vanilla NSA [ 18 ], SpecSA without reuse layers, and SpecSA with reuse layers; for 𝛾 ∈ { 64 , 128 }, we include the exact merged-schedule variant with 𝐶 = 2 and the ap-proximate shared-index variant with 𝐶 = 4. Refresh/reuse indicates the layer type, and no grouping/exact/approximate indicates the grouped-query kernel mode. reuse layers removes significant index-construction over-head, catapulting the speedup to 4.45 ×–6.86 ×.For longer drafts ( 𝛾 = 64 ), grouped-query execution intro-duces additional independent gains. On their own, the exact (𝐶 = 2) and approximate ( 𝐶 = 4) variants yield speedups up to 1.13 × and 1.22 ×, respectively. However, the most pro-found acceleration occurs when these are combined with reuse layers. While SpecSA with reuse layers alone achieves up to 2.44 ×, pairing it with the exact variant reaches 2.09 ×–
+
+2.99 ×, and combining it with the approximate variant yields a 4.81 ×–6.30 × speedup. Overall, while grouping provides Top-n Block Selection    
+
+> Vanilla NSA
+> SpecSA (no grouping, refresh)
+> SpecSA (exact, refresh)
+> SpecSA (approximate, refresh)
+> SpecSA (no grouping, reuse)
+> SpecSA (exact, reuse)
+> SpecSA (approximate, reuse) 8K 16K 32K 64K
+
+Sequence Length 
+
+> 0.0
+> 0.2
+> 0.4
+> Latency (ms)
+
+(a) 𝛾 = 4, 𝑠 = 38K 16K 32K 64K 
+
+Sequence Length  
+
+> 0.0
+> 0.2
+> 0.4
+> Latency (ms)
+
+(b) 𝛾 = 64 , 𝑠 = 38K 16K 32K 64K 
+
+Sequence Length 
+
+> 0.0
+> 0.2
+> 0.4
+> Latency (ms)
+
+(c) 𝛾 = 4, 𝑠 = 68K 16K 32K 64K 
+
+Sequence Length  
+
+> 0.0
+> 0.2
+> 0.4
+> Latency (ms)
+
+(d) 𝛾 = 64 , 𝑠 = 68K 16K 32K 64K 
+
+Sequence Length 
+
+> 0.0
+> 0.2
+> 0.4
+> Latency (ms)
+
+(e) 𝛾 = 4, 𝑠 = 10 8K 16K 32K 64K 
+
+Sequence Length  
+
+> 0.0
+> 0.2
+> 0.4
+> Latency (ms)
+
+(f) 𝛾 = 64 , 𝑠 = 10 
+
+Figure 10. Performance breakdown and ablation of SpecSA kernel variants. The charts compare grouped-query kernel variants, cross-query overlap 𝑠 (the number of shared se-lected blocks between adjacent queries), and reuse-layer execution under small and large draft lengths ( 𝛾 = 4 and 
+
+𝛾 = 64 ). Refresh/reuse indicates the layer type, and no group-ing/exact/approximate indicates the grouped-query kernel mode. measurable improvements, eliminating repeated index con-struction remains the dominant source of acceleration. 
+
+Comparison between variants of the SpecSA kernel. 
+
+The benefits of grouped-query execution are highly depen-dent on draft length, scaling effectively at larger 𝛾 (e.g., 
+
+𝛾 = 64 ). Furthermore, as cross-query overlap 𝑠 increases from 3 to 10 , the grouped variants yield increasingly higher gains. This confirms that larger verification batches provide sufficient adjacent queries to successfully amortize schedul-ing and KV-loading costs. Crucially, cross-layer reuse and cross-query grouping act as highly complementary mechanisms. Skipping 𝐼 ( 𝑗 ) 
+
+> 𝑡
+
+con-struction enables deeper kernel fusion, allowing reuse paths to consistently dominate non-reuse baselines. Meanwhile, 
+
+11 EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al. 
+
+the higher 𝑠 overlap in large 𝛾 settings maximizes the effi-ciency of joint query execution. Together, they eliminate the index bottleneck and expose a shorter fused path. 
+
+Performance breakdown of SpecSA. Constructing se-lected block indices is a severe memory-bound bottleneck in NSA-style verification, accounting for 45% –56% of the total kernel runtime. In small-𝛾 scenarios ( 𝛾 = 4), this index-selection cost even exceeds the sparse attention computation itself (averaging 1.05 × the attention cost), and it remains substantial ( 0.84 ×–0.88 ×) at 𝛾 = 64 .This breakdown highlights exactly why reuse layers are so transformative. By inheriting 𝐼 ( 𝑗 ) 
+
+> 𝑡
+
+from a preceding refresh layer instead of recomputing it, SpecSA entirely bypasses this massive overhead and unlocks more aggressive kernel fusion. Therefore, the reuse-layer design is not a marginal tweak, but the fundamental mechanism translating NSA’s algorithmic sparsity into concrete hardware acceleration. 
+
+7.4 Throughput-Aware Verification Planning (Q4) Configuration and metric. For Q4, we evaluate the planner from Section 6 on held-out prompts using accepted-token throughput. We compare three settings: Base, Static-best, and Best+R. Base is a non-adaptive EAGLE-3 configuration with BFS traversal, a 128-token draft-tree budget, depth 𝐷 =
+
+6, draft TopK 𝑘 = 10 , exact coarsening with 𝐶 = 2, and an all-F sparse-verification schedule. Static-best uses the top-ranked profiled strategy for each context bucket and precision class without runtime refinement, while Best+R additionally enables runtime refinement. All three settings generate 128 output tokens with temperature set to 0.0, and run with a maximum context length of 16K. Thus, planner gains are measured against a fixed strategy under the same model, workload, and measurement protocol. The offline profile covers 16 bucket-class pairs, with 12 ranked candidate strategies stored for each pair. Static-best uses the top-ranked candidate for the active pair, while Best+R starts from the same candidate and may refine the choice using runtime observations. Table 3 therefore reports one row for each bucket-class pair. 
+
+Offline ranking. The offline profiles show that no single parameter determines the best strategy: top choices vary across buckets and precision classes, with profiling-set gains ranging from 4.0% to 33.5% over the fixed baseline. On held-out prompts, Static-best improves throughput by 10.6% over Base on average, indicating that complete strategy tuples transfer beyond the profiling set. The remaining variation is prompt-specific: some rows, such as 0–4K Strict, expose a mismatch between the profiled top choice and the held-out prompt behavior, while small-gain rows such as 8–12K Strict and 8–12K Approx-only occur because the fixed baseline is already strong. These results support the need for runtime refinement on top of offline ranking. 
+
+Table 3. Effectiveness of throughput-aware planning on held-out prompts. Static-best uses the top-ranked profiled strategy without runtime refinement, Best+R adds runtime refine-ment, Gain reports the improvement of Best+R over Base, and RR indicates whether refinement is triggered. Through-put is measured in accepted tokens/s.                                                                                                       
+
+> Bucket Class Base Static-best Best+R Gain RR
+> 0–4K Strict 196.3 164.2 192.4 −2.0% yes 0–4K Reuse-only 196.3 232.7 230.7 17 .5% no 0–4K Approx-only 196.3 207.6 206.8 5.3% no 0–4K Approx+Reuse 196.3 206.1 247.9 26 .3% yes 4–8K Strict 169.0 197.0 200.5 18 .6% no 4–8K Reuse-only 169.0 216.0 217.4 28 .6% no 4–8K Approx-only 169.0 182.7 181.8 7.6% no 4–8K Approx+Reuse 169.0 192.4 192.4 13 .8% no 8–12K Strict 168.6 171.5 172.3 2.2% no 8–12K Reuse-only 168.6 189.3 189.4 12 .3% no 8–12K Approx-only 168.6 176.6 176.5 4.7% no 8–12K Approx+Reuse 168.6 192.0 192.5 14 .2% no 12–16K Strict 137.4 156.2 154.4 12 .4% no 12–16K Reuse-only 137.4 165.5 164.7 19 .9% no 12–16K Approx-only 137.4 137.2 168.0 22 .3% yes 12–16K Approx+Reuse 137.4 182.6 183.0 33 .2% no
+
+Runtime refinement. Best+R improves average through-put by 14.4% over Base and by 3.4% over Static-best. Runtime refinement is triggered in 3 of the 16 bucket-class settings, targeting cases where the initial profiled choice mismatches the held-out prompt behavior. The 0–4K Strict row illustrates this role: Static-best drops from 196.3 to 164.2 tok/s, but run-time refinement brings throughput back near Base at 192.4 tok/s. In 12–16K Approx-only, the same mechanism turns near-Base Static-best performance into a 22.3% gain. Overall, these results show that lightweight acceptance validation can correct prompt-specific profile mismatches without turning planning into online search. 
+
+Refinement validation. We validate runtime refinement on a deployment profile that selects one strategy per context bucket: Approx+Reuse for 0–4K, Reuse-only for 4–8K, Ap-prox+Reuse for 8–12K, and Approx+Reuse for 12–16K. With strategy refinement disabled, the bookkeeping needed for acceptance validation changes throughput by only −1.1% to 
+
++2.5% across buckets, which is within the run-to-run varia-tion of our decode benchmark. Table 4 reports a one-factor sweep over the refinement constants. We denote the guard constants as the EMA coefficient 𝛼 , the acceptance-drop ra-tio 𝜌 , the minimum observation count 𝑚 , and the hysteresis window ℎ. The default setting uses 𝛼 = 0.40 , 𝜌 = 0.85 , 𝑚 = 8,and ℎ = 5. Varying the EMA coefficient 𝛼 , acceptance-drop ratio 𝜌 , and minimum observation count 𝑚 keeps gains in the 25 .2% –26 .6% range. The main sensitivity is the hysteresis window ℎ: ℎ = 3 is too aggressive and triggers six refinement events across the four bucket runs, reducing throughput, while ℎ = 8 is too conservative and triggers no refinement 
+
+> 12
+
+SpecSA : Bridging Speculative Decoding and Sparse Attention for Efficient LLM Inference EuroSys ’27, April 19–23, 2027, Rabat, Morocco 
+
+Table 4. Refinement sensitivity on the deployment profile used for validation. Refinement Events counts total refine-ment events across four bucket runs; each run allows at most two refinements. 
+
+Setting Throughput Gain/Base Refinement Events 
+
+Default 209.7 +26 .6% 1
+
+𝛼 = 0.20 207.3 +25 .2% 2
+
+𝛼 = 0.60 209.0 +26 .1% 1
+
+𝜌 = 0.80 209.6 +26 .6% 1
+
+𝜌 = 0.90 207.8 +25 .4% 1
+
+𝑚 = 4 209.5 +26 .4% 1
+
+𝑚 = 16 209.0 +26 .1% 1
+
+ℎ = 3 197.9 +18 .8% 6
+
+ℎ = 8 199.1 +21 .0% 0
+
+events, missing useful corrections. The default ℎ = 5 triggers one refinement event and achieves the overall tradeoff. 
+
+8 Conclusion 
+
+In this paper, we present SpecSA, a sparse speculative-verification framework to bridge the gap between dynamic sparse at-tention and speculative decoding. SpecSA uses cross-query coarsening and verification-oriented kernel fusion to reduce duplicated KV-block loads and fragmented branch execution, while profile-guided planning adapts the draft-verification strategy to input-dependent acceptance and kernel behavior. Experiments on H100 GPUs with Llama-based NSA models show that SpecSA substantially improves end-to-end gen-eration throughput, achieving up to 3.49 × speedup in our EAGLE-3 integration study. 
+
+References 
+
+[1] Joshua Ainslie, James Lee-Thorp, Michiel De Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. 2023. Gqa: Training general-ized multi-query transformer models from multi-head checkpoints. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing . 4895–4901. [2] ajibawa 2023. 2023. Children Stories Collection . doi: 10.57967/hf/2480 
+
+[3] Yushi Bai, Qian Dong, Ting Jiang, Xin Lv, Zhengxiao Du, Aohan Zeng, Jie Tang, and Juanzi Li. 2026. IndexCache: Accelerating Sparse At-tention via Cross-Layer Index Reuse. arXiv preprint arXiv:2603.12201 
+
+(2026). [4] Iz Beltagy, Matthew E Peters, and Arman Cohan. 2020. Longformer: The long-document transformer. arXiv preprint arXiv:2004.05150 
+
+(2020). [5] Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al . 2020. Piqa: Reasoning about physical commonsense in natural language. In 
+
+Proceedings of the AAAI conference on artificial intelligence , Vol. 34. 7432–7439. [6] Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple llm inference ac-celeration framework with multiple decoding heads. arXiv preprint arXiv:2401.10774 (2024). [7] Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. 2023. Accelerating Large Language Model Decoding with Speculative Sampling. arXiv preprint arXiv:2302.01318 (2023). [8] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabhar-wal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question answering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 (2018). [9] Thomas H Cormen, Charles E Leiserson, Ronald L Rivest, and Clifford Stein. 2022. Introduction to algorithms . MIT press. [10] Tri Dao. 2023. Flashattention-2: Faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691 (2023). [11] Dhruv Deshmukh, Saurabh Goyal, Nipun Kwatra, and Ramachandran Ramjee. 2025. Kascade: A Practical Sparse Attention Method for Long-Context LLM Inference. arXiv preprint arXiv:2512.16391 (2025). [12] Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. 2024. The Language Model Evaluation Harness. doi: 10.5281/zenodo.12608602 
+
+[13] Yizhao Gao, Jianyu Wei, Qihao Zhang, Yu Cheng, Shimao Chen, Zhengju Tang, Zihan Jiang, Yifan Song, Hailin Zhang, Liang Zhao, et al .2026. HySparse: A Hybrid Sparse Attention Architecture with Oracle Token Selection and KV Cache Sharing. arXiv preprint arXiv:2602.03560 
+
+(2026). [14] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Ankush Kadian, Amal Al-Dahle, Aiesha Letman, Anukriti Mathur, Ashwin Schelten, Angela Yang, et al . 2024. The Llama 3 Herd of Models. arXiv preprint arXiv:2407.21783 (2024). [15] Ankit Gupta, Guy Dar, Shaya Goodman, David Ciprut, and Jonathan Berant. 2021. Memory-efficient Transformers via Top-𝑘 Attention. 
+
+arXiv preprint arXiv:2106.06899 (2021). [16] Dhiraj Kalamkar, Dheevatsa Mudigere, Naveen Mellempudi, Dipankar Das, Kunal Banerjee, Sasikanth Avancha, Dharma Teja Vooturi, Nataraj Jammalamadaka, Jianyu Huang, Hector Yuen, et al . 2019. A study of BFLOAT16 for deep learning training. arXiv preprint arXiv:1905.12322 
+
+(2019). [17] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles . 611–626. [18] Xunhao Lai. 2025. native-sparse-attention-triton. https://github.com/ XunhaoLai/native-sparse-attention-triton .[19] Xunhao Lai, Jianqiao Lu, Yao Luo, Yiyuan Ma, and Xun Zhou. 2025. Flexprefill: A context-aware sparse attention mechanism for efficient long-sequence inference. arXiv preprint arXiv:2502.20766 (2025). [20] Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast Inference from Transformers via Speculative Decoding. In Proceedings of the 40th International Conference on Machine Learning . 19274–19286. [21] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024. Eagle: Speculative sampling requires rethinking feature uncertainty. 
+
+arXiv preprint arXiv:2401.15077 (2024). [22] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2025. Eagle-3: Scaling up inference acceleration of large language models via training-time test. arXiv preprint arXiv:2503.01840 (2025). [23] Aixin Liu, Aoxue Mei, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, et al . 2025. Deepseek-v3. 2: Pushing the frontier of open large language models. arXiv preprint arXiv:2512.02556 (2025). [24] Meta. 2024. Llama-3.1-8B-Instruct. https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct Accessed: 2026-05-13. [25] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xi-aoxiang Shi, Chunan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna Ab-hyankar, and Zhihao Jia. 2024. SpecInfer: Accelerating Large Language 13 EuroSys ’27, April 19–23, 2027, Rabat, Morocco Wang et al. 
+
+Model Serving with Tree-based Speculative Inference and Verification. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 .932–949. [26] Sanjit Neelam, Vaclav Cvicek, Daniel Heinlein, Akshay Mishra, Mahdi Nazemi, and Gilbert Hendry. 2025. Speculative Decoding with Block-wise Sparse Attention. MatX Research. https://matx.com/research/ sd_nsa Accessed: 2026-04-26. [27] NVIDIA Corporation. 2024. NVIDIA H100 Tensor Core GPU. https: //www.nvidia.com/en-us/data-center/h100/ . Accessed: 2026-04-26. [28] PyTorch Contributors. 2025. torch.cuda.Event. https://docs.pytorch. org/docs/2.11/generated/torch.cuda.Event.html . PyTorch 2.11 docu-mentation. Accessed: 2026-05-09. [29] Philippe Tillet, Hsiang-Tsung Kung, and David Cox. 2019. Triton: an intermediate language and compiler for tiled neural network computa-tions. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages . 10–19. [30] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. At-tention is all you need. Advances in neural information processing systems 30 (2017). [31] W Hwu Wen-Mei, David B Kirk, and Izzat El Hajj. 2026. Programming massively parallel processors: a hands-on approach . Morgan Kaufmann. [32] Ran Yan, Youhe Jiang, and Binhang Yuan. 2025. Flash sparse attention: An alternative efficient implementation of native sparse attention kernel. arXiv e-prints (2025), arXiv–2508. [33] Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Yuxing Wei, Lean Wang, Zhiping Xiao, et al . 2025. Native sparse attention: Hardware-aligned and natively trainable sparse attention. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) .23078–23097. [34] Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, et al . 2020. Big bird: Transformers for longer sequences. Advances in neural information processing systems 33 (2020), 17283–17297. [35] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. Hellaswag: Can a machine really finish your sentence?. In 
+
+Proceedings of the 57th annual meeting of the association for computa-tional linguistics . 4791–4800. [36] zen-E. 2025. NSA-1B. https://huggingface.co/zen-E/NSA-1B . Accessed: 2026-05-05. [37] zhenyi4. 2025. SSA. https://github.com/zhenyi4/ssa . Accessed: 2026-05-05. 14

@@ -1,0 +1,994 @@
+Title: Bastion: Budget-Aware Speculative Decoding with Tree-structured Block Diffusion Drafting
+
+URL Source: https://arxiv.org/pdf/2605.29727v1
+
+Published Time: Fri, 29 May 2026 01:05:15 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# BASTION: Budget-Aware Speculative Decoding with Tree-structured Block Diffusion Drafting 
+
+Soowon Oh ♠⋄∗ Nam Cao ♠ ∗ Yujin Kim ♠ Hojung Jung ♠ Huzama Ahmad ♠
+
+Sangmin Bae ♠ † Se-Young Yun ♠ †♠ KAIST AI ⋄Samsung Advanced Institute of Technology 
+
+{osw5144, hainam, bsmn0223, yunseyoung}@kaist.ac.kr 
+
+## Abstract 
+
+Block-diffusion drafters have recently emerged as a powerful alternative for specu-lative decoding by predicting multiple future-token distributions in a single parallel step. However, since these parallel predictions are sampled from position-wise marginals rather than fully conditioned sequences, committing to a single greedy path often fails to capture the target model’s preferred trajectory. To address this, we propose BASTION , a budget-aware speculative decoding framework with tree-based diffus ion drafting. Unlike existing methods that rely on static tree topologies, BASTION dynamically constructs query-dependent trees by balancing draft quality against hardware constraints. Our framework integrates three synergistic compo-nents: (1) an acceptance surrogate that estimates expected accepted length via path confidence, (2) an online latency estimator that calibrates a hardware-aware roofline model, and (3) an adaptive best-first expansion that grows the tree until marginal gains no longer justify incremental verification costs. B ASTION is training-free, preserves the target model’s distribution, and requires no per-setting tuning. Across diverse benchmarks and GPU architectures, B ASTION achieves up to a 6.61 ×
+
+speedup over standard autoregressive decoding, outperforming state-of-the-art block-diffusion baselines by 39% .
+
+§ Code: https://github.com/kaist-ai-osi-lab/BASTION Average GSM8K MATH500 AIME25 Human Eval MBPP LCB MT-Bench Alpaca 
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> Speedup (X)
+> Eagle-3
+> DFlash
+> BASTION
+> x2.70
+> x3.10
+> x2.78
+> x2.92
+> x3.01
+> x2.73
+> x2.29
+> x2.68
+> x2.10
+> x4.76
+> x4.96
+> x6.06
+> x5.91
+> x5.25
+> x4.91
+> x5.90
+> x2.81
+> x2.28
+> x6.61
+> x6.92
+> x8.02
+> x7.69
+> x7.64
+> x7.10
+> x7.64
+> x4.31
+> x3.54
+
+Figure 1: BASTION achieves a 6.61 × average end-to-end speedup on Qwen3-8B. BASTION 
+
+consistently outperforms speculative decoding baselines (EAGLE-3 [ 41 ] and DFlash [ 10 ]) across eight diverse benchmarks (three math, three code, and two chat datasets). The baseline performance (1 ×) represents standard autoregressive decoding. Results are evaluated for a single sample using greedy decoding (i.e., temperature of 0) on an A100 GPU. 
+
+> ∗
+
+Both authors contribute equally to this work. 
+
+> †
+
+Corresponding authors. 40th Conference on Neural Information Processing Systems (NeurIPS 2026). 
+
+> arXiv:2605.29727v1 [cs.LG] 28 May 2026
+
+## 1 Introduction 
+
+Recent large language models (LLMs) demonstrate impressive reasoning capabilities [1, 14, 16, 23, 60 ], but their serving costs remain high because autoregressive (AR) decoding requires a separate target-model forward pass for every generated token. Speculative decoding mitigates this bottleneck by using a fast drafter—either a smaller auxiliary model [ 9 , 34 , 36 , 45 ] or a self-drafting mecha-nism [ 6, 8, 18 , 39 , 61 ]—to propose multiple candidate tokens, which the target model verifies in paral-lel with an exact acceptance rule [ 9, 36 ] or a relaxed variant [ 5, 8, 32 ]. Under exact acceptance, this pre-serves the target distribution while shifting generation from token-by-token decoding to batched ver-ification, with speedup governed by the acceptance rate relative to drafting and verification overhead. Most prior methods optimize this trade-off within an autoregressive drafting paradigm [ 18 , 36 , 41 , 49 ], designing lightweight yet context-aware drafters. State-of-the-art methods such as EAGLE-3 [ 41 ]deliver practical speedups in the 2–3 × range. However, because their drafting phase remains sequential, longer candidate blocks require repeated draft-model steps conditioned on previous draft tokens, making the draft stage increasingly costly and underutilizing available parallel compute. To break this sequential dependency, recent works explore multi-token prediction [ 10 , 22 , 35 , 42 , 50 ], where multiple future tokens are proposed in a single drafting step. Block diffusion language models [ 3, 46 , 56 , 57 ] provide a natural instantiation: a diffusion drafter denoises a fixed block of mask tokens simultaneously, producing candidate distributions over future positions without left-to-right generation. This parallel structure is well suited to speculative decoding, as shown by TiDAR [42] and DFlash [10], which report up to 2.5 × speedups over AR drafting baselines. Despite these latency benefits, parallel prediction introduces a key challenge: future positions are drafted before preceding tokens are finalized, so the outputs correspond to position-wise marginals rather than fully conditioned AR continuations. Consequently, greedy top-1 sampling drafts can yield incoherent sequences under the target model’s distribution [ 24 , 26 , 38 , 58 ]. Yet the target-preferred trajectory often remains within the drafter’s top-K candidates. Motivated by this, we propose 
+
+tree -structured block-diffusion drafting : instead of committing to one greedy path, we construct a prefix tree from the parallel candidate distributions, allowing the target model to verify multiple plausible trajectories simultaneously. This inherits the core advantages of tree-based speculative decoding [8, 40, 45], improving verifier utilization and expected acceptance length. However, the efficiency of tree-based drafting depends critically on its topology. Prior methods typically rely on heuristically predefined, static tree shapes that remain fixed across inputs and hardware constraints [ 8, 39 , 47 ]. To address this, we propose BASTION , a budget-aware speculative decoding method with tree-based diffus ion drafting. Unlike static approaches, B ASTION dynamically constructs a query-dependent tree topology to maximize expected decoding speedup. It combines three components: (1) an acceptance surrogate that estimates expected accepted length from path confidence scores under the drafter’s marginal distributions; (2) an online latency estimator that predicts verification cost with a hardware-aware roofline model calibrated by observed runtimes; and (3) an adaptive best-first expansion mechanism that grows the tree until the marginal acceptance gain no longer outweighs the added verification cost. By balancing draft quality against hardware capacity, B ASTION delivers substantial empirical speedups. In Figure 1, evaluations across math, code generation, and chat benchmarks show average speedups of 6.61 × over standard decoding, 2.45 × over EAGLE-3 [ 41 ], and 1.39 × over DFlash [ 10 ]. These gains are consistent across multiple model and GPU architectures, highlighting the practical deployment viability of dynamic tree-structured drafting. 
+
+Contributions. In summary, our key contributions in this paper are as follows: • Tree-based block diffusion drafting: We introduce a best-first prefix-tree construction algorithm that uses drafter-logit path scores to build high-quality prefix-closed candidate trees from block-diffusion logits. • Hardware-aware online budget controller: To overcome the inefficiencies of fixed-size trees, we introduce a budget controller that dynamically determines the optimal tree size at each decoding step by balancing the expected acceptance gain against hardware-calibrated verification latency. • Extensive empirical validation: We validate B ASTION across target models, benchmarks, GPU architectures, and decoding temperatures, showing up to 6.61 × speedup over autoregressive decoding and a 38 .87% improvement over single-path block-diffusion drafting. 22 Preliminary 
+
+2.1 Speculative Decoding Mechanism overview. Speculative decoding accelerates generation by decoupling proposal gener-ation from target-model verification [ 8 , 9 , 36 , 39 ]. Instead of invoking the expensive target model se-quentially, a lightweight draft model first proposes a sequence of future tokens. The target model then verifies these candidates in parallel with a single forward pass. Standard speculative sampling [ 9, 36 ]probabilistically accepts tokens to theoretically match the target distribution. However, many re-cent approaches simplify this step by adopting exact match verification [ 10 ] or relaxed acceptance rules [ 5, 8], bypassing the complex rejection sampling overhead while maintaining high throughput. 
+
+Algorithm variants. Subsequent variants differ in their choice of drafters—ranging from model-free [ 20 , 51 ] and autoregressive [ 6, 18 , 36 , 41 ] to diffusion-based approaches [ 10 , 42 , 50 ]. While autoregressive drafters generate candidates through strict left-to-right sequential prediction, diffusion-based drafters instead produce draft spans by jointly denoising multiple future positions in parallel. Prior works have also explored various draft structures, such as sequential chains [ 9, 34 , 49 ]and tree-based topologies [ 8, 12 , 45 ]. Whereas sequential chains propose a single linear trajectory, tree-based methods simultaneously explore multiple diverging paths to increase the overall acceptance probability. See Appendix B for more details on related work. 
+
+Efficiency analysis. Speculative decoding mitigates the memory-bandwidth bottleneck in LLM inference by using idle compute resources to verify multiple draft tokens in a single pass, trading extra computation for fewer memory accesses [ 6 , 9 , 49 ]. Its practical speedup relative to standard decoding is defined as Speedup = ¯A · TAR /(Tdraft + Tverify ). This demonstrates that efficiency is maximized when the average number of accepted tokens per iteration ( ¯A) is high, and the overhead times for generating drafts ( Tdraft ) and verifying them ( Tverify ) are kept minimal compared to the latency of a standard single-token autoregressive step ( TAR ). 
+
+2.2 Block Diffusion Drafter Drafting algorithm. Unlike autoregressive drafting, which factorizes draft generation into sequen-tial conditionals, one-step block diffusion drafting yields position-wise marginals under a shared masked context [ 2, 10 , 37 , 42 ]. A lightweight drafter—typically 5 to 8 layers—appends a sequence of 
+
+[MASK] tokens to the context and denoises them simultaneously in a single forward pass, equivalent to masked token prediction [ 17 , 27 ]. Recent methods enhance drafter accuracy by injecting hidden rep-resentations from across the target model’s layers directly into the drafter’s key-value caches [ 10 , 42 ]. To extract a final draft trajectory from these parallel predictions, prior works employ greedy decoding, independently taking the top-1 prediction (i.e., argmax ) at each masked position [10, 42]. 
+
+Efficiency analysis. Recall that speculative speedup heavily depends on minimizing the drafting overhead Tdraft . For an autoregressive drafter, generating a draft block of γ candidates requires γ
+
+sequential forward passes, yielding a latency of Tdraft = γ · tstep , where tstep is the latency of a single forward pass. A block diffusion drafter circumvents this sequential bottleneck by processing the entire block in a single pass. Since LLM decoding is predominantly memory-bound, evaluating multiple tokens simultaneously incurs minimal computational overhead, effectively reducing the drafting latency to a near-constant Tdraft ≈ tstep .
+
+## 3 BASTION : Budget-Aware Tree Construction for Diffusion Drafting 
+
+In this section, we introduce our method BASTION , a budget-aware speculative decoding framework with tree-based diffus ion drafting. This section formalizes following components: (§3.1) a problem formulation that exploits the parallel nature of block-diffusion drafting, (§3.2, §3.3) a path-confidence surrogate for acceptance estimation, and (§3.4) an online controller for budget optimization. 
+
+3.1 Problem Formulation: Tree-based Block-Diffusion Drafting 
+
+A block-diffusion drafter can produce position-wise marginal distributions {qk(·)}γk=1 in a single parallel forward pass at constant cost Tdraft = tparallel , whereas an autoregressive drafter incurs 
+
+Tdraft = γ · tstep . Two consequences benefit our design: 3(P1) Topology decoupling. Tdraft is invariant to the candidate-set structure—chains, wide trees, and deep trees incur identical drafting cost. (P2) Marginal independence. Each qk is conditioned on the validated context alone, independent of the drafted tokens at preceding positions {1, . . . , k − 1}. Thus, candidates across positions can be combined freely. These properties motivate organizing the candidates as a prefix tree T : the root r is the previously validated token, and each non-root node i at depth d(i) ∈ { 1, . . . , γ } carries a candidate token xi.The root-to-node path path( i) = ( xi1 , . . . , x id(i) ) receives a path score defined as: 
+
+ρ(i) = 
+
+> d(i)
+
+Y
+
+> k=1
+
+qk(xik ), where ρ(r) = 1 . (1) The target model verifies all nodes in a single forward pass and commits the longest accepted root-to-node path. Let A(T ) be the resulting committed length and define the verification budget as N = |T | .The end-to-end speedup over AR decoding is then: 
+
+Speedup( T ) = E[A(T )] · LAR 
+
+Tdraft + Taux (T ) + Tverify (T ) , (2) where LAR is one AR target step, Taux (T ) covers tree construction and scheduling, and Tverify (T )
+
+is the parallel verification cost. Our goal is to choose T —both its shape and size N —to maximize Equation 2 from the drafter’s logits alone. 
+
+3.2 Expected Committed Length Surrogate 
+
+Maximizing Equation 2 before verification is intractable: the realized committed length A(T ) depends on the target’s outputs, which are unavailable until verification completes. We therefore approximate 
+
+E[A(T )] via a drafter-side surrogate obtained from a self-verification though experiment. 
+
+Self-verification model. Replace the target with the drafter itself as the verifier: the drafter draws a single sample X = ( X1, . . . , X γ ) with Xk ∼ qk(·) independently across positions, and a node 
+
+i ∈ T is committed iff X1: d(i) = path( i). Under P2, this sampling procedure exactly matches the drafter’s own distribution over length-γ continuations. Therefore, it should be viewed as the exact self-verification process of the drafter, rather than an approximation to the drafter. The approximation lies only in using the drafter in place of the target verifier. Let Aself (T ; X) denote the resulting committed length (including the always-committed root). 
+
+Lemma 3.1 (Committed length equals covered count) . Under the self-verification model, 
+
+Aself (T ; X) = #  i ∈ T : X1: d(i) = path( i) .
+
+The set of committed nodes forms a contiguous root-to-node chain in T .
+
+The proof (Appendix C.1) follows from two structural facts: prefix-closure of T forces the covered set to be ancestor-closed, and the tree structure permits at most one covered node per depth; hence the covered set is a single chain whose length equals its cardinality. 
+
+Proposition 3.2 (Path-Sum Surrogate) . Taking expectation over the drafter’s sample X,
+
+bA(T ) ≜ EX [Aself (T ; X)] = X
+
+> i∈T
+
+ρ(i). (3) The proof (Appendix C.1) applies linearity of expectation to Lemma 3.1, using P(X1: d(i) =path( i)) = ρ(i) by position-wise independence and the convention ρ(r) = 1 for the trivially covered root. 
+
+Why bA proxies the target-side expectation. Equation 3 is exact only under self-verification, where the drafter acts as both proposer and verifier. It uses as a proxy for the target-verified E[A(T )] 
+
+instead relies on drafter–target alignment, the foundational premise of speculative decoding: when the drafter’s high-probability continuations coincide with the target’s, the drafter-mass covered by T
+
+closely tracks the realized accepted length. Appendix F.1 (Figure 9) empirically validates this proxy with Pearson correlation ≥ 0.79 across all target/draft pairs. 432 64 128 256 512 1024        
+
+> Tree Size (| T|)
+> 0.0
+> 2.5
+> 5.0
+> 7.5
+> 10.0
+> 12.5
+> Acceptance Length (  )
+> ±1 std
+> Mean 32 64 128 256 512 1024
+> Tree Size (| T|)
+> 0
+> 20
+> 40
+> 60
+> Latency per Step (ms)
+> 22.0 22.7 23.1
+> 28.7
+> 35.4
+> 55.9 Drafting
+> Verification
+> Tree Overhead
+
+Figure 2: Acceptance–latency trade-off across tree sizes. Left: acceptance length τ grows with tree size |T | but saturates beyond a few hundred nodes, reflecting diminishing marginal gains. Right: 
+
+per-step latency breakdown—drafting cost is constant, while Taux and Tverify grow with |T | , with 
+
+Tverify dominating at large budgets ( 22 .0 ms at |T | =32 rising to 55 .9 ms at |T | =1024 ). 
+
+3.3 Optimal Tree Construction via Best-First Expansion 
+
+With the surrogate in hand, the fixed-budget tree-construction problem becomes: given N , find the prefix-closed tree T ⊆ V of size N that maximizes bA(T ), where V denotes the candidate lattice induced by retaining the top-K tokens at each position. Beam-search-style methods, which fix a 
+
+(width × depth ) allocation, are mismatched here because they ignore the global ordering of path confidences across depths. A key structural property is path monotonicity : for any non-root i with parent π(i),
+
+ρ(i) = ρ(π(i)) · qd(i)(xi) ≤ ρ(π(i)) , (4) because qd(i)(xi) ∈ [0 , 1] . This monotonicity, combined with prefix-closure, makes a greedy proce-dure provably optimal. 
+
+Proposition 3.3 (Optimality of Best-First Expansion) . Iteratively adding the valid node with the largest ρ yields nested trees T1 ⊂ T 2 ⊂ · · · ⊂ T Nmax where each TN maximizes bA(T ) among all size-N prefix-closed trees drawn from V.
+
+The proof (Appendix C.2) demonstrates that best-first enumerates nodes in a globally non-increasing order of ρ. Consequently, the marginal gain ∆ bA(N ) := bA(TN +1 ) − bA(TN ) = ρ(iN +1 ) is non-increasing: 
+
+∆ bA(N + 1) ≤ ∆ bA(N ) for all N, (5) making bA is concave in the budget N . As shown in Figure 2 (left), this concavity yields diminishing returns, directly motivating the need for an adaptive budget strategy. 
+
+3.4 Online Controller for Budget Optimization 
+
+A fixed-budget construction maximizes bA(T ) for a given N but is silent on which N to use. No single N is universally optimal: the marginal acceptance gain depends on the local draft distribution, while the verification cost depends on context length, model architecture, and hardware. As illustrated in Figure 2 (right), verification costs Tverify scale with N = |T | and eventually dominate the cycle. To formalize this trade-off, we maximize the estimated speedup at budget N :
+
+S(N ) = bA(TN ) · LAR 
+
+C(N ) , C(N ) ≜ Tdraft + Taux (N ) + Tverify (N )
+
+≈ Tdraft + Taux + Tverify (N ) (6) Based on empirical observations from Figure 2 (right), Taux (N ) is negligible compared to the verifi-cation overhead, allowing us to approximate it as a constant Taux . Crucially, we predict Tverify (N )
+
+using an analytical hardware-aware cost model based on roofline analysis (detailed breakdown in Appendix G). This analytical modeling reveals that Tverify (N ), and thus the overall cycle cost C(N ),is convex with respect to N . Additionally, since practical latency may deviate from analytical estima-tion due to factors such as kernel fusion, cache effects, scheduling overhead, and implementation 5d = 0           
+
+> d= 1
+> d= 2
+> The
+> cat
+> q= 0 :8
+> dog
+> q= 0 :2⋯⋯
+> sat
+> q= 0 :6
+> ran
+> q= 0 :4⋯⋯
+
+(a) Top-K logits per position 0:8 0:2                  
+
+> 0:60:40:60:4
+> sat
+> ½= 0 :48
+> ^S= 2 :93
+> ran
+> ½= 0 :32
+> ^S= 3 :01
+> cat
+> ½= 0 :8
+> ^S= 2 :87
+> sat
+> ½= 0 :12
+> ^S= 2 :97
+> ran
+> ½= 0 :08
+> dog
+> ½= 0 :2
+> ^S= 3 :04
+> The
+> ½= 1
+> ^S= 2 :60
+> 1
+> 2
+> 34
+> 5
+> 6
+
+(b) Adaptive tree construction 
+
+Figure 3: Adaptive tree construction from block-diffusion logits. (a) The drafter provides top-K
+
+candidates for multiple future positions in one forward pass, inducing an implicit lattice of candidate prefixes. (b) Best-first expansion adds nodes in descending path probability ρ(i) and evaluates the estimated speedup bSt(N ) after each intermediate budget. The controller returns the tree with the largest estimated speedup instead of using a fixed depth or width. details of tree attention, we statically apply a linear calibration to the cost model for more precise latency prediction. 
+
+Proposition 3.4 (Unimodality of Estimated Speedup) . Suppose bA(N ) is concave and non-decreasing, and C(N ) is convex and strictly positive. Then S(N ) is unimodal on {1, . . . , N max }. In particular, the smallest N for which S(N +1) < S (N ) is a global maximizer. 
+
+The proof is provided in Appendix C.3. Propositions 3.3 and 3.4 combine into a single online procedure as illustrated in Figure 3. Best-first expansion produces a nested chain T1 ⊂ T 2 ⊂ · · · ,with each step adding one node iN +1 and updating the surrogate incrementally as bA(TN +1 ) = 
+
+bA(TN ) + ρ(iN +1 ). We pair this with a hardware-calibrated estimate bC(N ) of cycle latency and track bS(N ) = bA(TN ) LAR / bC(N ). By Proposition 3.4, the controller halts at the first N where 
+
+bS(N +1) < bS(N ) and returns TN . The per-step overhead is dominated by best-first heap operations and is negligible compared to the target forward pass. Pseudocode is given in Algorithm 1. 
+
+## 4 Experiments 
+
+4.1 Experimental Settings 
+
+We evaluate B ASTION using Qwen3 (4B/8B) and Llama-3.1-8B-Instruct paired with DFlash block-diffusion drafters. We compare our method against DFlash and EAGLE-3 across four primary domains: mathematical reasoning, code generation, instruction following, and long-context under-standing. Detailed experimental settings, including comprehensive dataset lists, metrics, and hardware configurations, are deferred to Appendix H. 
+
+4.2 Main Results End-to-end speedup. Table 1 reports comparative results across two Qwen3 target models, two de-coding temperatures, and eight benchmarks on NVIDIA A100. B ASTION improves speedup over both DFlash and EAGLE-3 in all settings, with the largest gains on math and code benchmarks. Compared with DFlash, the improvement comes from using the drafter’s full position-wise distribution to con-struct a tree rather than verifying only a single top-1 continuation. Compared with EAGLE-3, the gain reflects the lower draft latency of block-diffusion drafting together with adaptive tree-budget selection. 
+
+Average acceptance length. Across benchmarks, B ASTION obtains substantially larger AAL than DFlash, indicating that tree-structured verification accepts longer continuations than single-path drafting. This confirms that the acceptance surrogate and best-first expansion allocate verification 6Table 1: Comparison of speedup and AAL ( τ ) on NVIDIA A100 gpu. The experiments are conducted on Qwen3-4B and Qwen3-8B at Temperature ∈ { 0, 1}. For the baselines, the tree budget size of EAGLE-3 is set to 60, and the block size of DFlash is set to 16.                                                                                                                                                                                                                                                         
+
+> Model Method GSM8K MATH500 AIME25 HumanEval MBPP LCB MT-Bench Alpaca Average
+> Speedup τSpeedup τSpeedup τSpeedup τSpeedup τSpeedup τSpeedup τSpeedup τSpeedup τ
+> Greedy Decoding (Temperature = 0)
+> EAGLE-3 3.11 ×2.77 2.84 ×2.53 2.92 ×2.52 2.93 ×2.57 2.77 ×2.48 2.66 ×2.10 2.69 ×2.48 2.45 ×2.15 2.80 ×2.45 DFlash 5.23 ×6.50 6.22 ×8.12 6.16 ×7.48 5.34 ×6.66 5.09 ×6.31 5.71 ×7.23 2.74 ×4.63 2.12 ×2.90 4.83 ×6.23 Q3-4B
+> BASTION 7.44 ×9.07 8.57 ×10.60 8.23 ×9.70 7.91 ×9.38 7.41 ×8.99 7.81 ×9.48 4.53 ×6.58 3.53 ×4.64 6.93 ×8.56
+> EAGLE-3 3.10 ×2.74 2.78 ×2.51 2.92 ×2.45 3.01 ×2.69 2.73 ×2.24 2.29 ×1.91 2.68 ×2.24 2.10 ×1.77 2.70 ×2.32 DFlash 4.96 ×6.51 6.06 ×8.25 5.91 ×7.20 5.25 ×6.64 4.91 ×6.04 5.90 ×7.64 2.81 ×4.46 2.28 ×3.15 4.76 ×6.24 Q3-8B
+> BASTION 6.92 ×8.85 8.02 ×10.53 7.69 ×9.46 7.64 ×9.44 7.10 ×8.65 7.64 ×9.91 4.31 ×6.28 3.54 ×4.68 6.61 ×8.48
+> Stochastic Decoding (Temperature = 1)
+> EAGLE-3 3.03 ×2.75 2.69 ×2.44 2.61 ×2.21 2.61 ×2.44 2.70 ×2.41 2.38 ×2.08 2.59 ×2.37 2.41 ×2.16 2.63 ×2.36 DFlash 4.71 ×5.89 5.18 ×6.85 3.91 ×5.08 4.60 ×6.04 4.73 ×5.88 5.10 ×6.90 2.65 ×4.21 2.10 ×2.76 4.12 ×5.45 Q3-4B
+> BASTION 7.38 ×8.91 8.44 ×10.59 7.49 ×9.16 7.09 ×9.09 7.07 ×8.77 7.69 ×9.83 4.55 ×6.57 3.56 ×4.70 6.66 ×8.45
+> EAGLE-3 2.86 ×2.52 2.76 ×2.35 2.49 ×2.12 2.63 ×2.49 2.52 ×2.23 2.28 ×1.84 2.45 ×2.04 2.02 ×1.65 2.50 ×2.16 DFlash 4.56 ×5.80 4.98 ×6.54 3.70 ×4.72 4.44 ×5.75 4.13 ×5.44 5.21 ×6.91 2.60 ×4.00 2.09 ×2.90 3.96 ×5.26 Q3-8B
+> BASTION 7.05 ×8.70 8.51 ×10.41 7.35 ×9.21 6.98 ×9.12 6.75 ×8.78 7.81 ×9.82 4.32 ×6.32 3.46 ×4.64 6.53 ×8.38 Eagle-3 DFlash BASTION A100 H100 A6000 RTX PRO
+> 6000 B
+
+0
+
+2
+
+4
+
+6
+
+8              
+
+> Speedup (X)  x6.93 x6.88 x6.87
+> x6.06
+> A100 H100 A6000 RTX PRO
+> 6000 B
+> x6.61 x6.46 x6.25 x6.30
+> A100 H100 A6000 RTX PRO
+> 6000 B
+> x4.46 x4.41 x4.48 x4.42
+
+(a) Qwen3-4B A100 H100 A6000 RTX PRO 
+
+> 6000 B
+
+0
+
+2
+
+4
+
+6
+
+8               
+
+> Speedup (X)  x6.93 x6.88 x6.87
+> x6.06
+> A100 H100 A6000 RTX PRO
+> 6000 B
+> x6.61 x6.46 x6.25 x6.30
+> A100 H100 A6000 RTX PRO
+> 6000 B
+> x4.46 x4.41 x4.48 x4.42
+
+(b) Qwen3-8B A100 H100 A6000 RTX PRO 
+
+> 6000 B
+
+0
+
+2
+
+4
+
+6
+
+8               
+
+> Speedup (X)  x6.93 x6.88 x6.87
+> x6.06
+> A100 H100 A6000 RTX PRO
+> 6000 B
+> x6.61 x6.46 x6.25 x6.30
+> A100 H100 A6000 RTX PRO
+> 6000 B
+> x4.46 x4.41 x4.48 x4.42
+
+(c) Llama-3.1-8B-Instruct 
+
+Figure 4: Additional speedup results across GPU architectures. Per-cell average wall-clock speedup of B ASTION versus EAGLE-3 and DFlash on (a) Qwen3-4B, (b) Qwen3-8B, and (c) Llama-3.1-8B-Instruct, evaluated on four NVIDIA GPUs (A100, H100, A6000, and RTX PRO 6000 Blackwell) at temperature T = 0 . Each bar reports the mean speedup over autoregressive decoding across all eight benchmarks. Numbers above each red bar give the speedup achieved by B ASTION ,which dominates both baselines on every (model, GPU) cell. nodes to useful candidate paths. The speedup gain is not determined by AAL alone, however: the selected budget must also avoid excessive verifier latency, which motivates the budget-sweep analysis in Section 5.1. 
+
+Generalization across GPUs and model families. Beyond A100, B ASTION retains its lead on the A6000 and RTX PRO 6000 Blackwell across all target models (Qwen3-4B/8B and Llama-3.1-8B-Instruct; Figure 4), as well as on H100 (Appendix F.2). This demonstrates that the improvements are not tied to specific GPU generations or model families. 
+
+4.3 Tree Expansion Comparison Tree topology comparison. We ablate the tree expansion rule under a matched verification budget 
+
+N , comparing the best-first expansion of B ASTION against standard beam search. Unlike beam search, which uniformly retains the top w extensions depth-by-depth to form a rigid (w×d) topology, best-first dynamically expands the highest-scoring open nodes globally based on cumulative path scores ρ(i) (Equation 1). Figure 5(a) illustrates this for N =17 : beam search yields a fixed rectangle, whereas best-first flexibly deepens high-confidence paths. By Proposition 3.3, best-first produces the optimal prefix-closed tree under the surrogate bA; this ablation evaluates whether this theoretical optimality translates to wall-clock speedups over beam search. Additionally, Figure 5(b) presents a non-budget-matched single-path DFlash baseline (greedy, block size 16 ) to isolate the inherent benefits of utilizing a tree structure over a no-tree reference. 7N = 17      
+
+> Best-First Search style
+> w= 4, d= 4, N= 17
+> Beam Search style
+
+(a) Tree topology under N = 17 
+
+Model Method Tree Speedup τ
+
+Q3-4B greedy [10] ✗ 5.14 × 6.10 beam search ✓ 6.16 × 7.77 best-first ✓ 6.59 × 8.19 
+
+Q3-8B greedy [10] ✗ 4.73 × 6.09 beam search ✓ 5.74 × 7.60 best-first ✓ 6.09 × 7.96 
+
+(b) Average speedup across 8 benchmarks 
+
+Figure 5: Tree expansion under fixed budgets. (a) At N =17 , beam search spreads nodes uniformly, while best-first focuses on high-scoring prefixes (red: accepted prefix). (b) Average A6000 speedup across 8 math/code/chat benchmarks. Under matched budgets, best-first ( N =61 ) outperforms beam (w=4 , d =15 ), improving Qwen3-4B/8B by +7 .0% /+6 .1% (higher τ ). Greedy [ 10 ] (single-path, block 16 ) is an unmatched no-tree baseline. Bold indicates the best per block. Oracle Fixed Budget BASTION 2   
+
+> 4
+> 6
+> 8
+> Speedup (×)
+> A100
+> Qwen3-8B
+> A6000 RTX PRO 6000 B
+> 32
+> 64
+> 128
+> 256
+> 512
+> 1024
+> 1
+> 2
+> 3
+> 4
+> 5
+> Speedup (×)
+> Llama-3.1-8B
+> 32
+> 64
+> 128
+> 256
+> 512
+> 1024 32
+> 64
+> 128
+> 256
+> 512
+> 1024
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> A100 RTX PRO 6000 B
+> 32
+> 64
+> 128
+> 256
+> 512
+> 1024
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 32
+> 64
+> 128
+> 256
+> 512
+> 1024
+> Math, Code, Chat Benchmark LongBench Benchmark
+> Average Verification Budget
+
+Figure 6: Budget-policy sweep within BASTION . Mean speedup over AR decoding at T =0 . Blue: BASTION -Fixed (N ∈{ 32 , 64 , 128 , 256 , 512 , 1024 }). Green stars: BASTION 
+
+(mean realized budget). Dashed gold (Oracle ): best per-dataset fixed N averaged per panel—an upper bound for static N without tuning. Left: short-context benchmarks over 
+
+{A100,A6000,RTX PRO 6000 B }×{ Qwen3-8B, Llama-3.1-8B-Instruct }; Right: LongBench (En-glish) over {A100,RTX PRO 6000 B }× same targets. B ASTION tracks the Oracle on most panels, recovering near-best speedup without tuning, while over-budgeting degrades the fixed sweep. 
+
+Best-first expansion outperforms beam search under matched budgets. Figure 5(b) shows best-first expansion improves mean speedup and average acceptance length τ under a matched budget (beam: w=4 , d =15 ; best-first: N =61 ). On Qwen3-4B and Qwen3-8B, best-first yields +7 .0% and 
+
++6 .1% speedups respectively, with consistently higher τ . While both tree variants outperform the greedy baseline, this comparison isolates topology as the source of best-first’s advantage. Concentrat-ing expansion on high-scoring prefixes, rather than uniformly across depths, enables more efficient block-diffusion drafting. 
+
+## 5 Analysis 
+
+5.1 Fixed vs. Adaptive Budget Policies Fixed-budget tree construction exposes strong budget sensitivity. We first sweep the verification budget N for the fixed-budget variant (best-first expansion with manually chosen N ; denoted Fixed in Figure 6). The resulting speedup curves are sharply peaked: small N underutilizes the verifier, large N
+
+inflates verification latency faster than it improves accepted length, and the peak location varies across models, GPUs, and benchmarks. A fixed budget is therefore a workload- and hardware-dependent system decision. 8c = 64 c = 256 c = 1024 c = 64 c = 256 c = 1024                  
+
+> Uncalibrated Calibrated 0200 400
+> Sequence Length
+> 20
+> 40
+> 60
+> Verification Latency (ms)  Qwen3-8B
+> RMSE: 30.6 3.1 ( 90%)
+> 0200 400
+> Sequence Length
+> Llama-3.1-8B-Instruct
+> RMSE: 26.4 3.5 ( 87%) 0200 400
+> Sequence Length
+> 20
+> 40
+> 60
+> Verification Latency (ms)  Qwen3-8B
+> RMSE: 30.6 3.1 ( 90%)
+> 0200 400
+> Sequence Length
+> Llama-3.1-8B-Instruct
+> RMSE: 26.4 3.5 ( 87%)
+
+Target Method Speedup τ ¯N
+
+Q3-4B Static 6.93 × 8.55 202 .0
+
+EMA+Calib 6.87 × 8.56 201 .9
+
+EMA 7.21 × 8.22 102 .2
+
+Q3-8B Static 6.61 × 8.47 139 .3
+
+EMA+Calib 6.55 × 8.44 139 .8
+
+EMA 6.79 × 8.45 126 .6
+
+L3.1-8B Static 4.46 × 6.00 87 .0
+
+EMA+Calib 4.42 × 5.99 87 .0
+
+EMA 3.89 × 6.13 123 .1
+
+(a) Verification-latency calibration (b) Online-calibration variants 
+
+Figure 7: Latency model evaluation on A100. (a) Verification latency vs. sequence length for two targets at contexts c ∈ { 64 , 256 , 1024 }. Dashed and solid lines denote the uncalibrated roofline and calibrated fit (used by the controller). Calibration cuts RMSE by 87 –92% . (b) Mean over 8 short-context benchmarks at T =0 ( ¯N : mean realized tree size). B ASTION variants: Static (offline curve), EMA+Calib (offline + online EMA residual), and EMA (online only). Bold and underline indicate the best and second best per model. Highlighted: default B ASTION config. 
+
+BASTION selects near-efficient budgets without per-setting tuning. BASTION replaces the manual choice with an online estimate of the acceptance–latency trade-off. Across all panels in Figure 6, B ASTION tracks the per-setting Oracle—the upper bound any fixed N could achieve in hindsight—eliminating the need for a per-setting sweep by construction. 
+
+5.2 Latency Model Evaluation Calibrated roofline as the default latency estimator. Figure 7a shows verification latency as a function of verified sequence length across context lengths c ∈ { 64 , 256 , 1024 } for the three targets. The bare roofline (dashed) captures the scaling trend but systematically underestimates absolute latency; the step-function surges reflect CUDA tile-allocation overhead. A lightweight per-(GPU, tar-get) linear calibration (solid) reduces RMSE by 87 –90% (30 .6→3.1 ms on Qwen3-8B, 26 .4→3.5 ms on Llama-3.1-8B). B ASTION uses this calibrated curve as its default latency estimator, which we refer to as Static below. 
+
+Online alternatives when offline calibration is unavailable. For deployments lacking per-(GPU, target) calibration data, we evaluate two online variants. EMA discards the offline curve and tracks a single multiplicative bias c via EMA on the ratio of observed to bare-roofline latency, c ←
+
+(1 −α) c + α (obs /pred ), using c · Tverify (N ) in place of the raw prediction. EMA+Calib applies the same EMA as a residual correction on top of the offline-calibrated curve. 
+
+Static is the most robust default; EMA alone is fragile. Figure 7b reports mean speedup, τ ,and realized tree size ¯N on A100 across eight short-context benchmarks at T =0 . Static is best on Llama-3.1-8B and within 0.28 × of the best on both Qwen3 targets. EMA selects tighter trees on Qwen3 (gaining +0 .28 ×/+0 .18 ×) but settles at larger trees on Llama-3.1-8B without an acceptance gain, losing −12 .7% . EMA+Calib tracks Static within ±0.06 × everywhere, indicating the offline warm start dominates the EMA residual. We adopt Static as the default and EMA+Calib as the fallback when offline calibration is unavailable. 
+
+## 6 Conclusion 
+
+We presented B ASTION , a budget-aware tree-based speculative decoding method for block-diffusion drafters. B ASTION combines a path-confidence surrogate with provably optimal best-first tree con-struction (Proposition 3.3) and a hardware-calibrated online budget controller (Proposition 3.4). Across three targets, four GPUs, and diverse benchmarks, B ASTION achieves up to 6.61 × speedup over autoregressive decoding ( 1.39 × over DFlash, 2.45 × over EAGLE-3) without per-deployment tuning. 9References 
+
+[1] Sandhini Agarwal, Lama Ahmad, Jason Ai, Sam Altman, Andy Applebaum, Edwin Arbus, Rahul K Arora, Yu Bai, Bowen Baker, Haiming Bao, et al. gpt-oss-120b & gpt-oss-20b model card. arXiv preprint arXiv:2508.10925 , 2025. 2 [2] Zihao An, Huajun Bai, Ziqiong Liu, Dong Li, and Emad Barsoum. Pard: Accelerating llm inference with low-cost parallel draft model adaptation. arXiv preprint arXiv:2504.18583 , 2025. 3, 15 [3] Marianne Arriola, Aaron Gokaslan, Justin T Chiu, Zhihan Yang, Zhixuan Qi, Jiaqi Han, Sub-ham Sekhar Sahoo, and Volodymyr Kuleshov. Block diffusion: Interpolating between autore-gressive and diffusion language models. arXiv preprint arXiv:2503.09573 , 2025. 2 [4] Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, et al. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 , 2021. 24 [5] Gregor Bachmann, Sotiris Anagnostidis, Albert Pumarola, Markos Georgopoulos, Artsiom Sanakoyeu, Yuming Du, Edgar Schönfeld, Ali Thabet, and Jonas Kohler. Judge decoding: Faster speculative sampling requires going beyond model alignment. arXiv preprint arXiv:2501.19309 ,2025. 2, 3 [6] Sangmin Bae, Jongwoo Ko, Hwanjun Song, and Se-Young Yun. Fast and robust early-exiting framework for autoregressive language models with synchronized parallel decoding. In Pro-ceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , pages 5910–5924, 2023. 2, 3 [7] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. Longbench: A bilingual, multitask benchmark for long context understanding, 2024. URL https://arxiv. org/abs/2308.14508 . 24 [8] Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D Lee, Deming Chen, and Tri Dao. Medusa: Simple llm inference acceleration framework with multiple decoding heads. 
+
+arXiv preprint arXiv:2401.10774 , 2024. 2, 3, 15 [9] Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 , 2023. 2, 3, 15 [10] Jian Chen, Yesheng Liang, and Zhijian Liu. Dflash: Block diffusion for flash speculative decoding. arXiv preprint arXiv:2602.06036 , 2026. 1, 2, 3, 8, 15, 24 [11] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mohammad Bavarian, Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebgen Guss, Alex Nichol, Alex Paino, Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shantanu Jain, William Saunders, Christopher Hesse, Andrew N. Carr, Jan Leike, Josh Achiam, Vedant Misra, Evan Morikawa, Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. Evaluating large language models trained on code, 2021. 24 [12] Zhuoming Chen, Avner May, Ruslan Svirschevski, Yuhsun Huang, Max Ryabinin, Zhihao Jia, and Beidi Chen. Sequoia: Scalable, Robust, and Hardware-aware Speculative Decoding, July 2025. URL http://arxiv.org/abs/2402.12374 . arXiv:2402.12374 [cs]. 3, 15 [13] Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems, 2021. URL https://arxiv.org/ abs/2110.14168 . 24 10 [14] Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon, Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. Gemini 2.5: Pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities. arXiv preprint arXiv:2507.06261 , 2025. 2 [15] Pradeep Dasigi, Kyle Lo, Iz Beltagy, Arman Cohan, Noah A. Smith, and Matt Gardner. A dataset of information-seeking questions and answers anchored in research papers. In Kristina Toutanova, Anna Rumshisky, Luke Zettlemoyer, Dilek Hakkani-Tur, Iz Beltagy, Steven Bethard, Ryan Cotterell, Tanmoy Chakraborty, and Yichao Zhou, editors, Proceedings of the 2021 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies , pages 4599–4610, Online, June 2021. Asso-ciation for Computational Linguistics. doi: 10.18653/v1/2021.naacl- main.365. URL 
+
+https://aclanthology.org/2021.naacl-main.365/ . 24 [16] DeepSeek-AI. Deepseek-v4: Towards highly efficient million-token context intelligence, 2026. 2[17] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of the 2019 conference of the North American chapter of the association for computational linguistics: human language technologies, volume 1 (long and short papers) , pages 4171–4186, 2019. 3 [18] Mostafa Elhoushi, Akshat Shrivastava, Diana Liskovich, Basil Hosmer, Bram Wasti, Liangzhen Lai, Anas Mahmoud, Bilge Acun, Saurabh Agarwal, Ahmed Roman, et al. Layerskip: Enabling early exit inference and self-speculative decoding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12622–12642, 2024. 2, 3 [19] Alexander Fabbri, Irene Li, Tianwei She, Suyi Li, and Dragomir Radev. Multi-news: A large-scale multi-document summarization dataset and abstractive hierarchical model. In Anna Korhonen, David Traum, and Lluís Màrquez, editors, Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , pages 1074–1084, Florence, Italy, July 2019. Association for Computational Linguistics. doi: 10.18653/v1/P19-1102. URL 
+
+https://aclanthology.org/P19-1102/ . 24 [20] Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. Break the sequential dependency of llm inference using lookahead decoding. arXiv preprint arXiv:2402.02057 , 2024. 3 [21] Bogdan Gliwa, Iwona Mochol, Maciej Biesek, and Aleksander Wawer. SAMSum corpus: A human-annotated dialogue dataset for abstractive summarization. In Lu Wang, Jackie Chi Kit Cheung, Giuseppe Carenini, and Fei Liu, editors, Proceedings of the 2nd Workshop on New Frontiers in Summarization , pages 70–79, Hong Kong, China, November 2019. Association for Computational Linguistics. doi: 10.18653/v1/D19-5409. URL https://aclanthology.org /D19-5409/ . 24 [22] Fabian Gloeckle, Badr Youbi Idrissi, Baptiste Rozière, David Lopez-Paz, and Gabriel Syn-naeve. Better & faster large language models via multi-token prediction. arXiv preprint arXiv:2404.19737 , 2024. 2 [23] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. 2, 24 [24] Jiatao Gu, James Bradbury, Caiming Xiong, Victor OK Li, and Richard Socher. Non-autoregressive neural machine translation. arXiv preprint arXiv:1711.02281 , 2017. 2 [25] Yue Guan, Changming Yu, Shihan Fang, Weiming Hu, Zaifeng Pan, Zheng Wang, Zihan Liu, Yangjie Zhou, Yufei Ding, Minyi Guo, and Jingwen Leng. Yggdrasil: Bridging dynamic speculation and static runtime for latency-optimal tree-based llm decoding, 2025. URL https: //arxiv.org/abs/2512.23858 . 15 11 [26] Xiaochuang Han, Sachin Kumar, and Yulia Tsvetkov. Ssd-lm: Semi-autoregressive simplex-based diffusion language model for text generation and modular control. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 11575–11596, 2023. 2 [27] Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr Dollár, and Ross Girshick. Masked autoencoders are scalable vision learners. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 16000–16009, 2022. 3 [28] Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the math dataset. 
+
+arXiv preprint arXiv:2103.03874 , 2021. 24 [29] Kaixuan Huang, Xudong Guo, and Mengdi Wang. Specdec++: Boosting speculative decoding via adaptive candidate lengths. arXiv preprint arXiv:2405.19715 , 2024. 15 [30] Luyang Huang, Shuyang Cao, Nikolaus Parulian, Heng Ji, and Lu Wang. Efficient attentions for long document summarization. In Kristina Toutanova, Anna Rumshisky, Luke Zettlemoyer, Dilek Hakkani-Tur, Iz Beltagy, Steven Bethard, Ryan Cotterell, Tanmoy Chakraborty, and Yichao Zhou, editors, Proceedings of the 2021 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies , pages 1419–1436, Online, June 2021. Association for Computational Linguistics. doi: 10.18653/v1/2021.naacl-m ain.112. URL https://aclanthology.org/2021.naacl-main.112/ . 24 [31] Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Ar-mando Solar-Lezama, Koushik Sen, and Ion Stoica. Livecodebench: Holistic and contamination free evaluation of large language models for code. arXiv preprint arXiv:2403.07974 , 2024. 24 [32] Doohyuk Jang, Sihwan Park, June Yong Yang, Yeonsung Jung, Jihun Yun, Souvik Kundu, Sung-Yub Kim, and Eunho Yang. Lantern: Accelerating visual autoregressive models with relaxed speculative decoding. arXiv preprint arXiv:2410.03355 , 2024. 2 [33] Mandar Joshi, Eunsol Choi, Daniel Weld, and Luke Zettlemoyer. TriviaQA: A large scale distantly supervised challenge dataset for reading comprehension. In Regina Barzilay and Min-Yen Kan, editors, Proceedings of the 55th Annual Meeting of the Association for Compu-tational Linguistics (Volume 1: Long Papers) , pages 1601–1611, Vancouver, Canada, July 2017. Association for Computational Linguistics. doi: 10.18653/v1/P17- 1147. URL 
+
+https://aclanthology.org/P17-1147/ . 24 [34] Sehoon Kim, Karttikeya Mangalam, Suhong Moon, Jitendra Malik, Michael W Mahoney, Amir Gholami, and Kurt Keutzer. Speculative decoding with big little decoder. Advances in Neural Information Processing Systems , 36:39236–39256, 2023. 2, 3, 15 [35] John Kirchenbauer, Abhimanyu Hans, Brian Bartoldson, Micah Goldblum, Ashwinee Panda, and Tom Goldstein. Multi-token prediction via self-distillation. arXiv preprint arXiv:2602.06019 ,2026. 2 [36] Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR, 2023. 2, 3, 15 [37] Guanghao Li, Zhihui Fu, Min Fang, Qibin Zhao, Ming Tang, Chun Yuan, and Jun Wang. Diffuspec: Unlocking diffusion language models for speculative decoding. arXiv preprint arXiv:2510.02358 , 2025. 3, 15 [38] Xiang Li, John Thickstun, Ishaan Gulrajani, Percy S Liang, and Tatsunori B Hashimoto. Diffusion-lm improves controllable text generation. Advances in neural information processing systems , 35:4328–4343, 2022. 2 [39] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle: Speculative sampling requires rethinking feature uncertainty. arXiv preprint arXiv:2401.15077 , 2024. 2, 3, 15 12 [40] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle-2: Faster inference of language models with dynamic draft trees, 2024. URL https://arxiv.org/abs/2406.168 58 . 2, 15 [41] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle-3: Scaling up inference acceleration of large language models via training-time test. arXiv preprint arXiv:2503.01840 ,2025. 1, 2, 3, 15, 24 [42] Jingyu Liu, Xin Dong, Zhifan Ye, Rishabh Mehta, Yonggan Fu, Vartika Singh, Jan Kautz, Ce Zhang, and Pavlo Molchanov. Tidar: Think in diffusion, talk in autoregression. arXiv preprint arXiv:2511.08923 , 2025. 2, 3, 15 [43] Tianyu Liu, Yun Li, Qitan Lv, Kai Liu, Jianchen Zhu, Winston Hu, and Xiao Sun. Pearl: Parallel speculative decoding with adaptive draft length. arXiv preprint arXiv:2408.11850 , 2024. 15 [44] Tianyu Liu, Qitan Lv, Hao Li, Xing Gao, Xiao Sun, and Xiaoyan Sun. Logitspec: Accel-erating retrieval-based speculative decoding via next next token speculation. arXiv preprint arXiv:2507.01449 , 2025. 15 [45] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, et al. Specinfer: Accelerating large language model serving with tree-based speculative inference and verification. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , pages 932–949, 2024. 2, 3, 15 [46] Shen Nie, Fengqi Zhu, Zebin You, Xiaolu Zhang, Jingyang Ou, Jun Hu, Jun Zhou, Yankai Lin, Ji-Rong Wen, and Chongxuan Li. Large language diffusion models. arXiv preprint arXiv:2502.09992 , 2025. 2 [47] Sihwan Park, Doohyuk Jang, Sungyub Kim, Souvik Kundu, and Eunho Yang. Lantern++: Enhancing relaxed speculative decoding with static tree drafting for visual auto-regressive models. arXiv preprint arXiv:2502.06352 , 2025. 2 [48] Liran Ringel and Yaniv Romano. Accelerating speculative decoding with block diffusion draft trees. arXiv preprint arXiv:2604.12989 , 2026. 15 [49] Ranajoy Sadhukhan, Jian Chen, Zhuoming Chen, Vashisth Tiwari, Ruihang Lai, Jinyuan Shi, Ian En-Hsu Yen, Avner May, Tianqi Chen, and Beidi Chen. Magicdec: Breaking the latency-throughput tradeoff for long context generation with speculative decoding. arXiv preprint arXiv:2408.11049 , 2024. 2, 3 [50] Mohammad Samragh, Arnav Kundu, David Harrison, Kumari Nishu, Devang Naik, Minsik Cho, and Mehrdad Farajtabar. Your llm knows the future: Uncovering its multi-token prediction potential. arXiv preprint arXiv:2507.11851 , 2025. 2, 3, 15 [51] Apoorv Saxena. Prompt lookup decoding, November 2023. URL https://github.com/apo orvumang/prompt-lookup-decoding/ . 3 [52] Ziteng Sun, Ananda Theertha Suresh, Jae Hun Ro, Ahmad Beirami, Himanshu Jain, and Felix Yu. Spectr: Fast speculative decoding via optimal transport. Advances in Neural Information Processing Systems , 36:30222–30242, 2023. 15 [53] Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li, Carlos Guestrin, Percy Liang, and Tatsunori B. Hashimoto. Stanford alpaca: An instruction-following llama model. 
+
+https://github.com/tatsu-lab/stanford_alpaca , 2023. 24 [54] Hunyuan AI Infra Team. Angelslim: A more accessible, comprehensive, and efficient toolkit for large model compression. arXiv preprint arXiv:2602.21233 , 2026. 24 [55] Jikai Wang, Yi Su, Juntao Li, Qingrong Xia, Zi Ye, Xinyu Duan, Zhefeng Wang, and Min Zhang. Opt-tree: Speculative decoding with adaptive draft tree structure. Transactions of the Association for Computational Linguistics , 13:188–199, 2025. 15 13 [56] Chengyue Wu, Hao Zhang, Shuchen Xue, Shizhe Diao, Yonggan Fu, Zhijian Liu, Pavlo Molchanov, Ping Luo, Song Han, and Enze Xie. Fast-dllm v2: Efficient block-diffusion llm. arXiv preprint arXiv:2509.26328 , 2025. 2 [57] Chengyue Wu, Hao Zhang, Shuchen Xue, Zhijian Liu, Shizhe Diao, Ligeng Zhu, Ping Luo, Song Han, and Enze Xie. Fast-dllm: Training-free acceleration of diffusion llm by enabling kv cache and parallel decoding. arXiv preprint arXiv:2505.22618 , 2025. 2 [58] Tong Wu, Zhihao Fan, Xiao Liu, Hai-Tao Zheng, Yeyun Gong, Jian Jiao, Juntao Li, Jian Guo, Nan Duan, Weizhu Chen, et al. Ar-diffusion: Auto-regressive diffusion model for text generation. 
+
+Advances in Neural Information Processing Systems , 36:39957–39974, 2023. 2 [59] Yangchao Wu, Zongyue Qin, Alex Wong, and Stefano Soatto. Stree: Speculative tree decoding for hybrid state-space models. arXiv preprint arXiv:2505.14969 , 2025. 15 [60] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. 2, 24 [61] Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen, Gang Chen, and Sharad Mehrotra. Draft& verify: Lossless large language model acceleration via self-speculative decoding. In 
+
+Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 11263–11282, 2024. 2 [62] Situo Zhang, Hankun Wang, Da Ma, Zichen Zhu, Lu Chen, Kunyao Lan, and Kai Yu. Adaeagle: Optimizing speculative decoding via explicit modeling of adaptive draft structures. arXiv preprint arXiv:2412.18910 , 2024. 15 [63] Yifan Zhang and Team Math-AI. American invitational mathematics examination (aime) 2025, 2025. 24 [64] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric Xing, et al. Judging llm-as-a-judge with mt-bench and chatbot arena. Advances in neural information processing systems , 36:46595–46623, 2023. 24 14 A Limitations 
+
+There are two limitations in our work: • Batch size constraints: Our evaluation targets batch size 1; serving regimes with larger batches alter the verification-cost profile and warrant dedicated treatment. • Runtime profile calibration: Our default offline calibration assumes a stable runtime profile; while BASTION with EMA from static calibration provides a residual-correction fallback, deployments with pronounced runtime drift remain an open direction. The broader framework—surrogate-driven tree construction with online budget control—extends naturally to other multi-token prediction paradigms beyond block diffusion. 
+
+## B Related Works 
+
+Block diffusion drafter for speculative decoding. Recent speculative decoding methods have tran-sitioned from autoregressive drafting [ 9 , 34 , 36 , 39 ] toward multi-token prediction and block diffusion paradigms [ 8 , 10 , 37 , 42 , 50 ]. By leveraging the inherent multi-token predictive capacity of modern LLMs [ 50 ], parallel drafting maximizes hardware utilization and reduces latency via single forward-pass generation. For example, PARD [ 2 ] converts autoregressive drafters into target-independent parallel models via a conditional drop-token mechanism, while DiffuSpec [ 37 ] enables training-free integration of pretrained diffusion models using causal-consistency path search. Other works di-rectly pretrain block diffusion drafters: TiDAR [ 42 ] synergizes diffusion-style drafting with causal verification, and DFlash [10] leverages the target model’s context features [41] via KV injection. 
+
+Tree-based speculative decoding. Tree-based speculative decoding improves verifier utilization by replacing a single draft trajectory with a prefix tree, where root-to-leaf paths represent alternative continuations. SpecInfer [ 45 ] pioneers the verification of such trees through tree attention, while methods like Medusa [ 8], EAGLE [ 39 ], and EAGLE-2 [ 40 ] construct multi-token or tree-structured drafts using auxiliary heads or feature-level autoregressive models. To maximize expected acceptance length under hardware constraints, approaches like Sequoia [ 12 ] and SpecTr [ 52 ] optimize fixed tree topologies offline through exact search or dynamic programming algorithms using profiling statistics. This static-tree paradigm has also been extended to hybrid state-space models [59]. 
+
+Adaptive draft tree structure. Recent methods further optimize acceptance efficiency by dy-namically adjusting draft tree topologies [ 25 , 29 , 43 , 44 , 55 ]. While Sequoia [ 12 ] relies on offline profiling, subsequent approaches introduce online adaptation by modifying draft structures via expec-tation maximization (OPT-Tree [ 55 ]), Markov decision processes (SpecDec++ [ 29 ]), parallel serving (PEARL [ 43 ]), length predictors (AdaEAGLE [ 62 ]), or latency-aware optimization (Yggdrasil [ 25 ]). Concurrent with our work, DDTree [ 48 ] also extends this adaptability to block diffusion drafters via best-first tree expansion. Our work shares a similar tree-based block diffusion drafting paradigm; however, whereas DDTree relies on fixed budgets and manual tuning, we further introduce a hardware-aware adaptive controller to dynamically align the draft structure with real-time system constraints. 15 C Mathematical Proofs 
+
+C.1 Proofs of Lemma 3.1 and Proposition 3.2 
+
+We adopt the notation of §3.2. Let T be a prefix-closed tree with root r, and let X = ( X1, . . . , X γ ) de-note a sample drawn from the drafter’s joint distribution; by property (P2), Xk ∼ qk(·) independently across positions. For a node i ∈ T at depth d(i) with root-to-node path path( i) = ( xi1 , . . . , x id(i) ),define the cover indicator 
+
+cov i(X) := 1X1: d(i) = path( i) ,
+
+with the convention cov r (X) = 1 (the empty prefix is vacuously matched). Let C(X) := {i ∈ T :cov i(X) = 1 } denote the covered set. Under the self-verification model, a node is committed iff it is covered, so the committed length is Aself (T ; X) = |C (X)|.
+
+Proof of Lemma 3.1 
+
+We establish three structural properties of C(X), from which the lemma follows. 
+
+(i) Ancestor-closure. Let i ∈ C (X) and let j be an ancestor of i in T . Since j lies on the root-to-i
+
+path, path( j) is a prefix of path( i), so path( i)1: d(j) = path( j). Therefore 
+
+X1: d(j) = path( i)1: d(j) = path( j),
+
+which gives j ∈ C (X).
+
+(ii) At most one covered node per depth. Suppose two distinct nodes i1, i 2 ∈ T at depth k both lie in C(X). Then X1: k = path( i1) and X1: k = path( i2), forcing path( i1) = path( i2). But in a tree, two distinct nodes at the same depth necessarily have distinct root-to-node paths: tracing from the root, their paths must agree up to their nearest common ancestor and then diverge into different children. Contradiction. 
+
+(iii) Chain structure. Set m := max i∈C (X) d(i); the maximum is well-defined because r ∈ C (X).By (ii), there exists a unique node i⋆ ∈ C (X) with d(i⋆) = m. By (i), every ancestor of i⋆ in T also belongs to C(X), contributing exactly one covered node at each depth k ∈ { 0, 1, . . . , m }. By (ii), no node outside the root-to-i⋆ chain can be in C(X). Hence C(X) is exactly the chain from r to i⋆, and 
+
+|C (X)| = m + 1 .Combining the three properties, 
+
+Aself (T ; X) = |C (X)| = # i ∈ T : X1: d(i) = path( i) .
+
+Proof of Proposition 3.2 
+
+By Lemma 3.1, the committed length decomposes as a sum of cover indicators: 
+
+Aself (T ; X) = X
+
+> i∈T
+
+cov i(X).
+
+Taking expectations over X and applying linearity, 
+
+EX [Aself (T ; X)] = X
+
+> i∈T
+
+EX [cov i(X)] = X
+
+> i∈T
+
+P X1: d(i) = path( i) .
+
+For the root, P(X1:0 = path( r)) = 1 = ρ(r) by convention. For any non-root i with path( i) = (xi1 , . . . , x id(i) ), position-wise independence (P2) yields 
+
+P X1: d(i) = path( i) =
+
+> d(i)
+
+Y
+
+> k=1
+
+P(Xk = xik ) = 
+
+> d(i)
+
+Y
+
+> k=1
+
+qk(xik ) = ρ(i).
+
+Summing over T ,
+
+bA(T ) := EX [Aself (T ; X)] = X
+
+> i∈T
+
+ρ(i),
+
+which establishes Equation 3. 16 C.2 Proof of Proposition 3.3 
+
+Let i1, i 2, . . . be the nodes added by best-first expansion in order, with i1 = r.
+
+Step 1: Path monotonicity. For any non-root i with parent π(i),
+
+ρ(i) = ρ(π(i)) · qd(i)(xi) ≤ ρ(π(i)) ,
+
+since qd(i)(xi) ∈ [0 , 1] .
+
+Step 2: Best-first selects in globally non-increasing order of ρ. Suppose, for contradiction, that there exist indices m < n with ρ(im) < ρ (in). Among such pairs, choose the one minimizing m. At step m, best-first selected im from the available frontier Fm (nodes whose parent has been added but which are not yet in Tm−1). Consider the root-to-in path in the lattice V, and let w be the first 
+
+node on this path that is not in {i1, . . . , i m−1}. Then π(w) ∈ { i1, . . . , i m−1}, so w ∈ Fm. By Step 1 applied along the path from w down to in,
+
+ρ(w) ≥ ρ(in) > ρ (im).
+
+But best-first chose im as the available node of maximal ρ, contradicting ρ(w) > ρ (im) with w ∈ Fm.Hence ρ(i1) ≥ ρ(i2) ≥ · · · .
+
+Step 3: Optimality via leaf exchange. Intuitively, Step 2 already implies that TN collects the N
+
+largest path scores reachable under prefix-closure; we now make this rigorous by showing that any prefix-closed tree of size N can be transformed into TN via a sequence of score-non-decreasing leaf-for-leaf exchanges. Define TN := {i1, . . . , i N }. Note TN is prefix-closed: for any ik with k ≤ N , best-first added π(ik)
+
+before ik, so π(ik) ∈ T N .Let T ⊆ V be any prefix-closed tree with |T | = N and T̸ = TN . We construct a prefix-closed T ′
+
+with |T ′| = N , bA(T ′) ≥ bA(T ), and |T ′ △ T N | < |T △ T N |.
+
+Selecting the exchange pair. Let y ∈ T \ T N be a node of maximum depth in T \ T N . Then y has no children in T : any child c of y in T has d(c) > d (y), so by maximality c / ∈ T \ T N , i.e., c ∈ T N ; but prefix-closure of TN then forces y = π(c) ∈ T N , contradicting y ∈ T \ T N . Hence y is a leaf of T
+
+and T \ { y} is prefix-closed. Let s be the smallest index such that is /∈ T . Such s exists because |T | = |T N | = N and T̸ = TN .By minimality, {i1, . . . , i s−1} ⊆ T , and π(is) ∈ { i1, . . . , i s−1} ⊆ T .
+
+Constructing T ′. Define T ′ := ( T \ { y}) ∪ { is}. We verify the required properties: 
+
+Prefix-closure. (a) Removing y preserves prefix-closure since y is a leaf. (b) Adding is requires 
+
+π(is) ∈ T ′. We have π(is) ∈ { i1, . . . , i s−1} ⊆ T \ { y} (using π(is) ∈ T N but y / ∈ T N , hence 
+
+π(is)̸ = y). So π(is) ∈ T ′.
+
+Score improvement. Since is ∈ T N and y / ∈ T N , in best-first order the index of is is at most N while the index of y exceeds N . By Step 2, ρ(is) ≥ ρ(y). Therefore 
+
+bA(T ′) = bA(T ) − ρ(y) + ρ(is) ≥ bA(T ).
+
+Symmetric difference decreases by 2. T ′ removes y (which was in T \ T N ) and adds is (which was in 
+
+TN \ T ). Iterating this exchange yields a finite sequence of prefix-closed trees of size N with non-decreasing 
+
+bA, terminating at TN . Therefore bA(TN ) ≥ bA(T ).
+
+Step 4: Diminishing returns. Equation 5 is immediate from Step 2: ∆ bA(N ) = ρ(iN +1 ), and the global non-increasing order gives ρ(iN +2 ) ≤ ρ(iN +1 ).
+
+C.3 Proof of Proposition 3.4 
+
+Let S(N ) = LAR · bA(N )/C (N ) on {1, . . . , N max }. Recall the assumptions: (A1) bA(N ) is non-decreasing and concave (Proposition 3.3, Equation 5). 17 (A2) C(N ) > 0 is convex and non-decreasing. Without loss of generality drop the positive constant LAR and study f (N ) = bA(N )/C (N ).
+
+Step 1: Continuous extension. Linearly interpolate bA and C to functions on [1 , N max ]. The interpo-lated bA remains concave and non-negative; the interpolated C remains convex and strictly positive. Both extensions are continuous. 
+
+Step 2: Quasiconcavity of f . A function is quasiconcave iff every upper level set is convex. For any 
+
+c ≥ 0,
+
+f (x) ≥ c ⇐⇒ bA(x) − c C (x) ≥ 0.
+
+The function gc(x) := bA(x) − c C (x) is concave: bA is concave by (A1), −c C is concave because 
+
+c ≥ 0 and C is convex by (A2), and the sum of concave functions is concave. The upper level set 
+
+{x : gc(x) ≥ 0} of a concave function is convex. Hence {x : f (x) ≥ c} is convex for every c, so f
+
+is quasiconcave on [1 , N max ].
+
+Step 3: Continuous unimodality. A continuous quasiconcave function on a real interval is unimodal: there exists x⋆ ∈ [1 , N max ] such that f is non-decreasing on [1 , x ⋆] and non-increasing on [x⋆, N max ].Otherwise, one could find x1 < x 2 < x 3 with f (x2) < min( f (x1), f (x3)) , and the upper level set at level min( f (x1), f (x3)) would contain x1 and x3 but not x2, contradicting convexity. 
+
+Step 4: Discrete unimodality. Restrict to integers. Let N ⋆ ∈ arg max N ∈{ 1,...,N max } S(N ). By Step 3, S is non-decreasing on integers in [1 , x ⋆] and non-increasing on integers in [x⋆, N max ], so S
+
+is non-decreasing on {1, . . . , N ⋆} and non-increasing on {N ⋆, . . . , N max }.
+
+Step 5: First-decrease optimality. Suppose N is the smallest index with S(N +1) < S (N ). Then S
+
+has not yet decreased on {1, . . . , N }, so S(1) ≤ S(2) ≤ · · · ≤ S(N ). By Step 4, since S decreases at N +1 , we must have N ≥ N ⋆, and combined with non-decreasing-up-to-N , N = N ⋆.18 D Algorithm 
+
+Algorithm 1 System-aware Adaptive Tree Construction at Cycle t
+
+Input: Block size γ; drafter probabilities qt, 1: γ ; root/bonus node rt; context size ct; maximum verification budget Nmax ; draft latency Tdraft ,t ; auxiliary-latency Taux ,t ; AR latency LAR .
+
+Output: Selected verification tree T ⋆t and budget N ⋆t . 
+
+> 1
+
+Initialize T ← { rt} and b¯A ← 1 // root/bonus contribution  
+
+> 2
+
+Initialize T ⋆t ← T , N ⋆t ← 0, and bS⋆ ← −∞  
+
+> 3
+
+Initialize max-heap H with the highest-probability depth-1 draft node, keyed by path score ρ(·) 
+
+> 4
+
+for N = 1 to Nmax do  
+
+> 5
+
+if H is empty then  
+
+> 6
+
+break  
+
+> 7
+
+Pop the available node u with largest path score ρ(u) from H 
+
+> 8
+
+T ← T ∪ { u} 
+
+> 9
+
+b¯A ← b¯A + ρ(u)
+
+/* Evaluate the estimated speedup after adding node u. */  
+
+> 10
+
+bTverify ← ESTIMATE LATENCY (N, c t) 
+
+> 11
+
+bC ← Tdraft ,t + bTverify + Taux ,t  
+
+> 12
+
+bS ← b¯A · LAR / bC 
+
+> 13
+
+if bS > bS⋆ then  
+
+> 14
+
+bS⋆ ← bS 
+
+> 15
+
+T ⋆t ← T  
+
+> 16
+
+N ⋆t ← N 
+
+> 17
+
+else  
+
+> 18
+
+break 
+
+/* Update the frontier of the implicit prefix lattice. */  
+
+> 19
+
+if depth( u) < γ then  
+
+> 20
+
+Push the highest-probability child of u into H 
+
+> 21
+
+if u has an unpushed next sibling under the same parent then  
+
+> 22
+
+Push the next sibling of u into H 
+
+> 23
+
+return T ⋆t , N ⋆t
+
+19 E Overall Pipeline 
+
+Figure 8 (bottom) summarizes one iteration of our pipeline; we walk through its four stages below. Draft Model   
+
+> Target Model
+> KV Cache
+> Acceptance Record
+> Speculation Verification
+> Bonus Token & Hidden State
+> Target Model Initial Bonus Token & Hidden State
+> DFlash Pipeline (Single Drafting)
+> Our Pipeline (Tree Drafting)
+> Target Model
+> Draft Model
+> Speculation
+> Initial Bonus Token & Hidden State
+> Draft Logits
+> Adaptive Tree Building
+> Verification Attention Masking
+> Target Model Flattened to 1D
+> KV Caches
+> Acceptance Record
+> Cropping
+> Reordering & Cropping
+> Bonus Token & Hidden State
+> Verification
+> Draft Logits
+> Greedy Top-1 path
+> This <mask> <mask> <mask>
+> This is atree
+
+Figure 8: Single-path vs. tree-based speculative decoding. Top: the DFlash baseline drafts a single greedy top-1 continuation, which the target verifies in one forward pass before cropping the KV cache to the accepted prefix. Bottom: our tree pipeline. From the same initial bonus token and hidden state, the draft model emits per-position logits that the adaptive tree builder expands into a token tree. The tree is linearized to a 1D input for the target, and a custom verification attention mask preserves parent–child dependencies in a single batched forward pass. The acceptance record selects the best path through the tree; the target’s KV cache is then reordered and cropped to retain only accepted nodes, and the new bonus token and hidden state feed the next iteration. 
+
+Drafting. Each decoding step begins from the bonus token and hidden state produced by the previous target forward pass, or, on the first step, from a short prefill. The draft model consumes these and emits a distribution over candidate continuations at multiple future positions. Rather than committing to a single greedy path as in the baseline (Figure 8, top), we feed these draft distributions into an adaptive tree builder that grows a token tree under a fixed verification budget, allocating depth and width to the most promising branches. 
+
+Linearization and verification mask. The tree is linearized into a flat sequence for the target model. To make a single batched forward pass behave as if each branch were verified independently, we construct a custom attention mask (Figure 8, center-bottom): every tree node attends to the shared prefix in the KV cache and to its own ancestors in the tree, but not to siblings or unrelated branches. Position ids are derived from each node’s depth, so rotary embeddings see the correct relative position regardless of the linearization order. 
+
+Acceptance. After the target forward pass, we score every root-to-leaf path against the target’s greedy top-1 predictions and select the longest prefix that the target itself would have produced. The accepted nodes’ tokens are emitted, and the target’s KV cache is reordered and cropped so that it contains the shared prefix followed only by the accepted path—discarding the rest of the tree. 
+
+Iteration. The hidden state of the deepest accepted node, together with the target’s next-token sample at that position, becomes the bonus token and hidden state that seed the next iteration. The cycle repeats until an EOS token or length limit is reached. 20 F Additional Experimental Results 
+
+F.1 Path Score Validation 
+
+Figure 9: Path score validation. For each decode step we collapse the draft tree to a single greedy path by taking the drafter’s top-1 token xk = arg max v qk(v) at every position k ∈ { 1, . . . , γ },where γ is the block size and qk(v) is the drafter distribution of vocabulary v for position k. Then we evaluate the surrogate accepted length specialized to this path, bA = Pγk=1 
+
+Qkj=1 qj (xj ), which is the tree sum of path scores ρ(i) from equation 1 restricted to a depth-γ chain (root term omitted to match the measured length below). Setup: DFlash block-diffusion drafters paired with each target, evaluated on MATH500 with 20 prompts at temperature 0; block size is 16 for Qwen and 10 for Llama. bA correlates strongly with the target-verified accepted length A across all three target/draft pairs (Pearson 0.79 –0.82 , Spearman 0.72 –0.80 ), supporting the use of drafter path probabilities as a proxy for target acceptance in Section 3.2. 
+
+F.2 Additional Experimental on H100 
+
+Table 2: Additional results on H100. Speedup and AAL ( τ ) for Qwen3-4B (Q3-4B) and Qwen3-8B (Q3-8B) at temperatures T = 0 and T = 1 . For the baselines, the tree budget size of EAGLE-3 is set to 60. The block size of DFlash is 16 for both Qwen3-4B and Qwen3-8B. Bold indicates the highest value within each (model, benchmark) pair. 
+
+Math Code Chat Model Method GSM8K MATH500 AIME25 HumanEval MBPP LCB MT-Bench Alpaca Average 
+
+Speedup τ Speedup τ Speedup τ Speedup τ Speedup τ Speedup τ Speedup τ Speedup τ Speedup τ
+
+Temperature T = 0 
+
+EAGLE-3 3.23 × 2.80 3.04 × 2.54 3.13 × 2.51 3.29 × 2.54 2.95 × 2.47 2.86 × 2.24 2.89 × 2.49 2.55 × 2.17 2.99 × 2.47 DFlash 5.83 × 6.51 6.96 × 7.79 6.45 × 7.26 5.87 × 6.69 5.40 × 6.12 5.98 × 6.97 3.21 × 4.38 2.49 × 3.09 5.27 × 6.10 Q3-4B 
+
+BASTION 7.26 × 8.91 8.05 × 10 .20 7.96 × 9.43 8.13 × 9.23 7.22 × 8.81 8.37 × 9.36 4.47 × 6.34 3.58 × 4.73 6.88 × 8.38 
+
+EAGLE-3 3.16 × 2.69 2.83 × 2.48 2.85 × 2.50 2.43 × 2.65 2.82 × 2.20 2.17 × 1.81 2.49 × 2.25 2.05 × 1.73 2.60 × 2.29 DFlash 5.87 × 6.55 6.86 × 7.93 5.95 × 7.18 5.83 × 6.56 5.27 × 5.98 6.04 × 7.16 3.03 × 4.23 2.47 × 3.09 5.17 × 6.09 Q3-8B 
+
+BASTION 7.64 × 9.02 8.02 × 10 .21 6.88 × 9.35 7.33 × 9.20 7.04 × 8.62 7.30 × 9.48 4.12 × 6.16 3.35 × 4.82 6.46 × 8.36 
+
+Temperature T = 1 
+
+EAGLE-3 3.39 × 2.75 3.03 × 2.41 2.50 × 2.16 3.03 × 2.41 2.94 × 2.38 2.30 × 2.07 2.55 × 2.38 2.23 × 2.08 2.75 × 2.33 DFlash 5.55 × 5.98 5.59 × 6.60 4.13 × 4.97 5.33 × 5.93 4.99 × 5.63 5.62 × 6.57 3.00 × 4.01 2.40 × 2.95 4.58 × 5.33 Q3-4B 
+
+BASTION 8.08 × 8.78 8.50 × 10 .15 7.41 × 9.16 8.26 × 9.19 7.68 × 8.74 7.18 × 8.98 4.48 × 6.21 3.59 × 4.71 6.90 × 8.24 
+
+EAGLE-3 3.22 × 2.61 2.75 × 2.35 2.47 × 2.06 2.80 × 2.53 2.58 × 2.21 2.20 × 1.79 2.23 × 2.10 1.79 × 1.62 2.51 × 2.16 DFlash 5.09 × 5.82 5.43 × 6.45 3.98 × 4.83 4.97 × 5.58 4.60 × 5.26 5.61 × 6.82 2.72 × 3.84 2.38 × 2.94 4.35 × 5.19 Q3-8B 
+
+BASTION 7.48 × 8.98 7.59 × 10 .20 7.10 × 8.81 7.30 × 9.15 6.66 × 8.57 7.75 × 9.40 4.08 × 6.18 3.39 × 4.73 6.42 × 8.25 
+
+21 G Analytical Cost Modeling 
+
+We estimate verifier latency with a roofline-style predictor, 
+
+Rt(N ) = max 
+
+ FLOPs( N, C t)PeakFLOPs , Bytes( N, C t)Bandwidth 
+
+
+
+,
+
+so this appendix derives the corresponding FLOP count and memory traffic for a standard Transformer verifier. We assume a non-fused SDPA implementation, count one multiply-accumulate as 2 FLOPs, and omit elementwise operations (e.g., RMSNorm, RoPE, Softmax, SwiGLU nonlinearity), whose cost is lower-order than the dominant matrix multiplications. 
+
+Notation. We use the notation in Table 3. Define hq = nq d and hkv = nkv d.Table 3: Notation used in the cost model. 
+
+Symbol Meaning 
+
+s number of newly verified tokens 
+
+c cached context length 
+
+L number of transformer layers 
+
+h hidden size 
+
+nq number of query heads 
+
+nkv number of key/value heads 
+
+d head dimension 
+
+hf f n FFN intermediate size 
+
+V vocabulary size 
+
+bp bytes per parameter / activation element 
+
+G.1 FLOPs 
+
+Table 4 lists the dominant FLOP terms. Summing them gives the total verifier FLOPs: 
+
+FLOPs = L(4 shh q + 4 shh kv + 4 s(c + s)hq + 6 shh f f n ) + 2 shV. (7) Table 4: FLOP breakdown for a standard Transformer verifier. 
+
+Module Operation FLOPs 
+
+Attention / layer 
+
+Q projection 2shh q
+
+K, V projections 4shh kv 
+
+attention scores QK ⊤ 2s(c + s)hq
+
+attention-value product 2s(c + s)hq
+
+output projection 2sh q h
+
+Attention total L(4 shh q + 4 shh kv + 4 s(c + s)hq )
+
+FFN / layer gate/up projections 4shh f f n 
+
+down projection 2sh f f n h
+
+FFN total L(6 shh f f n )
+
+LM head hidden → vocab 2shV 
+
+22 Table 5: Memory traffic breakdown for the verifier. 
+
+Category Module Read / Write 
+
+Weights Embedding + LM head V h + hV 
+
+Attention weights / layer 2hh q + 2 hh kv 
+
+FFN weights / layer 3hh f f n 
+
+Weights total in Bytes bp [L(2 hh q + 2 hh kv + 3 hh f f n ) + 2 V h ]
+
+KV cache past-context read / layer 2ch kv 
+
+new-token write / layer 2sh kv 
+
+KV cache total in Bytes bp [L(2 ch kv + 2 sh kv )] 
+
+Activations attention I/O / layer 2sh + 4 sh q + 2 sh kv + 2 nq s(c + s)
+
+FFN I/O / layer 2sh + 4 sh f f n 
+
+LM head I/O sh + sV 
+
+Activations total in Bytes bp [L(4 sh + 4 sh q + 2 sh kv + 4 sh f f n + 2 nq s(c + s)) + sh + sV ]
+
+G.2 Memory Traffic 
+
+We decompose memory traffic into (i) model weights, (ii) KV-cache reads/writes, and (iii) intermediate activations. Table 5 summarizes the terms. The resulting total memory traffic is 
+
+Bytes = bp 
+
+h
+
+2V h + s(h + V )+ L 2h(hq + hkv ) + 3 hh f f n + 2 hkv (c + 2 s)+ 4 s(h + hq + hf f n ) + 2 nq s(c + s)i
+
+.
+
+(8) 
+
+Remarks. Even when input embeddings and the LM head are tied, they are counted separately in memory traffic because they are accessed at different stages of the forward pass. The formulas above are used only as a lightweight latency predictor; calibration in the main method compensates for implementation-dependent effects such as kernel fusion and cache behavior. 23 H Detailed Experimental Setup 
+
+Models and datasets. We evaluate B ASTION with three autoregressive target models: Qwen3-4B, Qwen3-8B, and Llama-3.1-8B-Instruct [ 23 , 60 ]. Each target model is paired with its compatible block-diffusion drafter from DFlash [ 10 ]. Our evaluation covers four domains. For mathematical reasoning, we use GSM8K [ 13 ], MATH500 [ 28 ], and AIME25 [ 63 ]. For code generation, we use HumanEval [ 11 ], MBPP [ 4 ], and LiveCodeBench [ 31 ]. For general instruction following, we use Al-paca [ 53 ] and MT-Bench [ 64 ]. For long-context understanding, we use seven English subsets of Long-Bench [ 7 ]: Qasper [ 15 ], MultiFieldQA-en, GovReport [ 30 ], MultiNews [ 19 ], TriviaQA [ 33 ], SAM-Sum [ 21 ], and PassageRetrieval-en. Unless stated otherwise, all experiments are run with batch size 1. 
+
+Metrics and hardware. Our primary metric is speedup over target-only autoregressive decoding, computed as the ratio between target-only per-token latency and speculative-decoding per-token latency. We also report average accepted length AAL ( τ ). We evaluate hardware adaptability on four NVIDIA GPUs: A100 (80 GB HBM2e), H100 (80 GB HBM3), RTX PRO 6000 Blackwell (96 GB GDDR7), and RTX A6000 (48 GB GDDR6). All runs use a single GPU at batch size 1; the per-step controller overhead of B ASTION is negligible relative to the target forward pass on every tested machine. 
+
+Baselines. We compare against DFlash, the most directly related block-diffusion speculative decoding baseline, and EAGLE-3 [ 41 ], a strong tree-based speculative decoding baseline with an AR-style drafter. For EAGLE-3, we use the open-source AngelSlim [ 54 ] implementation and set the tree size to 60 for all experiments. All baselines use the same target model, benchmark, decoding temperature, and batch size as B ASTION .
+
+Compute resources. A single (target, benchmark, method, GPU, temperature) configuration completes in roughly 4 hours on the eight short-context benchmarks and 5 hours on the LongBench English subsets, depending on output length and accepted-tokens-per-step. The full experiment grid—three targets, four GPUs (with not all (model, GPU) cells run; see Tables 1 and 2 and Fig-ures 4, 6), three methods, eight short-context plus seven long-context benchmarks, two temperatures, and the budget sweep ( N ∈ { 32 , 64 , 128 , 256 , 512 , 1024 } plus B ASTION -Adaptive)—requires approximately 12 GPU-hours to reproduce the reported numbers. Development and ablation runs not included in the paper (drafter compatibility checks, latency-model calibration on configurations not reported, alternative scoring functions, and rerun cycles after pipeline fixes) contributed an additional 
+
+∼1.5–2 × of that compute. No model training was performed: B ASTION is training-free, and all target and drafter checkpoints are used as released. 24

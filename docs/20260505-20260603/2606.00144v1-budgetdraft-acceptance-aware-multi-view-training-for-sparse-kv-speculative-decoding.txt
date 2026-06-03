@@ -1,0 +1,929 @@
+Title: BudgetDraft: Acceptance-Aware Multi-View Training for Sparse-KV Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2606.00144v1
+
+Published Time: Tue, 02 Jun 2026 00:08:47 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+## BudgetDraft: Acceptance-Aware Multi-View Training for Sparse-KV Speculative Decoding 
+
+Liang He 1,∗ Jingbo Wen 2 Qishi Zhan 3 Yixiong Chen 4
+
+Kangning Cui 5 Qizhen Lan 6 Xilu Wang 7,∗
+
+> 1
+
+Shanghai Institute of Optics and Fine Mechanics 2The University of Sydney 3Marquette University 
+
+> 4
+
+Johns Hopkins University 5Wake Forest University 
+
+> 6
+
+University of Texas Health Science Center at Houston 7University of Surrey 
+
+hel@siom.ac.cn, wangxilu@surrey.ac.uk 
+
+> ∗
+
+Corresponding authors 
+
+Abstract 
+
+Speculative decoding speeds up autoregressive decoding by using a drafter to propose mul-tiple tokens that a verifier validates in paral-lel. In resource-constrained deployments, the drafter uses a sparse KV cache to limit peak GPU memory and end-to-end latency under a fixed KV budget, while the verifier keeps a full KV cache. Mid-to-long context inference (4K– 16K context length) is common in real applica-tions. However, naive sparse/full speculative decoding suffers from the sparse/full mismatch as context length grows, causing the acceptance rate to drop quickly. We propose BudgetDraft, a multi-view sparse training method for sparse drafting in mid-to-long inference. The drafter is exposed to multiple sampled KV budgets dur-ing training and learns to align each sparse view with one shared full-cache teacher target. Bud-getDraft combines an acceptance-aware loss on a full-cache branch with a multi-view loss on a sparse-cache branch, producing a single budget-robust drafter that recovers acceptance across sparsity levels without extra inference-time components. Experimental results on PG-19, LongBench, and LWM show that Budget-Draft achieves up to 6.55 ×, 4.46 ×, and 2.10 ×
+
+end-to-end speedup vs AR at 4K, 8K, and 16K context lengths, while keeping the inference pipeline memory-friendly. 
+
+1 Introduction 
+
+Mid-to-long context inference, where the context length ranges from 4K to 16K tokens, is increas-ingly common in real-world applications such as document summarization, multi-turn dialogue, and retrieval-augmented generation (Liu et al., 2025a; Liao et al., 2025). Autoregressive decoding (AR) remains the dominant paradigm for large language model (LLM) inference, but its sequential token-by-token generation leads to high latency and cost (Chen et al., 2026). Speculative decoding (SD) mitigates this bottleneck by using a small drafter 4K 8K 16K  
+
+> Context Length
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> Acceptance Rate (%)
+> 16K Collapse
+> Acceptance 0%
+> SD(sparse/full): Acceptance Rate Collapse
+> KV Budget
+> B=256
+> B=512
+> B=1024
+> full
+
+Figure 1: Acceptance collapse of SD (sparse/full) on the GS dataset with γ = 5 . Acceptance decreases as context length increases and becomes near-zero in the 8K–16K range across KV settings B ∈ { 256 , 512 , 1024 , full },where the full setting corresponds to 2048 tokens in this experiment. 
+
+to propose candidate tokens, which a larger veri-fier validates (Leviathan et al., 2023). Its speedup, however, depends critically on the alignment be-tween the drafter and the verifier. When the drafter aligns well with the verifier, multiple tokens can be accepted per verification step. Maintaining this alignment becomes difficult in mid-to-long inference in deployment (Xiao et al., 2025). A central constraint is the KV cache (Zhou et al., 2024). To control peak GPU memory (VRAM) and end-to-end latency, the drafter of-ten runs with a sparse KV cache under a fixed KV budget, retaining only a subset of cached key-value pairs, whereas the verifier keeps a full KV cache to preserve output quality (Li et al., 2024a). This sparse/full mismatch grows with context length and can sharply reduce the acceptance rate. Impor-tantly, it also makes speculative decoding highly sensitive to the KV budget, which is problematic in deployment where memory budgets vary across devices and workloads (Cai et al., 2026). Figure 1 highlights this failure mode. As con-text length increases, SD with sparse-drafter/full-1
+
+> arXiv:2606.00144v1 [cs.LG] 29 May 2026
+
+verifier settings exhibits a rapid acceptance degra-dation, and at 16K the acceptance becomes near-zero while the end-to-end speedup vs AR falls to ≤ 1×. We term this the 16K collapse . This motivates our focus on the 8K–16K range, where sparse drafting is practically attractive but accep-tance degradation becomes the dominant barrier to speedup. Figure 1 also shows that acceptance re-sponds to the KV budget in a non-monotonic way: a smaller KV budget can yield higher acceptance than a larger one for naive sparse drafting (See more details in Appendix D). Prior work either proposes stronger drafters un-der full-cache or short-context drafting (Li et al., 2024c, 2026a) or sparse KV-cache and structural methods control memory or relieve long-context bottlenecks at the cost of single-model objectives or extra inference-time stages (Li et al., 2024b; Xiao et al., 2024; Sun et al., 2024). Across these lines, the drafter is tuned for a fixed setting and stays brittle when the KV budget changes at deploy-ment (Gao et al., 2025). We instead address the sparse/full mismatch at training time while keep-ing inference simple, and propose BudgetDraft for sparse drafting with a focus on budget robustness. Our key idea is multi-view sparse training: dur-ing training, the drafter is exposed to multiple ran-domly sampled KV budgets and learns to align with the same full-KV teacher target under each spar-sity level. This produces a budget-robust drafter that maintains stable acceptance across KV budgets at deployment under varying memory constraints. Our contributions are: • We characterize the sparse/full acceptance rate collapse from 4K to 16K context length, estab-lishing 16K as a practical failure boundary for naive sparse speculative decoding, and further reveal a non-monotonic budget effect at 4K where a smaller KV budget can yield higher acceptance. • We propose BudgetDraft, which combines acceptance-aware alignment with multi-budget sparse-view training to produce a budget-invariant drafter that recovers accep-tance rates across all sparsity levels. • We demonstrate that BudgetDraft achieves up to 6.55 × end-to-end speedup over AR at 4K and 4.46 × at 8K on a single A100 GPU, and achieves up to 2.10 × speedup at 16K. 
+
+2 Related Work 
+
+Speculative Decoding. Speculative decoding ac-celerates AR inference by using a small drafter to propose tokens that a verifier checks in one for-ward pass (Leviathan et al., 2023). Recent work improves draft quality with stronger drafting mech-anisms (Li et al., 2024c). EAGLE and its vari-ants train lightweight draft heads from the target model’s hidden states, achieving strong speedups in short contexts. EAGLE-3 adds multi-layer feature fusion and test-time simulation (Li et al., 2026b). However, these methods are typically evaluated at 2K context with full-cache drafting (Liu et al., 2025b), and do not address the sparse/full mis-match when a sparse KV cache constrains the drafter in longer contexts (Yang et al., 2025). 
+
+Sparse KV Cache for Mid-to-Long Context Inference. Many methods reduce KV cache memory by sparsification for mid-to-long in-ference (Zhang et al., 2023; Li et al., 2024a). StreamingLLM retains attention sinks and recent tokens to support long-context generation with a bounded cache (Xiao et al., 2024). H2O uses attention-score-based eviction to keep a budgeted subset of KV states (Zhang et al., 2023). A com-mon design pattern in this line of work is budgeted eviction with token- or chunk-level selection under a fixed KV budget (Zhang et al., 2023; Li et al., 2024b; Feng et al., 2026). In practical deployment, however, the KV budget is not fixed: it can vary with GPU memory availability, workload concur-rency, and latency constraints (Gao et al., 2025). A drafter tuned for a single budget can therefore be brittle when deployed under different budgets. This motivates budget-robust training for sparse drafting, where the drafter can remain stable across multiple sparse views. 
+
+Structural Mitigation of Sparse/Full Mismatch. 
+
+TriForce introduces a hierarchical pipeline with an intermediate retrieval-cache stage to mitigate long-context bottlenecks and improve SD under con-strained drafting (Sun et al., 2024). This structural approach can be effective but increases inference-time complexity by adding additional components beyond the standard drafter–verifier pipeline (Sad-hukhan et al., 2025). In contrast, BudgetDraft is training-based and keeps inference simple: it trains a single drafter to remain stable across KV budgets, without introducing extra intermediate models or stages at inference (Yang et al., 2025). 2Phase 1: Teacher Target Construction 
+
+Joint objective 
+
+𝐀 = 𝐀🰀 + l𝐀 𝐀 
+
+> Trained budget-robust drafter
+> adapts to different KV budgets
+> stable acceptance across budgets
+> simple deployment with
+> sparse drafter + full verifier
+> Shared teacher target
+> acceptance-aware target (top-1)
+> over continuation positions
+
+Input sequence 
+
+from data set     
+
+> Teacher /
+> Verifier
+> (full KV cache)
+> Acceptance-
+> aware
+> loss vs. target
+> 𝐀 🰀
+> align the drafter
+> with the teacher
+> under full cache
+> Continuation forward pass
+> (student, full cache) Student /Drafter
+> prefill
+> (prefix cached)
+> prefix KV cache Acceptance-aware
+> loss vs. target
+> (average over views)
+> Multi-view sparse branch 𝐀 c
+> Full-cache branch 𝐀 𝐀
+> sampled from multiple KV budgets (e.g., 256/512/1024/ 2048)
+> Continuation forward pass
+> (student, sparse view v)
+> Continuation forward pass
+> (student, sparse view v)
+> 256
+> 512
+> Sparse cache
+> operator
+> Student/Drafter
+> (shared weights)
+> Student/Drafter
+> (shared weights)
+> Sparse cache
+> operator multi-view sparse training
+> for budget robustness
+> 𝐀 𝐀
+
+Budget Draft: Acceptance-Aware Multi-View Sparse Training 
+
+Phase 2: Multi-View Sparse Training  
+
+> Student /Drafter
+> (full KV cache) Full KV cache
+> on continuation
+> 1024
+> 2048
+
+Continuation Prefix 
+
+Full-cache branch 
+
+LA
+
+Multi-view 
+
+sparse branch 
+
+LC
+
+> L=L A+lLC
+> Shared teacher
+> target
+> (acceptance-aware)
+
+... 
+
+No extra middle model 
+
+Sparse 
+
+drafter 
+
+> (budget‑adaptive)
+
+Full 
+
+verifier 
+
+> (full KV cache)
+
+draft tokens accepted 
+
+tokens 
+
+2) Deployment 
+
+acceptance 
+
+rate 
+
+KV budget One model 
+
+multiple budgets 
+
+3) Budget robustness 1) Training objective Figure 2: Overview of BudgetDraft. The verifier (teacher) produces greedy targets using a full KV cache. The drafter (student) prefills the prefix once to build a prefix KV cache, then performs two continuation forwards: a full-cache view for LA and a sparse-cache view for LC with a sampled KV budget B. Both views are supervised by the same targets, encouraging budget-robust drafting. 
+
+Knowledge Distillation for Speculative De-coding. Beyond using off-the-shelf drafters or inference-time decoding and cache optimizations, recent work has explored improving draft mod-els through additional training or distillation (Hu et al., 2026). Prior work studies online updates dur-ing inference, or trains task-specific drafters with distillation-style objectives (Liu et al., 2023). Top-1 or top-k distillation is a common choice for accel-eration and alignment, since it focuses supervision on the verifier-preferred tokens rather than match-ing the full distribution (Lin et al., 2025). However, these approaches do not directly target the distri-bution shift induced by sparse KV caches, nor do they aim to keep acceptance stable across KV bud-gets (Sadhukhan et al., 2025). BudgetDraft uses acceptance-aware top-1 supervision together with multi-view sparse training under multi-view KV sampling, making the drafter robust to sparse-cache conditions and budget variation in deployment. 
+
+3 Method 
+
+3.1 Problem Formulation Notation. Let V denote the vocabulary. Given a token sequence x = ( x1, . . . , x T ), we write x<t =(x1, . . . , x t−1) for the prefix up to position t. We split x into a prefix of length P and a continuation of length C, so that T = P + C. We supervise continuation positions t ∈ { P +1 , . . . , T }.
+
+Verifier (Teacher). The verifier is a large frozen model ML with parameters θL. It conditions on the full KV cache Kfull 
+
+L computed from x<t and produces the next-token distribution 
+
+pL(· | x<t ; Kfull 
+
+L ). (1) 
+
+Drafter (Student). The drafter is a small train-able model MS with parameters θS . At inference, it operates with a sparse KV cache Ksp 
+
+S under a KV budget B :
+
+pS (· | x<t ; Ksp 
+
+S (B)) . (2) Here Ksp 
+
+S (B) is obtained by selecting a budgeted subset of the drafter prefix cache. 
+
+Acceptance Criterion. Under greedy SD, a draft token at position t is accepted if the drafter and verifier agree on the top-1 token: 
+
+ˆxt = arg max 
+
+v pS
+
+ v | x<t ; Ksp 
+
+S (B) ,x⋆t = arg max 
+
+v pL
+
+ v | x<t ; Kfull 
+
+L
+
+ ,
+
+accept ⇐⇒ ˆxt = x⋆t .
+
+(3) The acceptance rate α is the fraction of accepted draft tokens. Our goal is to increase α and keep it stable across KV budgets B at inference. 33.2 Overview 
+
+In deployment, the drafter KV budget is not fixed, as it changes with available VRAM, workload con-currency, and latency targets. A drafter tuned for a single budget can be brittle when the budget changes, leading to unstable acceptance and unre-liable speedup. This motivates training the drafter under multiple sparse views induced by different KV budgets, so that acceptance remains stable when the budget changes at inference. As shown in Figure 2, BudgetDraft trains the drafter MS while keeping the verifier ML frozen, using greedy teacher targets produced under the verifier’s full KV cache. The training objective combines two complementary losses: 
+
+L = LA + λ LC . (4) 
+
+LA aligns the drafter with the verifier under the full prefix cache and directly targets the greedy accep-tance rule, while LC performs multi-view sparse training by sampling KV budgets during training to improve robustness to inference deployment. 
+
+3.3 Teacher Targets and Acceptance-Aware Alignment 
+
+For each continuation position t ∈{P +1 , . . . , T −1}, the verifier produces agreedy teacher target 
+
+x⋆t = arg max  
+
+> v∈V
+
+pL
+
+ v | x<t ; Kfull 
+
+> L
+
+ . (5) We train the drafter to predict x⋆t under the full prefix cache using a top-1 cross-entropy loss: 
+
+LA = − X
+
+> t
+
+log pS
+
+ x⋆t | x<t ; Kfull 
+
+> S
+
+ . (6) It matches the greedy acceptance criterion in Eq. (3) as it encourages the drafter to place its high-est probability on the verifier’s greedy token. Un-like full-distribution distillation, top-1 supervision aligns directly with the accept/reject mechanism and reduces unnecessary distribution matching. 
+
+3.4 Multi-View Sparse Training 
+
+Training only with LA can produce a drafter that works well under the full prefix cache but degrades when deployed with a sparse KV cache. We ad-dress this gap with multi-view sparse training: at each step we sample a KV budget and train the drafter under the corresponding sparse cache, using the same greedy teacher targets x⋆t from Eq. (5). 
+
+Algorithm 1 BudgetDraft Training Procedure                                                                                                            
+
+> Require: Verifier ML(frozen), Drafter MS(trainable)
+> Require: Sequence x= ( x1, . . . , x T), prefix length P, con-tinuation length C=T−P
+> Require: Budget set B, weights w, chunk size s, loss weight
+> λ
+> 1: Step 1: Teacher targets (no gradient)
+> 2: Kfull
+> L←ChunkedPrefill (ML,x1: P)
+> 3: logits L←ML(xP+1: T| K full
+> L)
+> 4: x⋆t←arg max logits L[t],t=P+1 , . . . , T −1▷
+> aligned to continuation positions 5: Step 2: Drafter prefix prefill (no gradient)
+> 6: Kfull
+> S←ChunkedPrefill (MS,x1: P)
+> 7: Step 3: Full-cache branch ( LA)
+> 8: logits A←MS(xP+1: T|Clone (Kfull
+> S))
+> 9: LA←CE (logits A,{x⋆t})
+> 10: Step 4: Sparse-cache branch ( LC)
+> 11: B∼Cat (B, w)
+> 12: Ksp
+> S←TopKChunks (Kfull
+> S, B, s )
+> 13: pos ←(P, P +1 , . . . , T −1) ▷real position IDs 14: logits C←MS(xP+1: T| K sp
+> S,pos )
+> 15: LC←CE (logits C,{x⋆t})
+> 16: Step 5: Update
+> 17: L ← L A+λLC
+> 18: θS←θS−η∇θSL
+
+Concretely, we draw B ∼ Cat (B, w)
+
+with B = {256 , 512 , 1024 , 2048 } and w =
+
+{0.4, 0.3, 0.2, 0.1}. We construct Ksp  
+
+> S
+
+(B) by parti-tioning the prefix cache (length P ) into chunks of size s = 8 , scoring each chunk by cumulative atten-tion weight, and retaining the top-⌊B/s ⌋ chunks. The loss is then 
+
+LC = EB
+
+h
+
+− X
+
+> t
+
+log pS
+
+ x⋆t | x<t ; Ksp  
+
+> S
+
+(B)i
+
+.
+
+(7) Sampling different budgets over training exposes the drafter to diverse sparse views of the same pre-fix, which reduces overfitting to a single budget and improves budget robustness at inference. After sparsification, cache length no longer matches ab-solute positions; we therefore pass explicit position IDs (P, P +1 , . . . , T −1) during the continuation forward to keep RoPE consistent with the verifier. 
+
+3.5 Training and Inference BudgetDraft Training Procedure. Algorithm 1 summarizes one training step. The verifier pro-duces greedy teacher targets for the continuation positions. The drafter prefills the prefix once with-out gradient, then reuses the prefix cache for two 4Algorithm 2 BudgetDraft Inference (Greedy Spec-ulative Decoding)                                                                                   
+
+> Require: Trained drafter MS, verifier ML
+> Require: Prompt x1: P, KV budget B, draft length γ
+> 1: Prefill:
+> 2: Kfull
+> L←Prefill (ML,x1: P)▷full KV 3: Kfull
+> S←Prefill (MS,x1: P)
+> 4: Ksp
+> S(B)←TopKChunks (Kfull
+> S, B )▷sparsify 5: repeat
+> 6: Draft: generate ˆx= (ˆ x1, . . . , ˆxγ)from MSusing
+> Ksp
+> S(B)
+> 7: Verify: run MLon ˆxusing Kfull
+> Land obtain verifier tokens x⋆= ( x⋆
+> 1, . . . , x ⋆γ)
+> 8: Let kbe the largest index such that ˆxi=x⋆ifor all
+> i≤k▷Eq. (3) 9: Append (ˆ x1, . . . , ˆxk)to the output 10: Append one verifier token x⋆k+1 to the output ▷bonus token 11: Update Kfull
+> Land Ksp
+> S(B)with the appended tokens 12: until max tokens reached or EOS
+
+continuation forwards, i.e., a full-cache branch for 
+
+LA and a sparse-cache branch for LC with a sam-pled KV budget B. We back-propagate the com-bined loss through both branches and update the drafter parameters. 
+
+Hyperparameters. We train for 5,000 steps on PG-19 (streaming) with sequence length T =16 ,384 (P = 16 ,128 , C = 256 ). We use AdamW with learning rate 10 −5, weight decay 0.01 , lin-ear warmup for 150 steps followed by cosine de-cay, gradient clipping at 1.0, and batch size 1. We use B = {256 , 512 , 1024 , 2048 } with weights 
+
+w = {0.4, 0.3, 0.2, 0.1} and chunk size s = 8 
+
+for sparse cache construction. Training runs on a single NVIDIA A100 80GB GPU and takes ap-proximately 5 hours. 
+
+BudgetDraft Inference. BudgetDraft follows the standard SD pipeline, summarized in Algo-rithm 2. The trained drafter generates γ candidate tokens autoregressively using a sparse KV cache with a chosen budget B. The verifier checks all γ
+
+candidates in a single forward pass using its full KV cache. Accepted tokens are appended to the output; if a rejection occurs at position k, the ver-ifier’s token at position k is used. This inference pipeline is simple: it uses only a sparse drafter and a full verifier, and the same trained drafter can be deployed under different KV budgets as deploy-ment constraints change. 
+
+4 Experimental Setup 
+
+Models. We use YaRN-Llama-2-7B-128K (Peng et al., 2024; Touvron et al., 2023) as the verifier (6.7B parameters, fp16) and llama-68m 1 as the drafter (68M parameters, fp32). 
+
+Datasets. We evaluate on three datasets spanning different text domains. GS uses the PG-19 test split (Rae et al., 2020) and contains long-form book text. LongBench uses QMSum (Bai et al., 2023) and focuses on meeting transcript summarization. LWM uses NarrativeQA (Kociský et al., 2017) and tests question answering over long narratives. 
+
+Context Lengths. We evaluate three context lengths: 4K (prompt length 3800), 8K (prompt length 8192), and 16K (prompt length 16384). All experiments generate 256 tokens. 
+
+Budgets and Draft Length. The verifier uses a full KV cache. The drafter uses a sparse KV cache with budget B ∈ { 256 , 512 , 1024 , 2048 } and has a native maximum position embedding of 2048 tokens. We sweep the draft length γ and report the best result over the sweep in Table 1, while some comparisons use a fixed γ (e.g., γ = 5 ). 
+
+Baselines. We compare against AR (standard au-toregressive decoding), SD (sparse/full) (specula-tive decoding with an untrained drafter using a sparse KV cache), TriForce (hierarchical specula-tive decoding with a retrieval cache), and EAGLE-3 (speculative decoding with a trained draft head). Implementation details for TriForce and EAGLE-3 follow Section 5.2. 
+
+Metrics and Hardware. We report acceptance rate (top-1 match under greedy decoding), end-to-end speedup vs AR (including prefill and decode time), and peak VRAM usage (see Appendix A). All results are averaged over 5 repeated runs under the same setting (with a warmup run discarded). We additionally analyze per-sample variance across draft lengths in Appendix B. All experiments run on a single NVIDIA A100 80GB GPU. 
+
+5 Experimental Results 
+
+5.1 Budget-Robust SD across Context Lengths 
+
+Since the drafter budget varies with VRAM and latency, a practical method should avoid relying on a single tuned budget. This section tests whether a single trained drafter remains effective when the KV budget changes at deployment, and evaluates the effectiveness of BudgetDraft across context lengths and KV budgets. 
+
+> 1https://huggingface.co/JackFram/llama-68m
+
+5(A) Best BudgetDraft speedup (per KV budget) GS LongBench LWM Context Budget AR SD (sparse/full) BudgetDraft AR SD (sparse/full) BudgetDraft AR SD (sparse/full) BudgetDraft 4K 256 38.10 1.05 ×/10.19 5.31 ×/67.98 37.06 0.62 ×/4.86 5.55 ×/67.44 35.73 1.56 ×/13.76 6.54 ×/79.37 
+
+512 38.10 0.84 ×/7.36 5.31 ×/67.98 37.06 0.54 ×/4.18 5.56 ×/67.44 35.73 0.92 ×/7.49 6.55 ×/79.37 
+
+1024 38.10 0.32 ×/1.43 5.32 ×/67.98 37.06 0.36 ×/2.06 5.56 ×/67.44 35.73 0.72 ×/5.47 6.54 ×/79.37 
+
+2048 38.10 0.30 ×/1.17 5.28 ×/67.98 37.06 0.23 ×/0.77 5.56 ×/67.44 35.73 0.24 ×/0.86 6.55 ×/79.37 
+
+8K 256 30.40 0.83 ×/0.11 4.26 ×/51.76 30.10 1.31 ×/2.46 2.13 ×/20.43 29.51 0.84 ×/0.06 4.43 ×/55.11 
+
+512 30.40 0.84 ×/0.14 4.27 ×/52.26 30.10 1.27 ×/1.73 2.13 ×/20.43 29.51 0.84 ×/0.05 4.46 ×/55.11 
+
+1024 30.40 0.83 ×/0.05 4.27 ×/52.26 30.10 1.24 ×/1.14 2.13 ×/20.43 29.51 0.84 ×/0.05 4.46 ×/55.11 
+
+2048 30.40 0.82 ×/0.00 4.27 ×/52.26 30.10 1.23 ×/0.97 2.13 ×/20.43 29.51 0.84 ×/0.06 4.46 ×/55.11 
+
+16K 256 19.41 0.78 ×/0.51 1.22 ×/18.81 19.67 0.81 ×/0.02 1.53 ×/27.78 19.43 0.60 ×/0.02 2.10 ×/34.17 
+
+512 19.41 0.77 ×/0.19 1.21 ×/18.35 19.67 0.81 ×/0.04 1.53 ×/27.98 19.43 0.68 ×/0.03 2.10 ×/34.17 
+
+1024 19.41 0.77 ×/0.16 1.21 ×/18.03 19.67 0.81 ×/0.02 1.53 ×/27.98 19.43 0.67 ×/0.03 2.10 ×/34.17 
+
+2048 19.41 0.76 ×/0.10 1.21 ×/17.98 19.67 0.81 ×/0.02 1.53 ×/27.98 19.43 0.78 ×/0.06 2.10 ×/34.17 
+
+(B) Best BudgetDraft acceptance (per KV budget) GS LongBench LWM Context Budget AR SD (sparse/full) BudgetDraft AR SD (sparse/full) BudgetDraft AR SD (sparse/full) BudgetDraft 4K 256 38.10 2.12 ×/55.42 2.95 ×/91.62 37.06 1.83 ×/42.39 3.05 ×/92.49 35.73 2.74 ×/73.94 3.26 ×/96.34 
+
+512 38.10 1.87 ×/45.54 2.97 ×/91.62 37.06 2.15 ×/54.01 3.07 ×/92.49 35.73 2.13 ×/62.02 3.26 ×/96.34 
+
+1024 38.10 1.46 ×/29.70 2.98 ×/91.62 37.06 1.67 ×/35.77 3.07 ×/92.49 35.73 1.87 ×/40.93 3.26 ×/96.34 
+
+2048 38.10 1.16 ×/19.26 2.97 ×/91.62 37.06 1.49 ×/29.34 3.06 ×/92.49 35.73 1.16 ×/16.38 3.27 ×/96.34 
+
+8K 256 30.40 1.18 ×/0.30 3.74 ×/74.78 30.10 1.31 ×/2.46 2.13 ×/20.43 29.51 1.19 ×/0.17 3.85 ×/77.47 
+
+512 30.40 1.19 ×/0.40 3.74 ×/75.22 30.10 1.27 ×/1.73 2.13 ×/20.43 29.51 1.19 ×/0.14 3.85 ×/77.47 
+
+1024 30.40 1.17 ×/0.14 3.75 ×/75.22 30.10 1.24 ×/1.14 2.13 ×/20.43 29.51 1.18 ×/0.13 3.85 ×/77.47 
+
+2048 30.40 1.17 ×/0.00 3.74 ×/75.22 30.10 1.23 ×/0.97 2.13 ×/20.43 29.51 1.19 ×/0.18 3.85 ×/77.47 
+
+16K 256 19.41 0.78 ×/0.51 1.22 ×/18.81 19.67 0.81 ×/0.02 1.53 ×/27.78 19.43 0.78 ×/0.08 1.94 ×/66.48 
+
+512 19.41 0.77 ×/0.19 1.21 ×/18.35 19.67 0.81 ×/0.04 1.53 ×/27.98 19.43 0.78 ×/0.07 1.89 ×/62.15 
+
+1024 19.41 0.77 ×/0.16 1.21 ×/18.03 19.67 0.81 ×/0.02 1.53 ×/27.98 19.43 0.77 ×/0.05 1.77 ×/55.80 
+
+2048 19.41 0.76 ×/0.10 1.21 ×/17.98 19.67 0.81 ×/0.02 1.53 ×/27.98 19.43 0.78 ×/0.06 1.52 ×/33.92 
+
+Table 1: We report throughput in tok/s for AR, and speedup vs AR / acceptance rate (%) for SD (sparse/full) and BudgetDraft. For each KV budget, Panel (A) reports the run with the best BudgetDraft speedup, and Panel (B) the run with the best BudgetDraft acceptance; both show the corresponding SD (sparse/full) run. 
+
+Table 1 summarizes results across three datasets, four KV budgets, and three context lengths. We sweep the draft length γ. Panel (A) reports, for each budget, the run with the best Budget-Draft speedup and shows the corresponding SD (sparse/full) run under the same decoding configu-ration. Panel (B) reports, for each budget, the run with the best BudgetDraft acceptance and shows the corresponding SD (sparse/full) run. BudgetDraft is effective across context lengths and far less sensitive to the KV budget than SD (sparse/full). At 4K, it achieves high acceptance and strong speedup across all budgets and datasets, whereas SD (sparse/full) varies sharply with the budget. At 8K, SD (sparse/full) enters a failure regime with near-zero acceptance across budgets on GS and LWM, whereas BudgetDraft constantly recovers high acceptance on both datasets across different budgets; LongBench remains more chal-lenging and shows lower acceptance. At 16K, SD (sparse/full) remains ineffective on GS and LongBench, while BudgetDraft still achieves non-trivial acceptance and speedup, with the strongest results on LWM. BudgetDraft reduces the need for budget-specific tuning and better supports budget-robust SD in deployment. Moreover, it achieves these gains at a peak VRAM comparable to SD (sparse/full), as reported in Appendix A. 
+
+5.2 Comparison with TriForce and EAGLE-3 
+
+We focus on the mid-to-long context regime (8K– 16K) and compare BudgetDraft with two represen-6Method Speedup Drafter 8K context (LWM, γ=5 )AR 1.00 × –SD (sparse/full) 1.19 × 68M TriForce 1.21 × 68M+7B EAGLE-3 1.64 × draft head BudgetDraft ( B=256 ) 2.54 × 68M BudgetDraft ( B=512 ) 2.54 × 68M BudgetDraft ( B=1024 ) 2.54 × 68M BudgetDraft ( B=2048 ) 2.54 × 68M 16K context (LWM, γ=5 )AR 1.00 × –SD (sparse/full) 0.78 × 68M TriForce 1.19 × 68M+7B EAGLE-3 1.36 × draft head BudgetDraft ( B=256 ) 1.94 × 68M BudgetDraft ( B=512 ) 1.89 × 68M BudgetDraft ( B=1024 ) 1.77 × 68M BudgetDraft ( B=2048 ) 1.52 × 68M  
+
+> Table 2: Comparison with baselines on LWM at 8K and 16K with γ=5 .
+
+tative baselines, TriForce and EAGLE-3, on the LWM dataset. For a controlled comparison, all methods use the same decoding setting with draft length γ = 5 . For TriForce, we follow its frame-work but adapt the pipeline to operate at 8K and 16K contexts, rather than using its original long-context configuration. This evaluates TriForce-style structural mitigation under the same context lengths as our main setting. For EAGLE-3, we implement the method described in its paper and train the draft head using 8K and 16K data, and then evaluate it under the same decoding protocol. Table 2 reports speedup results achieved by each algorithm compared with AR. At 8K, Budget-Draft reaches 2.54 × across all KV budgets, well above TriForce ( 1.21 ×) and EAGLE-3 ( 1.64 ×). At 16K, BudgetDraft remains higher across budgets, achieving 1.94 × at B=256 , and 1.89 ×, 1.77 ×,and 1.52 × for B ∈ { 512 , 1024 , 2048 }, compared to 1.19 × for TriForce and 1.36 × for EAGLE-3. Overall, BudgetDraft maintains a clear advantage at 8K–16K while supporting flexible KV-budget choices at deployment. 
+
+5.3 Ablation: Effect of LC
+
+Table 3 isolates the contribution of LC by com-paring LA with LA + 0 .5 LC under the same KV budgets, context lengths, and a fixed decoding set-ting ( γ = 5 ). Across datasets, adding LC improves acceptance and typically increases speedup, with the most consistent gains at 4K and 8K. At 4K, 
+
+LA +0 .5 LC substantially increases acceptance and yields higher speedup across all budgets on all three datasets. At 8K, the improvement is smaller but remains consistent: speedup increases by a mod-est margin across budgets on GS and LWM, and LongBench also improves despite being the hardest dataset in this regime. At 16K, gains persist on GS and LongBench (acceptance and speedup both in-crease slightly across budgets), while LWM shows a mixed pattern where larger budgets can reduce speedup, suggesting budget-dependent trade-offs in the longest setting. To further isolate the role of multi-budget sampling, we compare it with a single-budget sparse-branch variant in Appendix E. The results show that single-budget training be-comes unstable under budget shifts, confirming the benefit of multi-budget sampling. 
+
+5.4 Sensitivity Analysis 
+
+λ Sensitivity. We compare LA + 0 .5 LC (λ =0.5) with LA + LC (λ = 1 .0). The two settings achieve very similar acceptance and speedup at 4K and 8K across datasets and KV budgets. At 16K, differences remain small and are sometimes budget-dependent. We use λ = 0 .5 as the default. Detailed results and analysis are provided in Appendix C. 
+
+Draft Length Sensitivity. Figure 3 summarizes how acceptance and speedup change with the draft length γ after averaging over KV budgets. At 4K, acceptance remains high across datasets for a wide range of γ, while speedup generally increases with 
+
+γ before saturating or mildly fluctuating. At 8K, GS and LWM still maintain strong acceptance over a broad range of γ, leading to clear speedup peaks at moderate γ, while LongBench shows lower ac-ceptance and a weaker speedup peak. At 16K, acceptance drops and becomes more sensitive to 
+
+γ, narrowing the range where speculative decoding is efficient; the best speedup shifts to shorter or moderate drafts depending on the dataset. These trends suggest that γ should be tuned with context length, while the stable curves under budget aver-aging reflect the robustness goal of BudgetDraft in deployment. 
+
+6 Conclusion 
+
+We identified a sparse/full acceptance collapse in mid-to-long context speculative decoding: as the context length increases from 4K to 16K, naive sparse drafting can degrade to near-zero acceptance, making SD ineffective. We proposed BudgetDraft, 7GS LongBench LWM Context Budget AR LA LA + 0 .5 LC AR LA LA + 0 .5 LC AR LA LA + 0 .5 LC
+
+4K 256 38.10 2.63/78.43 2.95/91.62 37.06 3.02/90.27 3.05/92.49 35.73 3.23/94.50 3.26/96.34 512 38.10 2.62/76.16 2.97/91.62 37.06 3.05/91.12 3.07/92.49 35.73 3.25/95.12 3.26/96.34 1024 38.10 2.17/57.54 2.98/91.62 37.06 2.94/86.76 3.07/92.49 35.73 3.20/93.04 3.26/96.34 2048 38.10 1.97/49.32 2.97/91.62 37.06 2.53/68.88 3.06/92.49 35.73 2.71/72.60 3.27/96.34 8K 256 30.40 2.33/71.10 2.39/74.78 30.10 1.34/19.30 1.37/20.43 29.51 2.50/75.79 2.54/77.47 512 30.40 2.32/70.82 2.39/75.22 30.10 1.31/18.27 1.37/20.43 29.51 2.49/75.03 2.54/77.47 1024 30.40 2.43/77.98 2.40/75.22 30.10 1.26/16.44 1.38/20.43 29.51 2.40/69.96 2.54/77.47 2048 30.40 2.34/72.41 2.39/75.22 30.10 1.23/15.40 1.38/20.43 29.51 2.42/70.50 2.54/77.47 16K 256 19.41 1.17/15.86 1.22/18.81 19.67 1.50/27.24 1.53/27.78 19.43 1.91/63.79 1.94/66.48 512 19.41 1.16/15.73 1.22/18.35 19.67 1.50/27.28 1.53/27.98 19.43 1.89/61.54 1.89/62.15 1024 19.41 1.16/15.65 1.21/18.03 19.67 1.50/27.00 1.53/27.98 19.43 1.88/61.60 1.77/55.80 2048 19.41 1.15/14.94 1.21/17.98 19.67 1.50/26.63 1.53/27.98 19.43 1.86/58.82 1.52/33.92 
+
+Table 3: Ablation on multi-view sparse training at γ = 5 . We report throughput in tok/s for AR, and speedup vs AR / acceptance rate (%) for LA and LA + 0 .5 LC , under the same γ and KV budget. 20 40 60 80                                           
+
+> 60
+> 70
+> 80
+> 90
+> 4K Acceptance (%)  GS
+> 20 40 60 80
+> 60
+> 70
+> 80
+> 90
+> LongBench
+> 20 40 60 80
+> 70
+> 75
+> 80
+> 85
+> 90
+> 95
+> LWM
+> 510 15 20 25 30
+> 40
+> 50
+> 60
+> 70
+> 8K Acceptance (%)
+> 510 15 20 25 30
+> 5
+> 10
+> 15
+> 20
+> 510 15 20 25 30
+> 40
+> 50
+> 60
+> 70
+> 510 15 20 25 30 35 40
+> Draft length
+> 5
+> 10
+> 15
+> 16K Acceptance (%)
+> 510 15 20 25 30 35 40
+> Draft length
+> 5
+> 10
+> 15
+> 20
+> 25
+> 510 15 20 25 30 35 40
+> Draft length
+> 20
+> 30
+> 40
+> 50
+> 3.0
+> 3.5
+> 4.0
+> 4.5
+> 5.0
+> 3.0
+> 3.5
+> 4.0
+> 4.5
+> 5.0
+> 5.5
+> 4
+> 5
+> 6
+> Speedup vs AR
+> 3.8
+> 3.9
+> 4.0
+> 4.1
+> 4.2
+> 1.2
+> 1.4
+> 1.6
+> 1.8
+> 2.0
+> 4.0
+> 4.2
+> 4.4
+> Speedup vs AR
+> 0.8
+> 0.9
+> 1.0
+> 1.1
+> 1.2
+> 1.1
+> 1.2
+> 1.3
+> 1.4
+> 1.5
+> 1.8
+> 1.9
+> 2.0
+> 2.1
+> Speedup vs AR
+
+Average over KV budgets {256, 512, 1024, 2048} : Acceptance and Speedup vs Draft Length  
+
+> Acceptance Speedup
+
+Figure 3: Budget-averaged sensitivity to draft length. We average over KV budgets B ∈ { 256 , 512 , 1024 , 2048 }
+
+and plot acceptance rate and speedup vs AR as a function of draft length γ. Rows correspond to context lengths (4K/8K/16K), and columns correspond to datasets (GS/LongBench/LWM). 
+
+a training-based alignment method that combines acceptance-aware alignment ( LA) with multi-view sparse training ( LC ). By training the drafter under multiple randomly sampled KV budgets, Budget-Draft produces a budget-robust drafter that main-tains stable acceptance and speedup under different sparsity levels at inference. Experiments on three datasets show that Budget-Draft delivers strong end-to-end speedups in the 4K–16K regime on a single A100 GPU, while us-ing only a lightweight 68M drafter. BudgetDraft keeps the inference pipeline simple and memory-friendly, making it practical for deployment across devices with varying memory budgets. Future work includes improving robustness at longer contexts and exploring tighter integration with sparse-cache policies. 8Limitations 
+
+Drafter position range. A key limitation is the drafter’s limited native position range. The 68M drafter operates with a short maximum position em-bedding, while our target setting spans mid-to-long contexts (8K–16K). We pass explicit position IDs to keep the drafter aligned with the verifier, but the drafter still enters a positional extrapolation regime at longer contexts, which can reduce acceptance and thus limit speedup. However, positional extrap-olation alone does not fully explain the observed behavior, since BudgetDraft substantially improves acceptance under the same drafter architecture and position range. Using a drafter with a longer na-tive context window or applying position-extension techniques is a promising direction for future work. 
+
+Verifier-specific training. BudgetDraft trains a drafter against a fixed verifier, and retraining is required when the verifier changes. While the train-ing cost is moderate in our setup, we do not sys-tematically study transfer across verifiers, such as reusing a drafter with lightweight adaptation. Un-derstanding how well a trained drafter transfers to related verifier checkpoints is an important next step. 
+
+Greedy decoding setting. Our experiments fo-cus on greedy speculative decoding to enable output-identical generation and stable speed mea-surements. Extending BudgetDraft to sampling-based decoding (e.g., temperature sampling) would require adapting both the training objective and the acceptance rule to handle stochasticity, which we leave for future work. 
+
+Scope of sparse cache policies. We adopt a spe-cific budgeted sparse KV construction based on chunk-level selection. BudgetDraft is designed to be compatible with different sparse cache policies, but we do not exhaustively evaluate alternative poli-cies or system-level implementations (e.g., kernel-level efficiency under different eviction rules). A broader study of sparse cache choices and their in-teraction with training objectives is left for future work. 
+
+Acknowledgments 
+
+We thank the anonymous reviewers for their con-structive feedback. 
+
+References 
+
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2023. Longbench: A bilingual, mul-titask benchmark for long context understanding. 
+
+CoRR , abs/2308.14508. Guanyu Cai, Ruiming Tian, Lang Yang, Yunzhe Jia, Lingkun Li, and Jiliang Wang. 2026. Efficient in-ference for edge large language models: A survey. 
+
+Tsinghua Science and Technology , 31(3):1365–1380. Zhixiong Chen, Bingjie Zhu, Jiangzhou Wang, Hyun-dong Shin, Arumugam Nallanathan, and Dusit Niy-ato. 2026. Network edge inference for large language models: Principles, techniques, and opportunities. 
+
+ACM Computing Surveys .Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S Kevin Zhou. 2026. Ada-kv: Optimizing kv cache eviction by adaptive budget allocation for efficient llm inference. Advances in Neural Information Pro-cessing Systems , 38:113152–113188. Shihong Gao, Xin Zhang, Yanyan Shen, and Lei Chen. 2025. Apt-serve: Adaptive request scheduling on hybrid cache for scalable llm inference serving. Pro-ceedings of the ACM on Management of Data , 3(3):1– 28. Yuezhou Hu, Jiaxin Guo, Xinyu Feng, and Tuo Zhao. 2026. Adaspec: Selective knowledge distillation for efficient speculative decoders. Advances in Neural Information Processing Systems , 38:88736–88758. Tomás Kociský, Jonathan Schwarz, Phil Blunsom, Chris Dyer, Karl Moritz Hermann, Gábor Melis, and Ed-ward Grefenstette. 2017. The narrativeqa reading comprehension challenge. CoRR , abs/1712.07040. Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via spec-ulative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR. Haoyang Li, Yiming Li, Anxin Tian, Tianhao Tang, Zhanchao Xu, Xuejia Chen, Nicole Hu, Wei Dong, Qing Li, and Lei Chen. 2024a. A survey on large language model acceleration based on kv cache man-agement. CoRR , abs/2412.19442. Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024b. Snapkv: Llm knows what you are looking for before gener-ation. Advances in Neural Information Processing Systems , 37:22947–22970. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024c. EAGLE: Speculative sampling re-quires rethinking feature uncertainty. In Forty-first International Conference on Machine Learning .
+
+9Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2026a. Eagle-3: Scaling up inference acceler-ation of large language models via training-time test. 
+
+Advances in Neural Information Processing Systems ,38:136737–136756. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2026b. EAGLE-3: Scaling up inference ac-celeration of large language models via training-time test. In The Thirty-ninth Annual Conference on Neu-ral Information Processing Systems .Zihan Liao, Jun Wang, Hang Yu, Lingxiao Wei, Jianguo Li, and Wei Zhang. 2025. E2llm: Encoder elongated large language models for long-context understand-ing and reasoning. In Proceedings of the 2025 Con-ference on Empirical Methods in Natural Language Processing , pages 19212–19241. Xinyu Lin, Chaoqun Yang, Wenjie Wang, Yongqi Li, Cunxiao Du, Fuli Feng, See-Kiong Ng, and Tat-Seng Chua. 2025. Efficient inference for large language model-based generative recommendation. In Inter-national Conference on Learning Representations ,volume 2025, pages 91672–91697. Jiaheng Liu, Dawei Zhu, Zhiqi Bai, Yancheng He, Huanxuan Liao, Haoran Que, Zekun Wang, Chenchen Zhang, Ge Zhang, Jiebin Zhang, Yuanx-ing Zhang, Zhuo Chen, Hangyu Guo, Shilong Li, Ziqiang Liu, Yong Shan, Yifan Song, Jiayi Tian, Wen-hao Wu, and 18 others. 2025a. A comprehensive survey on long context language modeling. CoRR ,abs/2503.17407. Xiaoxuan Liu, Lanxiang Hu, Peter Bailis, Ion Sto-ica, Zhijie Deng, Alvin Cheung, and Hao Zhang. 2023. Online speculative decoding. CoRR ,abs/2310.07177. Xiaoxuan Liu, Jiaxiang Yu, Jongseok Park, Ion Sto-ica, and Alvin Cheung. 2025b. Speculative de-coding: Performance or illusion? arXiv preprint arXiv:2601.11580 .Bowen Peng, Jeffrey Quesnelle, Honglu Fan, and En-rico Shippole. 2024. Yarn: Efficient context window extension of large language models. In International Conference on Learning Representations , volume 2024, pages 31932–31951. Jack W. Rae, Anna Potapenko, Siddhant M. Jayaku-mar, Chloe Hillier, and Timothy P. Lillicrap. 2020. Compressive transformers for long-range sequence modelling. In International Conference on Learning Representations .Ranajoy Sadhukhan, Jian Chen, Zhuoming Chen, Vashisth Tiwari, Ruihang Lai, Jinyuan Shi, Ian Yen, Avner May, Tianqi Chen, and Beidi Chen. 2025. Magicdec: Breaking the latency-throughput trade-off for long context generation with speculative de-coding. In International Conference on Learning Representations , volume 2025, pages 6835–6850. Hanshi Sun, Zhuoming Chen, Xinyu Yang, Yuandong Tian, and Beidi Chen. 2024. Triforce: Lossless accel-eration of long sequence generation with hierarchical speculative decoding. CoRR , abs/2404.11912. Hugo Touvron, Louis Martin, Kevin Stone, Peter Al-bert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, Dan Bikel, Lukas Blecher, Cristian Canton-Ferrer, Moya Chen, Guillem Cucurull, David Esiobu, Jude Fernandes, Jeremy Fu, Wenyin Fu, and 49 oth-ers. 2023. Llama 2: Open foundation and fine-tuned chat models. CoRR , abs/2307.09288. Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, Junxian Guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. 2025. Duoattention: Efficient long-context llm inference with retrieval and streaming heads. In In-ternational Conference on Learning Representations ,volume 2025, pages 37228–37253. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations , volume 2024, pages 21875–21895. Penghui Yang, Cunxiao Du, Fengzhuo Zhang, Haonan Wang, Tianyu Pang, Chao Du, and Bo An. 2025. Longspec: Long-context lossless speculative decod-ing with efficient drafting and verification. In ES-FoMo III: 3rd Workshop on Efficient Systems for Foundation Models .Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, and 1 oth-ers. 2023. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Ad-vances in Neural Information Processing Systems ,36:34661–34710. Zixuan Zhou, Xuefei Ning, Ke Hong, Tianyu Fu, Ji-aming Xu, Shiyao Li, Yuming Lou, Luning Wang, Zhihang Yuan, Xiuhong Li, Shengen Yan, Guohao Dai, Xiao-Ping Zhang, Yuhan Dong, and Yu Wang. 2024. A survey on efficient inference for large lan-guage models. CoRR , abs/2404.14294. 
+
+A Peak VRAM Usage 
+
+We report peak GPU memory (VRAM) using the logged field peak_gpu_mb and convert it to GB. Table 4 summarizes peak VRAM as a function of draft length γ at 4K/8K/16K. For each context length and γ, we average peak VRAM over KV budgets B ∈ { 256 , 512 , 1024 , 2048 } and over the three datasets. This table shows the memory trend as γ increases under each context length, and di-rectly compares SD (sparse/full) (original) with BudgetDraft ( LA + 0 .5 LC ). Peak VRAM is comparable between Budget-Draft and SD (sparse/full). At 8K and 16K, peak 10 VRAM is nearly identical across methods for the evaluated γ range, suggesting that peak usage is dominated by the full-KV verifier side in this sparse/full pipeline. At 4K, SD (sparse/full) ex-hibits a clear increase in peak VRAM as γ grows, while BudgetDraft remains almost flat, indicating that BudgetDraft achieves higher speedup without additional memory overhead at larger draft lengths. For a fair, fixed decoding setting, Table 5 further reports detailed peak VRAM at γ = 5 for each KV budget and dataset. The detailed results are consistent with the aggregate trend: BudgetDraft matches SD (sparse/full) at 8K/16K and is slightly lower at 4K under some budgets. 
+
+B Per-Sample Variance Across Draft Lengths 
+
+To evaluate the stability of speculative decoding un-der different draft lengths, we measure per-sample variance across datasets and context lengths. Fig-ure 4 reports the mean and standard deviation of acceptance rate and end-to-end speedup versus AR as functions of draft length γ. Results are averaged over KV budgets B ∈ {256 , 512 , 1024 , 2048 },with approximately 36 samples per point. Several trends are consistent across datasets and context lengths. First, acceptance generally de-creases as γ increases, while speedup initially im-proves and then saturates or declines, reflecting the standard speculative decoding trade-off between drafting more tokens and verification overhead. Second, variance remains relatively small in the main operating region, indicating that the observed gains are stable across samples rather than driven by a few outliers. The variance patterns also differ across datasets. GS and LongBench show smoother acceptance degradation as γ increases, whereas LWM exhibits stronger sensitivity at longer contexts, especially at 16K. This behavior is consistent with the larger semantic diversity and longer dependency structure in narrative-style inputs. Despite this increased variance, the overall trends remain stable across budgets and datasets. Importantly, the curves remain smooth even at 8K–16K, without abrupt collapse across neighbor-ing γ values. This suggests that the degradation in long-context speculative decoding is not solely caused by catastrophic positional extrapolation fail-ure. Instead, the behavior is more consistent with gradually increasing sparse/full mismatch under longer contexts, which aligns with the motivation behind BudgetDraft. 
+
+C λ Sensitivity 
+
+This appendix provides detailed results for the λ
+
+sensitivity study in the main text. We compare 
+
+LA + 0 .5 LC (λ = 0 .5) with LA + LC (λ = 1 .0). The complete results are reported in Table 6. Across 4K and 8K, the two settings are closely matched across datasets and KV budgets. Accep-tance is nearly identical, and speedup differs only marginally, indicating that performance in the main mid-context regime does not hinge on a narrow choice of λ once the drafter is trained with multi-view sparse supervision. At 16K, λ = 1 .0 is often slightly better, but the gains remain small. On GS and LongBench, 
+
+λ = 1 .0 consistently yields a modest increase in speedup across budgets, with acceptance remaining nearly unchanged. On LWM, λ = 1 .0 improves speedup for most budgets, while a small exception appears at B=512 , where λ = 0 .5 is marginally higher. This indicates that increasing the sparse-view weight can shift the trade-off across budgets in the longest setting, but the overall sensitivity is limited. We use λ = 0 .5 as the default since it matches 
+
+λ = 1 .0 closely in the main 4K–8K regime and provides a consistent choice across budgets, while avoiding the need to re-tune λ for different deploy-ment constraints. 
+
+D Why Smaller KV Budgets Can Increase Acceptance at 4K 
+
+Figure 1 and Table 1 show a seemingly counter-intuitive pattern for SD (sparse/full) at 4K: smaller KV budgets can lead to higher acceptance than larger budgets. This effect does not contradict the sparse/full mismatch story. Instead, it reflects how budgeted sparse KV selection interacts with a small drafter in the short-to-mid context regime. 
+
+Sparse KV as an information filter. At 4K, next-token predictions are often dominated by a small subset of the prefix, typically recent tokens and a few highly relevant segments. A smaller KV budget forces the sparse cache to keep only the most relevant chunks (or tokens) under the selec-tion policy. This can act as an information filter that removes weakly relevant history. For a small drafter, reducing low-signal context can stabilize at-tention, sharpen the conditional distribution, and in-11 γ 4K 8K 16K SD (sparse/full) BudgetDraft SD (sparse/full) BudgetDraft SD (sparse/full) BudgetDraft 5 17.29 17.03 17.25 17.25 21.44 21.44 10 17.73 17.03 17.25 17.25 21.44 21.44 15 18.16 17.04 17.25 17.25 21.44 21.44 20 18.76 17.04 17.26 17.26 – –25 19.54 17.11 17.26 17.26 – –30 20.04 17.08 17.26 17.26 – –35 21.36 17.08 – – – –40 22.25 17.06 – – – –45 23.40 17.07 – – – –50 24.50 17.06 – – – –55 25.28 17.08 – – – –60 26.99 17.09 – – – –65 28.08 17.09 – – – –70 28.70 17.09 – – – –75 29.92 17.11 – – – –80 30.89 17.19 – – – –
+
+Table 4: Peak VRAM (GB) vs draft length γ. For each context length and γ, values are averaged over KV budgets 
+
+B ∈ { 256 , 512 , 1024 , 2048 } and the three datasets (GS, LongBench, and LWM). Missing entries indicate that γ
+
+was not evaluated at that context length. Values are converted from peak_gpu_mb .
+
+crease the probability that the drafter’s top-1 token matches the verifier’s top-1 token, which directly increases greedy acceptance. 
+
+More cached context can introduce distractors for a small drafter. While a larger KV budget intuitively adds more context, in practice it also re-tains much irrelevant or noisy content alongside the useful evidence. A small drafter has limited capac-ity to integrate long context and can be more sen-sitive to distractors than the verifier. With a larger sparse cache, attention mass is spread across more tokens, and small differences between drafter and verifier in how evidence is weighted can shift prob-ability mass among competing candidates. Since greedy acceptance requires a strict top-1 match, these shifts can reduce acceptance even when over-all modeling quality does not degrade. 
+
+Position handling near the drafter limit. In our setup, the drafter has a native maximum position embedding of 2048 tokens. At 4K prompts, posi-tion handling (e.g., explicit position IDs, clamping, or re-indexing for sparse-cache evaluation) can in-troduce additional mismatch, and this mismatch can be amplified when more distant tokens are re-tained. Smaller budgets tend to retain more re-cent or higher-attention chunks, reducing exposure to position-related distortion and making drafter– verifier agreement easier. We discuss the broader impact of position range in Section 6. 
+
+Takeaway. The 4K behavior is therefore ex-pected: a smaller sparse cache can improve SD (sparse/full) acceptance by filtering noise and re-ducing sensitivity to long-range distractors and position-related mismatch. As context length grows, sparse/full mismatch becomes the dominant factor, and SD (sparse/full) acceptance collapses across budgets, which motivates BudgetDraft. 
+
+E Single-Budget vs. Multi-Budget Sparse Training 
+
+To isolate the effect of multi-budget sparse train-ing, we compare BudgetDraft with a single-budget variant. The single-budget variant uses the same objective LA + 0 .5 LC , but fixes the sparse-cache branch to B=1024 during training. We evaluate both models on LWM at 16K with γ = 20 , where SD(sparse/full) collapses and BudgetDraft achieves its strongest 16K speedup. Table 7 shows that single-budget sparse training does not provide stable generalization across infer-ence budgets. Although the single-budget variant performs well at B=256 , its speedup and accep-tance degrade as the inference budget increases. The degradation is most pronounced at B=2048 ,where speedup drops to 1.47 × and acceptance falls to 14.61%. In contrast, multi-budget training main-tains 2.10 × speedup and 34.17% acceptance across all budgets. This confirms that the benefit of LC
+
+is not only from adding a sparse-cache branch, but 12 GS LongBench LWM Context B SD (sparse/full) BudgetDraft SD (sparse/full) BudgetDraft SD (sparse/full) BudgetDraft 4k 256 17.17 17.03 17.19 17.03 16.99 16.99 512 17.36 17.04 17.11 17.04 17.03 16.99 1024 17.40 17.05 17.29 17.05 17.34 17.00 2048 17.56 17.07 17.35 17.07 17.68 17.03 8k 256 17.25 17.25 17.25 17.25 17.24 17.24 512 17.25 17.25 17.25 17.25 17.24 17.24 1024 17.25 17.25 17.25 17.25 17.24 17.24 2048 17.25 17.25 17.25 17.25 17.24 17.24 16k 256 21.44 21.44 21.44 21.44 21.42 21.42 512 21.44 21.44 21.44 21.44 21.42 21.42 1024 21.44 21.44 21.44 21.44 21.42 21.42 2048 21.44 21.44 21.44 21.44 21.42 21.42 
+
+Table 5: Peak VRAM usage (GB) at γ = 5 . We report peak GPU memory converted from peak_gpu_mb under the same context length and KV budget. SD (sparse/full) uses the untrained drafter; BudgetDraft uses LA + 0 .5 LC .
+
+GS LongBench LWM Ctx Bud AR LA+0.5 LC LA+LC AR LA+0.5 LC LA+LC AR LA+0.5 LC LA+LC
+
+4K 256 38.10 2.95 ×/91.62 2.98 ×/91.62 37.06 3.05 ×/92.49 3.04 ×/92.49 35.73 3.26 ×/96.34 3.25 ×/96.34 512 38.10 2.97 ×/91.62 2.98 ×/91.62 37.06 3.07 ×/92.49 3.06 ×/92.49 35.73 3.26 ×/96.34 3.27 ×/96.34 1024 38.10 2.98 ×/91.62 2.98 ×/91.62 37.06 3.07 ×/92.49 3.06 ×/92.49 35.73 3.26 ×/96.34 3.27 ×/96.34 2048 38.10 2.97 ×/91.62 2.98 ×/91.62 37.06 3.06 ×/92.49 3.06 ×/92.49 35.73 3.27 ×/96.34 3.27 ×/96.34 8K 256 30.40 2.39 ×/74.78 2.23 ×/74.56 30.10 1.37 ×/20.43 1.37 ×/20.43 29.51 2.54 ×/77.47 2.54 ×/77.47 512 30.40 2.39 ×/75.22 2.39 ×/75.22 30.10 1.37 ×/20.43 1.37 ×/20.43 29.51 2.54 ×/77.47 2.54 ×/77.47 1024 30.40 2.40 ×/75.22 2.40 ×/75.22 30.10 1.38 ×/20.43 1.37 ×/20.43 29.51 2.54 ×/77.47 2.54 ×/77.47 2048 30.40 2.39 ×/75.22 2.40 ×/75.22 30.10 1.38 ×/20.43 1.37 ×/20.43 29.51 2.54 ×/77.47 2.54 ×/77.47 16K 256 19.41 1.22 ×/18.81 1.25 ×/18.72 19.67 1.53 ×/27.78 1.55 ×/27.83 19.43 1.94 ×/66.48 1.99 ×/66.97 512 19.41 1.22 ×/18.35 1.24 ×/18.46 19.67 1.53 ×/27.98 1.55 ×/27.98 19.43 1.89 ×/62.15 1.88 ×/61.59 1024 19.41 1.21 ×/18.03 1.24 ×/18.21 19.67 1.53 ×/27.98 1.55 ×/27.98 19.43 1.77 ×/55.80 1.86 ×/55.67 2048 19.41 1.21 ×/17.98 1.24 ×/18.16 19.67 1.53 ×/27.98 1.55 ×/27.98 19.43 1.52 ×/33.92 1.56 ×/34.81 
+
+Table 6: λ sensitivity at γ = 5 (LA + 0 .5 LC vs LA + LC ). Entries report speedup vs AR / acceptance rate (%) under the same γ, context length, and KV budget. 
+
+Evaluating setting B=256 B=512 B=1024 B=2048 
+
+Single-budget ( B=1024 ) 2.10 ×/34.17 2.02 ×/31.03 1.84 ×/24.48 1.47 ×/14.61 Multi-budget 2.10 ×/34.17 2.10 ×/34.17 2.10 ×/34.17 2.10 ×/34.17 
+
+Table 7: Single-budget vs. multi-budget sparse training on LWM at 16K with γ = 20 . Entries report speedup vs AR / acceptance rate (%). The single-budget variant is trained with a fixed sparse-cache budget B=1024 , while multi-budget training samples from B ∈ { 256 , 512 , 1024 , 2048 }.
+
+also from exposing the drafter to multiple sparse views during training, which improves budget sta-bility at deployment. 13 20 40 60 80 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> 4K Acceptance (%)
+
+max acc = 12.8% · max sp = 0.79× 
+
+GS 
+
+20 40 60 80 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+max acc = 16.4% · max sp = 0.85× 
+
+LongBench 
+
+20 40 60 80 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+max acc = 7.4% · max sp = 0.85× 
+
+LWM 
+
+5 10 15 20 25 30 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> 8K Acceptance (%)
+
+max acc = 37.8% · max sp = 1.17× 
+
+5 10 15 20 25 30 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+max acc = 24.4% · max sp = 0.74× 
+
+5 10 15 20 25 30 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+max acc = 20.2% · max sp = 0.60× 
+
+10 20 30 40 
+
+Draft length 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> 16K Acceptance (%)
+
+max acc = 45.3% · max sp = 1.19× 
+
+10 20 30 40 
+
+Draft length 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+max acc = 44.2% · max sp = 1.07× 
+
+10 20 30 40 
+
+Draft length 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+max acc = 31.5% · max sp = 0.78× 
+
+3
+
+4
+
+5
+
+6
+
+3
+
+4
+
+5
+
+6
+
+4
+
+5
+
+6
+
+7
+
+> Speedup vs AR
+
+2.0 
+
+2.5 
+
+3.0 
+
+3.5 
+
+4.0 
+
+4.5 
+
+0.5 
+
+1.0 
+
+1.5 
+
+2.0 
+
+2.25 
+
+2.50 
+
+2.75 
+
+3.00 
+
+3.25 
+
+3.50 
+
+> Speedup vs AR
+
+0.5 
+
+1.0 
+
+1.5 
+
+2.0 
+
+2.5 
+
+1.0 
+
+1.5 
+
+2.0 
+
+2.5 
+
+1.5 
+
+2.0 
+
+2.5 
+
+> Speedup vs AR
+
+Per-sample variance (mean ± std, n 36 per point, budget-averaged over B {256, 512, 1024, 2048} )
+
+Acceptance Speedup Figure 4: Per-sample variance (mean ± std) across draft lengths γ. Acceptance and speedup are averaged over KV budgets B ∈ { 256 , 512 , 1024 , 2048 }. Rows correspond to context lengths (4K/8K/16K), and columns correspond to datasets (GS/LongBench/LWM). 
+
+14
