@@ -1,0 +1,822 @@
+Title: YARD: Y-Architecture Register Decoding for Efficient Hallucination Mitigation in Large Vision-Language Models
+
+URL Source: https://arxiv.org/pdf/2605.31429v1
+
+Published Time: Mon, 01 Jun 2026 01:25:57 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# YARD: Y-Architecture Register Decoding for Efficient Hallucination Mitigation in Large Vision-Language Models 
+
+Ting Chen 1,* Geng Li 2,* Guohao Chen 2,* Yu Hu 1, †
+
+Guan Huang 3 Mai Chen 3 Langsheng Lei 3 Jun Du 3
+
+1Guangdong University of Technology 2Nanyang Technological University 
+
+3Shenzhen TENCLASS Technology Co., Ltd. 
+
+> *
+
+Equal contribution. †Corresponding author. 
+
+Abstract 
+
+Contrastive decoding (CD) seeks to mitigate hallucinations in Large Vision-Language Mod-els (LVLMs) by contrasting the output distri-butions of a standard model and a visually degraded model. However, existing training-free CD methods suffer from sub-optimal de-graded branches: completely dropping visual tokens is too extreme and induces language hallucinations, while corrupting input images offers coarse control over visual evidence and suffers from high inference latency due to re-quiring two full forward passes. To address these dilemmas, we propose YARD , a training-free Y-Architecture Register Decoding frame-work. Motivated by the observation that re-liable text-to-vision grounding predominantly emerges in the middle decoder layers, YARD constructs the degraded branch internally by sharing shallow-layer computations and branch-ing exactly at this critical stage. For the de-graded branch, YARD replaces patch-level vi-sual tokens with register tokens, which preserve global image semantics but lack fine-grained local evidence. This image-aware yet locally under-grounded design provides a faithful con-trastive signal without extreme modality mis-match, while the Y-architecture strictly avoids a costly second forward pass. Extensive experi-ments on generative and discriminative hallu-cination benchmarks demonstrate that YARD consistently achieves state-of-the-art hallucina-tion mitigation across multiple LVLMs, along-side a significant reduction in inference latency. 
+
+1 Introduction 
+
+Large vision-language models (LVLMs) (Liu et al., 2024b; Dai et al., 2023; Wang et al., 2024a; Zhu et al., 2024) connect visual encoders with large lan-guage models, enabling strong visual understand-Visual                     
+
+> Encoder
+> Visual Contrastive Decoding
+> Clean logits
+> ( y | x , v )
+> Degraded logits
+> ( y | x , v’ )
+> Shared Layers
+> Clean Branch Degraded Branch
+> (a) (b)
+> YARD
+> Distorted
+> Visual Inputs V’
+> What is on
+> the beach in
+> the picture?
+> Textual Input X
+> Original
+> Visual Inputs V
+> Large Language
+> Model
+> What is on
+> the beach in
+> the picture?
+> Textual Input X
+> Projector Visual
+> Encoder
+> Original
+> Visual Inputs V’
+> Large Language
+> Model
+> What is on
+> the beach in
+> the picture?
+> Textual Input X
+> Projector Visual
+> Encoder Projector
+> Visual Contrastive Decoding
+> Degraded logits
+> ( y | x , v’ )
+> Clean logits
+> ( y | x , v )
+
+Figure 1: Comparison between (a) pixel-level degrada-tion that corrupts the visual input and (b) YARD that constructs an image-aware but locally under-grounded degraded branch inside the LLM decoder. 
+
+ing and language generation capabilities across vi-sual question answering, image captioning, and open-ended multimodal dialogue. However, de-spite their ability to produce fluent and contextu-ally coherent responses, hallucination remains a central obstacle to their reliability(Li et al., 2023b). LVLMs may generate text that is semantically plau-sible but inconsistent with the visual content, such as non-existent objects(Rohrbach et al., 2018), in-correct attributes(Pham and Schott, 2024), or spa-tial relations unsupported by the image(Guan et al., 2024). Such failures suggest that generation is not always faithfully grounded in the visual evidence, making hallucination mitigation a key challenge for reliable LVLM deployment(Bai et al., 2024). Among existing training-free approaches to hallucination mitigation, contrastive decod-ing (Chuang et al., 2024) can be viewed as a form of hallucination-component separation at the logit level. Specifically, the clean logits of an LVLM contain both predictions supported by genuine visual evidence and hallucination-related 1
+
+> arXiv:2605.31429v1 [cs.CV] 29 May 2026
+
+components induced by language priors or insufficient grounding. The role of the degraded branch is to construct a contrastive distribution that exposes these hallucination-prone components, so that they can be selectively suppressed through logit subtraction (Li et al., 2023a). Existing methods typically instantiate the de-graded branch in two ways. One line of work masks or removes visual information inside the LLM, reducing the degraded branch to an approx-imately text-only language-prior branch (Favero et al., 2024; Zhu et al., 2025; Wang et al., 2024b; Woo et al., 2025; Huo et al., 2024; Deng and Yang, 2025; Manevich and Tsarfaty, 2024; Li et al., 2025a). However, once visual conditioning is com-pletely removed, the induced hallucinations often arise from generic language priors and may not align with the input image. Another line perturbs the original image in pixel space by adding noise, masking image regions, or corrupting visual de-tails (Chen et al., 2024b; Yang et al., 2024; Zhao et al., 2025). However, pixel-level degradation can-not selectively disrupt visual signals: color, texture, object boundaries, spatial layout, and local seman-tics are tightly entangled in pixel space. As a result, such perturbations may fail to isolate the local ev-idence responsible for hallucination and instead contaminate the degraded logits with signals asso-ciated with genuine visual evidence. These limitations motivate us to move degra-dation into a more structured feature-level space, where global image semantics can be preserved while fine-grained local visual evidence is selec-tively weakened. Table 1 further supports this choice, showing that feature-level degradation ex-poses a purer hallucination signal than text-only or pixel-level degradation. However, existing con-trastive decoding methods mainly construct de-graded branches from either the language side or the visual-input side, leaving feature-level degra-dation inside the LVLM decoder largely under-explored. This raises two key design questions: 
+
+where should the degraded branch be constructed inside the LVLM, and how should visual evidence be degraded at the feature level? To answer this question, we analyze the cross-modal information flow between visual and text tokens in the decoder(Zhang et al., 2025b; Jiang et al., 2025b). We observe that perturbing visual tokens near the output layers has only a limited im-pact on final predictions, whereas perturbing text tokens leads to severe generation collapse(Chen et al., 2024a; Fan et al., 2025). This suggests that, in deeper layers, task-relevant visual evidence has largely been integrated into text-side represen-tations. Meanwhile, the layer-wise evolution of text-to-vision attention shows that reliable visual grounding mainly emerges in the middle layers. Therefore, as illustrated in Figure 2, the degraded branch should be constructed around the middle decoder layers . Furthermore, Table 1 shows that register-based degradation provides the most effec-tive degraded branch. This leads to the second de-sign question: how should we degrade the visual condition after branching? Table 1 shows that 
+
+Global Info . achieves better hallucination mitiga-tion than Local Info., which still relies on residual local visual evidence. This suggests that a more suitable degraded branch should preserve the global semantics of the input image, so that it remains image-relevant, while removing fine-grained local evidence to prevent reliable local grounding. Such a global-but-local-missing condition can more ef-fectively expose hallucination-prone signals. Based on these analyses, we propose YARD , a training-free Y-Architecture contrastive decoding framework. YARD realizes feature-level degra-dation from two perspectives: where to degrade and how to degrade. First, for where to degrade, 
+
+YARD shares the shallow decoder layers between the clean and degraded branches and splits them at a middle layer. This allows the degraded branch to inherit early multimodal context while prevent-ing it from fully integrating local visual evidence. Second, for how to degrade, YARD constructs a feature-level visual condition that preserves global information while removing local information .Specifically, prior studies (Darcet et al., 2024) have observed abnormally high-norm attention-sink to-kens in vision encoders, which tend to absorb and carry coarse image-level information. YARD ap-plies sink-shift to redirect these sink activations to newly introduced register tokens, enabling them to inherit the role of global-information carriers. These register representations are then used to re-place fine-grained visual tokens in the degraded branch. In addition, YARD improves inference efficiency by avoiding a complete second forward pass. Empirically, YARD consistently reduces hal-lucinations in both generative and discriminative evaluations. These gains transfer across diverse LVLM architectures, demonstrating that YARD 
+
+provides a general training-free contrastive signal rather than an architecture-specific decoding heuris-2Is there a Knife? Shallow Layer Middle Layer Deep Layer  
+
+> (a) (b) Figure 2: Motivating analysis of visual evidence flow. (a) Zero-out intervention shows that late-layer predictions mainly rely on text-side representations. (b) Text-to-vision attention becomes more grounded at the middle layer, e.g., layer 10, indicating the key window for local visual evidence extraction.
+
+tic. Our contributions are summarized as follows: • We propose register-based feature-level degra-dation to construct an image-aware but locally under-grounded contrastive branch without cor-rupting the visual input. • We analyze degraded-branch purity and cross-modal information flow, motivating faithful degradation at middle decoder layers. • We present YARD , an efficient training-free Y-Architecture contrastive decoding framework that consistently mitigates hallucinations across benchmarks and LVLMs. 
+
+2 Related Work 
+
+2.1 Contrastive Decoding for Hallucination Mitigation 
+
+Training-free contrastive decoding mitigates hal-lucinations by contrasting a clean branch with a hallucination-prone degraded branch, and suppress-ing predictions overly favored by the degraded con-dition. Existing methods mainly differ in how this degraded branch is constructed. One line of work applies degradation at the in-put level. VCD (Leng et al., 2024) perturbs im-ages with Gaussian noise, while ICD (Wang et al., 2024b), DCD (Wu et al., 2025), VACoDe (Kim et al., 2024), and Octopus(Suo et al., 2025) intro-duce instruction, multi-source, or adaptive pertur-bations. These methods are effective but typically require largely separate clean and degraded compu-tation paths, and their degradation is only indirectly related to the internal grounding process. Another line of work obtains contrastive or cor-rective signals from internal states or decoding dy-namics. DoLa (Chuang et al., 2024) contrasts log-its across decoder layers, LayerCD (Tong et al., 2025) extends layer-wise contrast to visual repre-sentations, and OPERA (Huang et al., 2024) and ECD (Fieback et al., 2025) use decoding-time reg-ularization or auxiliary scoring. While avoiding explicit input corruption, they do not explicitly con-struct a degraded visual branch at the stage where text-to-vision grounding is formed. In contrast, YARD constructs the degraded branch inside the LLM decoder. By branching at the middle layers, it aligns degradation with the formation of visual grounding while sharing shallow-layer computation between clean and de-graded branches. 
+
+2.2 Register Tokens in Vision Transformers 
+
+Register tokens were introduced to address high-norm outlier artifacts in Vision Transformers(Xiao et al., 2024; Sun et al., 2024). Darcet et al. (Darcet et al., 2024) showed that such outliers often emerge in spatially low-informative regions of ViTs such as DINOv2(Oquab et al., 2023) and CLIP(Radford et al., 2021), and proposed learnable registers to ab-sorb them. Jiang et al. (Jiang et al., 2025a) further showed that register-like tokens can be constructed at test time without retraining by redirecting anoma-lous MLP activations to an appended token. Different from prior work that uses registers to stabilize clean visual representations, YARD uses them as degraded visual conditions for con-trastive decoding. Since register representations preserve coarse global semantics but lack stable patch-level correspondence, they naturally form an image-aware but locally unreliable branch for hallucination mitigation. 
+
+3 Preliminaries 
+
+Training-free register tokens. Given an image, a Vision Transformer produces patch tokens Z =
+
+{z1, . . . , z N }, where each zj ∈ Rd represents a local image patch. Prior work shows that ViTs can produce high-norm outlier tokens at spatially uninformative regions, and introduces register to-3kens to absorb such artifacts (Darcet et al., 2024). Jiang et al. (Jiang et al., 2025a) further show that register tokens can be constructed at test time with-out retraining, by appending an extra token and redirecting anomalous MLP activations to it. In this work, we use register tokens not to im-prove the clean visual representation, but to con-struct degraded visual conditions for contrastive decoding. Compared with ordinary patch tokens, register tokens preserve coarse global visual se-mantics but lack stable patch-level correspondence and fine-grained local details. This makes them suitable for forming a branch that remains image-aware while being locally under-grounded. Details are provided in Appendix B. 
+
+4 Motivating Analysis 
+
+Observation 1: Middle Layers Are the Criti-cal Window for Visual Evidence Transfer We first examine where a degraded branch should be constructed inside the LVLM decoder. Although vision tokens provide the initial visual source, fi-nal generation may increasingly rely on text-token representations, as text tokens progressively absorb task-relevant visual evidence through causal self-attention. To verify this, we zero out either vision or text hidden states at decoder layer ℓ:      
+
+> H(ℓ)
+> \Z= [ 0;T(ℓ)],H(ℓ)
+> \T= [ Z(ℓ);0],(1)
+
+where H(ℓ) = [ Z(ℓ); T(ℓ)]. The intervened states are then passed through the remaining decoder layers. As shown in Figure 2(a), zeroing out vision to-kens at the first layer leads to a clear performance drop, confirming that vision tokens are indispens-able as the source of visual evidence. However, zeroing out vision tokens near the output layers has only a limited effect on final predictions. In contrast, zeroing out text tokens causes complete generation failure , with both accuracy and F1 dropping to 0. This suggests that, by the late decoder layers, task-relevant visual evidence has largely been transferred into text-side representa-tions. Therefore, perturbing vision tokens after this transfer provides only a limited basis for construct-ing an effective degraded branch. This finding further raises a layer-wise ques-tion: when does visual evidence become effectively transferred into text tokens? To answer this, we vi-sualize text-to-vision attention across decoder lay-ers by projecting it back to the image space. As shown in Figure 2(b), shallow-layer attention is diffuse and often distracted by irrelevant regions, whereas middle-layer attention becomes concen-trated on task-relevant objects. This suggests that the middle layers form the key window where text tokens begin to acquire local visual evidence before it is fully internalized in deeper text-side represen-tations. Therefore, the degraded branch should be constructed around the middle decoder layers: branching too early lacks sufficient cross-modal context, while branching too late leaves limited room for weakening visual evidence. This analy-sis determines where to degrade; we next examine 
+
+how to construct the degraded branch to better ex-pose hallucination-related signals.                                       
+
+> Table 1: Ablation of degraded-branch construction. Pixel-level corrupts the input image; Text-only removes visual tokens; Local Info. randomly keeps a subset of vision tokens; Global Info. replaces fine-grained visual tokens with register representations. Parentheses report the hallucination increase after removing α.CH sand
+> CH iare CHAIR-based metrics for evaluating hallucina-tions in image captions.
+> Degradation w/ αw/o α
+> CH s↓CH i↓CH s↓CH i↓
+> Pixel-level 23.0 8.3 28.7 (+5.7) 12.1 (+3.8)
+> Text-only 21.7 7.0 24.0 (+2.3) 7.9 (+0.9)
+> Feature-level degraded conditions
+> Local Info. 25.0 7.9 26.4 (+1.4) 8.4 (+0.5)
+> Global Info. 19.7 6.5 21.0 (+1.3) 7.0 (+0.5)
+
+Observation 2: Feature-level degradation ex-poses a purer hallucination signal. Table 1 com-pares different degraded-branch constructions from the perspective of signal purity. To more strictly examine whether the degraded branch precisely ex-poses hallucination-prone logits, we remove the conservative clean-logit anchoring controlled by α
+
+in standard contrastive decoding and adopt a direct subtraction form: 
+
+ℓw/o αi = ℓci − ℓdi . (2) 
+
+This setting is not intended to achieve the best de-coding performance, but instead serves as a stress test for the degraded branch. Ideally, the clean logits contain both correct predictions supported by genuine visual evidence and hallucination-prone predictions caused by insufficient grounding, while the degraded logits should be concentrated on the latter. In this case, even without the additional clean-branch protection introduced by α, direct subtraction should mainly suppress hallucination-related components without substantially damaging visually grounded predictions. 4Vision Encoder                 
+
+> LLM Decoder Layer  1
+> Projector
+> LLM Decoder Layer k
+> ...
+> Clean
+> Decoder
+> Degraded
+> Decoder
+> Peo ple
+> Umbrellas
+> Surfboard
+> Clean logits (y |x , v)
+> Degraded logits ( y | x , v’ )
+> hallucinated object
+> “Surfboard ” eliminated
+> What is on
+> the beach?
+> Vision token Register token Text token Contrastive Decoding
+> Clean logits (1 + α) ·
+> Degraded logits −α·
+> =YARD logits
+> Original Visual Inputs V
+> Textual Input X
+> Peo ple
+> Umbrellas
+> Surfboard
+> Peo ple
+> Umbrellas
+> Surfboard
+> x M
+
+Figure 3: Overview of Y-A rchitecture Register Decoding. 
+
+The results show that pixel-level degradation 
+
+produces the largest increase in CH s/CH i under the w/o α setting, indicating that its degraded branch is contaminated by residual visual semantics and fails to precisely isolate hallucination components. 
+
+Text-only degradation leads to a smaller increase, but this mainly comes from its image-agnostic na-ture after completely removing visual conditioning. Since its degraded logits are weakly aligned with the clean prediction for the current image, they contain fewer image-specific correct object sig-nals as well as fewer image-specific hallucination signals; therefore, direct subtraction is less likely to damage visually grounded predictions, but the re-sulting contrastive signal is also less aligned with 
+
+the hallucination components in the clean branch. In contrast, feature-level degradation exhibits the smallest drop after removing α, suggesting that its register-conditioned branch induces the purest hallucination signal. By preserving global image semantics while weakening local grounding, its degraded logits contain fewer correct object sig-nals supported by genuine visual evidence and are more concentrated on the hallucination compo-nent targeted by contrastive subtraction. Among feature-level variants, Table 1 shows that Global Info. outperforms Local Info. as the degraded condition. Local Info., obtained by randomly re-taining a subset of vision tokens, may leak residual patch-level evidence into the degraded branch. In contrast, Global Info. preserves coarse image-level semantics while removing fine-grained local evi-dence, forming a cleaner global-but-local-missing condition. This explains why it achieves the lowest CH s/CH i and the smallest hallucination increase after removing α.
+
+5 Method 
+
+The observations above motivate a simple principle: rather than degrading the visual source itself, the degraded branch should intervene in the process by which text tokens extract fine-grained visual evi-dence from vision tokens. To this end, we propose 
+
+YARD , a training-free Y-Architecture contrastive decoding framework that constructs the degraded branch inside the LLM decoder. The clean and degraded branches share the shallow decoder lay-ers and split at a middle layer, where text-to-vision grounding has begun to emerge but fine-grained local evidence has not yet been fully integrated. After branching, the clean branch retains the orig-inal patch-level visual tokens, while the degraded branch discards them and conditions generation on register representations together with text to-kens. This produces a branch that remains globally image-aware but locally under-grounded. Given an image, the vision encoder produces patch-level visual tokens Z = {z1, . . . , z N }.We construct training-free register tokens R =
+
+{r1, . . . , r M } following Section 3, and denote the text tokens as T = {t1, . . . , t L}. The input se-quence to the LLM decoder is 
+
+X(0) = [ Z; R; T]. (3) Here, Z provides fine-grained local visual evidence, while R provides a coarse but spatially imprecise visual condition. Let the LLM decoder contain D layers, and let 
+
+K denote the branching layer. YARD first pro-cesses the full sequence through the shared prefix: 
+
+H(K) = F1: K (X(0) ) = [ Z(K); R(K); T(K)]. (4) This shared computation allows both branches to inherit the same early multimodal context, while avoiding the full second forward pass required by input-level contrastive decoding. At layer K, YARD splits the computation into a clean branch and a degraded branch: 
+
+H(K) 
+
+> c
+
+= [ Z(K); R(K); T(K)],
+
+H(K) 
+
+> d
+
+= [ R(K); T(K)]. (5) 5The clean branch keeps the original visual to-kens and therefore preserves access to fine-grained patch-level evidence. The degraded branch re-moves these patch tokens and relies on register representations, which preserve coarse image-level semantics but lack stable local correspondence. The two branches are then forwarded through the remaining decoder layers: 
+
+H(D) 
+
+> c
+
+= FK+1: D(H(K) 
+
+> c
+
+),
+
+H(D) 
+
+> d
+
+= FK+1: D(H(K) 
+
+> d
+
+). (6) Let h(D) 
+
+> c,i
+
+and h(D) 
+
+> d,i
+
+denote the hidden states used to predict the next token at step i in the clean and degraded branches, respectively. The vocabulary-level logits are obtained through the language mod-eling head glm :
+
+ℓci = glm (h(D) 
+
+> c,i
+
+), ℓdi = glm (h(D) 
+
+> d,i
+
+). (7) YARD then applies contrastive decoding with the register-conditioned degraded logits: 
+
+ℓyard  
+
+> i
+
+= (1 + α)ℓci − αℓdi , (8) where α controls the contrastive strength. The fi-nal decoding distribution is obtained by applying softmax to ℓyard  
+
+> i
+
+. Following standard contrastive decoding practice, we use a clean-branch plausibil-ity constraint to avoid over-promoting tokens with very low clean probability. This design creates a dual degradation effect. First, the degraded branch inherits the shared shallow-to-middle representations, where text-to-vision grounding has begun but has not yet fully in-tegrated fine-grained local evidence. Second, after branching, it is explicitly deprived of patch-level visual tokens and can only rely on register-level global semantics. As a result, the degraded branch remains semantically coherent with the image, but lacks the local visual evidence required for faithful grounding. Predictions that are plausible under this locally under-grounded branch, but insufficiently supported by the clean branch, are therefore sup-pressed during contrastive decoding. 
+
+6 Experiments 
+
+We evaluate YARD on both generative and dis-criminative hallucination benchmarks. For gen-erative evaluation, we use AMBER(Wang et al., 2023), Object HalBench(Yu et al., 2024), and                                         
+
+> Algorithm 1 YARD Contrastive Decoding
+> Require: Image I, text query T, branching layer K, con-trastive strength α
+> Ensure: Model response with register-conditioned con-trastive decoding 1: Encode Iinto patch tokens Zand register tokens R
+> 2: Run shared decoder prefix: H(K)=F1: K([ Z;R;T])
+> 3: Split branches: H(K)
+> c= [ Z(K);R(K);T(K)],H(K)
+> d=[R(K);T(K)]
+> 4: Obtain ℓci,ℓdifrom remaining layers and decode with
+> ℓyard
+> i= (1 + α)ℓci−αℓdi
+
+MME-Hallucination(Fu et al., 2025); for dis-criminative evaluation, we use AMBER discrim-ination(Wang et al., 2023) and POPE(Li et al., 2023b). Using LLaVA-1.5(Liu et al., 2024b) as the main backbone, we compare YARD with representative training-free methods, including ICD(Wang et al., 2024b), OPERA(Huang et al., 2024), VCD(Leng et al., 2024), M3ID(Favero et al., 2024), AVISC(Woo et al., 2025), EVAS (Zhang et al., 2025a), FuzzyCD(Kim et al., 2025), and TAME (Tang et al., 2025). We further evaluate transferability on LLaVA-NeXT(Liu et al., 2024c), Qwen2-VL(Wang et al., 2024a), Qwen3-VL(Bai et al., 2025), InstructBLIP(Dai et al., 2023), and Mini-Gemini(Li et al., 2025b). 
+
+6.1 Main Results Does YARD reduce hallucinations more effec-tively? Tables 2 and 3 compare YARD with ex-isting hallucination mitigation methods. Overall, YARD achieves consistent improvements on both generative and discriminative hallucination evalua-tions, indicating that the proposed degraded branch provides an effective contrastive signal. On the generative benchmarks in Table 2, YARD substantially reduces object-level hallucination. On Object HalBench, it achieves the best CH s and CH i, reducing them from 27.0/10.5 to 19.7/6.5 compared with the LLaVA-1.5-7B baseline. YARD also improves AMBER hallucination metrics, low-ering CH and Hal. while achieving the best cov-erage and cognition scores. These results suggest that YARD suppresses hallucinated content with-out simply making the model overly conservative. On MME-Hallucination, YARD remains compet-itive with the strongest baselines and obtains the best color score, showing that it preserves general visual perception ability. Table 3 shows that YARD also improves object-existence discrimination. On LLaVA-1.5-7B, YARD improves AMBER accuracy/F1 from 6Table 2: Generative hallucination evaluation on LLaVA-1.5-7B across AMBER, Object HalBench, and MME. Cov. measures object coverage, Hal measures the response-level hallucination rate, Cog reflects the tendency to generate plausible but image-unfaithful objects; Exist. and Pos. denote MME sub-scores for existence and position. 
+
+Method AMBER Object HalBench MME-Hallucination CH ↓ Cov. ↑ Hal ↓ Cog ↓ CH s ↓ CH i ↓ Exist. ↑ Count ↑ Pos. ↑ Color ↑ Total ↑
+
+LLaVA-1.5-7B 8.3 45.0 32.0 2.2 27.0 10.5 180.00 110.00 121.33 141.67 553.00 +ICD 6.3 46.3 25.8 2.2 22.3 7.4 180.00 126.67 113.33 143.33 563.33 +OPERA 4.6 45.6 18.9 1.6 28.3 12.1 190.00 133.33 121.67 155.00 600.00 +VCD 6.1 46.7 25.8 2.1 23.0 8.3 185.00 126.67 121.67 135.00 568.33 +M3ID 5.4 48.7 25.5 1.4 26.3 9.2 173.33 106.67 96.67 155.00 531.67 +AVISC 7.1 45.2 27.6 2.1 24.1 7.8 180.00 138.33 123.33 158.33 599.99 +EVAS 4.7 46.1 18.8 1.6 27.0 11.3 190.00 140.00 121.67 160.33 612.00 +FuzzyCD 6.2 48.1 27.3 1.8 20.3 7.3 185.00 148.33 123.33 153.33 609.99 +TAME 12.0 40.6 35.6 3.4 26.3 10.6 190.00 133.66 128.33 163.00 614.99 
+
++YARD 4.6 48.9 21.6 1.2 19.7 6.5 185.00 140.00 125.00 163.33 613.33 
+
+Table 3: Discriminative hallucination evaluation on AMBER and POPE. Accuracy measures the proportion of correctly answered yes/no questions, while F1 balances precision and recall.                                                                                                                              
+
+> AMBER POPE.MSCOCO Discrimination Random Popular Adversarial ALL Method Accuracy F1 Accuracy F1 Accuracy F1 Accuracy F1 Accuracy F1 LLaVA-1.5-7B 67.00 71.10 85.67 83.71 84.61 82.47 81.51 80.54 83.93 82.24 +ICD 75.92 81.58 85.20 84.02 83.70 82.64 81.20 80.45 83.37 82.37 +VCD 67.30 71.10 86.77 85.50 84.93 83.81 82.33 81.53 84.68 83.61 +M3ID 67.25 70.90 84.5 82.55 82.93 81.12 79.93 78.50 82.46 80.72 +AVISC 70.70 75.45 86.77 85.29 85.23 83.86 82.57 81.48 84.86 83.55 +EVAS 77.93 83.81 85.74 84.49 84.97 83.36 82.03 80.74 84.25 82.86 +YARD 78.70 84.10 89.03 88.41 86.67 86.25 82.73 82.90 86.14 85.85
+> InstructBLIP 68.20 74.60 82.61 82.47 79.51 79.59 78.98 79.43 80.37 80.50 +VCD 69.65 75.90 86.01 84.96 83.33 82.49 81.03 80.57 83.49 82.68 +AVISC 72.60 78.60 85.67 84.31 83.57 82.41 80.90 80.14 83.38 82.29 +YARD 73.62 79.07 90.77 90.05 89.07 88.43 87.33 86.87 89.06 88.45
+
+67.00/71.10 to 78.70/84.10, and POPE accuracy/F1 from 83.93/82.24 to 86.14/85.85. The same trend holds on InstructBLIP, where YARD improves POPE overall accuracy/F1 from 80.37/80.50 to 89.06/88.45. This demonstrates that YARD is effec-tive not only for reducing hallucinated descriptions, but also for discriminative hallucination evaluation. Taken together, these results support our de-sign hypothesis: an image-aware but locally under-grounded degraded branch provides a more tar-geted contrastive signal, suppressing predictions that are plausible under weak local grounding but unsupported by clean visual evidence. 
+
+6.2 Transfer Across LVLM Architectures Does YARD generalize to different LVLM fam-ilies? We further evaluate YARD as a plug-and-play decoding method across diverse LVLM architectures, including Qwen3-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-v1.5, InstructBLIP, and Mini-Gemini. As shown in Table 4, YARD consis-tently improves both Object HalBench and POPE across all evaluated models. The gains are observed on both strong and hallucination-prone backbones. For example, on Qwen3-VL-4B, YARD improves POPE F1/Acc. from 89.2/89.8 to 92.7/93.6, while reducing CH s/CH i from 8.7/6.1 to 7.5/5.4. On LLaVA-NeXT, where object hallucination is more severe, YARD reduces CH s/CH i from 20.5/9.3 to 11.0/5.2. These consistent improvements suggest that YARD is not tied to a specific LLaVA-style archi-tecture. Instead, middle-layer register-conditioned degradation captures a general property of LVLM decoding, enabling training-free transfer across dif-ferent model families. 7Q: Please describe this image in detail.       
+
+> Baseline: The image conveys the story of the two school buses, one red and blue, parked next to each other in the grass or dirt. There’s a boy near the blue bus on the right, possibly disembarking or about to board either bus. Additionally, a single car and a row of parked buses are visible in the open area.
+> YARD: The image shows buses parked next to each other, lined up on a grassy area near a parking lot. The buses appear to be in various states of maintenance and come in various colors. Large trees and a clear blue sky can be seen in the background, giving the scene an open outdoor setting.
+
+Figure 4: Qualitative comparison between baseline and Yard . Hallucinated sentences are highlighted in red. 
+
+6.3 Qualitative Analysis Are YARD responses more visually grounded? 
+
+Figure 4 shows a representative open-ended gener-ation example. The baseline response introduces unsupported objects, such as a boy near the bus and a single car, which are plausible in the scene but not grounded in the image. In contrast, YARD fo-cuses on visually supported content, including the buses, grassy area, trees, and sky, without adding non-existent objects. This example illustrates how YARD suppresses language-plausible but visually unsupported pre-dictions. By contrasting the clean branch with an image-aware but locally under-grounded degraded branch, YARD encourages responses that remain more faithful to the visual evidence. 
+
+6.4 Ablation Study Are middle-layer branching and register-conditioned degradation necessary? Table 5 ab-lates two key design choices of YARD: the branch-ing layer K and the degraded visual condition. First, the branching layer is critical. Branch-ing too early ( K = 1 ) provides insufficient mul-timodal context, leading to weaker POPE perfor-mance and higher CHAIR scores. Branching too late ( K = 25 ) is also suboptimal, as visual ev-idence has been largely absorbed into text-side representations, leaving limited room for degrada-tion. In contrast, middle-layer branching ( K = 10 )
+
+Table 4: Cross-architecture evaluation of YARD on Object HalBench and POPE across diverse VLM back-bones.                                                                
+
+> Model Object HalBench POPE
+> CH s↓CH i↓F1 ↑Acc. ↑
+> Qwen3-VL-4B 8.7 6.1 89.2 89.8 + YARD 7.5 5.4 92.7 93.6
+> Qwen3-VL-8B 7.9 5.4 88.4 88.9 + YARD 7.3 5.0 91.2 91.7
+> Qwen2-VL-7B 12.7 7.8 87.1 87.9 + YARD 10.8 6.3 88.6 89.2
+> LLaVA-NeXT 20.5 9.3 83.1 84.7 + YARD 11.0 5.2 86.5 87.3
+> LLaVA-v1.5 27.0 10.5 82.2 83.9 + YARD 19.7 6.5 85.9 86.1
+> InstructBLIP 15.3 5.5 80.5 80.4 + YARD 12.5 4.2 88.5 89.1
+> Mini-Gemini 14.0 6.9 85.1 86.6 + YARD 13.2 6.5 86.4 87.1
+
+achieves the best overall performance, supporting our observation that this stage is the critical window for local visual evidence extraction. Second, the degraded condition also matters. Average degradation remains inferior to YARD, suggesting that coarse averaged features are not sufficiently informative. Text-only variants re-move visual information more aggressively and provide a less image-specific contrastive signal; al-though they reduce CHAIR to some extent, they yield weaker POPE Acc./F1. Overall, YARD achieves the best POPE Acc./F1 and the lowest CH s/CH i, confirming that middle-layer branching and register-conditioned degradation are both nec-essary for constructing an image-aware but locally under-grounded degraded branch. 
+
+Table 5: Ablation study of degraded-branch construc-tion. K denotes the branching layer; Average uses av-eraged visual features, and Text-Only removes visual tokens. Acc. and F1 are averaged over POPE subsets; lower CH s/CH i is better.                                      
+
+> Variant POPE CHAIR Acc. ↑F1 ↑CH s↓CH i↓
+> YARD ( K= 1 )84.5 83.7 22.9 7.3 YARD ( K= 25 )83.2 81.6 25.0 7.9 Average. ( K= 10 )84.9 84.3 23.7 7.7 Text-Only. ( K= 1 )84.3 82.6 23.0 7.2 Text-Only. ( K= 10 )85.1 84.2 21.7 7.0 YARD ( K= 10 )86.1 85.9 19.7 6.5
+
+87 Conclusion 
+
+We propose YARD, a training-free Y-Architecture contrastive decoding framework. YARD introduces register-based feature-level degradation at the mid-dle decoder layers to construct an image-aware but locally under-grounded degraded branch, while sharing shallow-layer computation to avoid a com-plete second forward pass. Experiments show that YARD consistently reduces hallucinations across multiple LVLM architectures and benchmarks. 
+
+Limitations 
+
+YARD is training-free at the decoding stage, but it relies on constructing effective register represen-tations for the target LVLM. While this design is effective for the Transformer-based LVLMs evalu-ated in this work, architectures with different vision encoders, LLM backbones, or vision-language pro-jection mechanisms may require additional adapta-tion. In addition, the performance of YARD may be affected by the choice of branching layer and the construction of register representations. Extending register-based degradation to broader multimodal architectures and input formats is a natural direc-tion for future work. 
+
+References 
+
+Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, and 1 others. 2025. Qwen3-vl technical report. arXiv preprint arXiv:2511.21631 .Zechen Bai, Pichao Wang, Tianjun Xiao, Tong He, Zongbo Han, Zheng Zhang, and Mike Zheng Shou. 2024. Hallucination of multimodal large language models: A survey. arXiv preprint arXiv:2404.18930 .Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Jun-yang Lin, Chang Zhou, and Baobao Chang. 2024a. An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models. In European Conference on Computer Vi-sion , pages 19–35. Springer. Zhaorun Chen, Zhuokai Zhao, Hongyin Luo, Huaxiu Yao, Bo Li, and Jiawei Zhou. 2024b. Halc: Object hallucination reduction via adaptive focal-contrast decoding. arXiv preprint arXiv:2403.00425 .Yung-Sung Chuang, Yujia Xie, Hongyin Luo, Yoon Kim, James R Glass, and Pengcheng He. 2024. Dola: Decoding by contrasting layers improves factuality in large language models. In International Conference on Learning Representations , volume 2024, pages 54158–54183. Wenliang Dai, Junnan Li, Dongxu Li, Anthony Tiong, Junqi Zhao, Weisheng Wang, Boyang Li, Pascale N Fung, and Steven Hoi. 2023. Instructblip: Towards general-purpose vision-language models with instruc-tion tuning. Advances in neural information process-ing systems , 36:49250–49267. Timothée Darcet, Maxime Oquab, Julien Mairal, and Piotr Bojanowski. 2024. Vision transformers need registers. In International Conference on Learning Representations , volume 2024, pages 2632–2652. Jingyuan Deng and Yujiu Yang. 2025. Maskcd: Mitigat-ing lvlm hallucinations by image head masked con-trastive decoding. arXiv preprint arXiv:2510.02790 .Yingqi Fan, Anhao Zhao, Jinlan Fu, Junlong Tong, Hui Su, Yijie Pan, Wei Zhang, and Xiaoyu Shen. 2025. Visipruner: Decoding discontinuous cross-modal dy-namics for efficient multimodal llms. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing , pages 18896–18913. Alessandro Favero, Luca Zancato, Matthew Trager, Sid-dharth Choudhary, Pramuditha Perera, Alessandro Achille, Ashwin Swaminathan, and Stefano Soatto. 2024. Multi-modal hallucination control by vi-sual information grounding. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pat-tern Recognition , pages 14303–14312. Laura Fieback, Nishilkumar Balar, Jakob Spiegelberg, and Hanno Gottschalk. 2025. Efficient contrastive decoding with probabilistic hallucination detection-mitigating hallucinations in large vision language models. arXiv preprint arXiv:2504.12137 .Chaoyou Fu, Peixian Chen, Yunhang Shen, Yulei Qin, Mengdan Zhang, Xu Lin, Jinrui Yang, Xiawu Zheng, Ke Li, Xing Sun, and 1 others. 2025. Mme: Acomprehensive evaluation benchmark for multimodal large language models. Advances in Neural Informa-tion Processing Systems , 38. Tianrui Guan, Fuxiao Liu, Xiyang Wu, Ruiqi Xian, Zongxia Li, Xiaoyu Liu, Xijun Wang, Lichang Chen, Furong Huang, Yaser Yacoob, and 1 others. 2024. Hallusionbench: an advanced diagnostic suite for entangled language hallucination and visual illusion in large vision-language models. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition , pages 14375–14385. Qidong Huang, Xiaoyi Dong, Pan Zhang, Bin Wang, Conghui He, Jiaqi Wang, Dahua Lin, Weiming Zhang, and Nenghai Yu. 2024. Opera: Alleviating hallucination in multi-modal large language models via over-trust penalty and retrospection-allocation. In 
+
+Proceedings of the IEEE/CVF Conference on Com-puter Vision and Pattern Recognition , pages 13418– 13427. Drew A Hudson and Christopher D Manning. 2019. Gqa: A new dataset for real-world visual reasoning and compositional question answering. In Proceed-ings of the IEEE/CVF conference on computer vision and pattern recognition , pages 6700–6709. 
+
+9Fushuo Huo, Wenchao Xu, Zhong Zhang, Haozhao Wang, Zhicheng Chen, and Peilin Zhao. 2024. Self-introspective decoding: Alleviating hallucinations for large vision-language models. arXiv preprint arXiv:2408.02032 .Nicholas Jiang, Amil Dravid, Alexei Efros, and Yossi Gandelsman. 2025a. Vision transformers don’t need trained registers. Advances in neural information processing systems , 38:56557–56595. Zhangqi Jiang, Junkai Chen, Beier Zhu, Tingjin Luo, Yankun Shen, and Xu Yang. 2025b. Devils in middle layers of large vision-language models: Interpreting, detecting and mitigating object hallucinations via attention lens. In Proceedings of the IEEE/CVF Con-ference on Computer Vision and Pattern Recognition ,pages 25004–25014. Jieun Kim, Jinmyeong Kim, Yoonji Kim, and Sung-Bae Cho. 2025. Fuzzy contrastive decoding to alleviate object hallucination in large vision-language models. In Proceedings of the IEEE/CVF International Con-ference on Computer Vision , pages 20572–20581. Sihyeon Kim, Boryeong Cho, Sangmin Bae, Sumyeong Ahn, and Se-Young Yun. 2024. Vacode: Visual augmented contrastive decoding. arXiv preprint arXiv:2408.05337 .Sicong Leng, Yun Xing, Zesen Cheng, Yang Zhou, Hang Zhang, Xin Li, Deli Zhao, Shijian Lu, Chunyan Miao, and Lidong Bing. 2025. The curse of multi-modalities: Evaluating hallucinations of large mul-timodal models across language, visual, and audio. 
+
+Advances in Neural Information Processing Systems ,38. Sicong Leng, Hang Zhang, Guanzheng Chen, Xin Li, Shijian Lu, Chunyan Miao, and Lidong Bing. 2024. Mitigating object hallucinations in large vision-language models through visual contrastive decod-ing. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pages 13872–13882. Jiaming Li, Jiacheng Zhang, Zequn Jie, Lin Ma, and Guanbin Li. 2025a. Mitigating hallucination for large vision language model by inter-modality correlation calibration decoding. arXiv preprint arXiv:2501.01926 .Xiang Lisa Li, Ari Holtzman, Daniel Fried, Percy Liang, Jason Eisner, Tatsunori B Hashimoto, Luke Zettle-moyer, and Mike Lewis. 2023a. Contrastive decod-ing: Open-ended text generation as optimization. In 
+
+Proceedings of the 61st annual meeting of the associ-ation for computational linguistics (volume 1: Long papers) , pages 12286–12312. Yanwei Li, Yuechen Zhang, Chengyao Wang, Zhisheng Zhong, Yixin Chen, Ruihang Chu, Shaoteng Liu, and Jiaya Jia. 2025b. Mini-gemini: Mining the poten-tial of multi-modality vision language models. IEEE Transactions on Pattern Analysis and Machine Intel-ligence .Yifan Li, Yifan Du, Kun Zhou, Jinpeng Wang, Xin Zhao, and Ji-Rong Wen. 2023b. Evaluating object hallucination in large vision-language models. In 
+
+Proceedings of the 2023 conference on empirical methods in natural language processing , pages 292– 305. Hanchao Liu, Wenyuan Xue, Yifei Chen, Dapeng Chen, Xiutian Zhao, Ke Wang, Liping Hou, Rongjun Li, and Wei Peng. 2024a. A survey on hallucination in large vision-language models. arXiv preprint arXiv:2402.00253 .Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee. 2024b. Improved baselines with visual instruc-tion tuning. In Proceedings of the IEEE/CVF con-ference on computer vision and pattern recognition ,pages 26296–26306. Haotian Liu, Chunyuan Li, Yuheng Li, Bo Li, Yuanhan Zhang, Sheng Shen, and Yong Jae Lee. 2024c. Lla-vanext: Improved reasoning, ocr, and world knowl-edge. Yuan Liu, Haodong Duan, Yuanhan Zhang, Bo Li, Songyang Zhang, Wangbo Zhao, Yike Yuan, Jiaqi Wang, Conghui He, Ziwei Liu, and 1 others. 2024d. Mmbench: Is your multi-modal model an all-around player? In European conference on computer vision ,pages 216–233. Springer. Pan Lu, Swaroop Mishra, Tanglin Xia, Liang Qiu, Kai-Wei Chang, Song-Chun Zhu, Oyvind Tafjord, Peter Clark, and Ashwin Kalyan. 2022. Learn to explain: Multimodal reasoning via thought chains for science question answering. Advances in neural information processing systems , 35:2507–2521. Avshalom Manevich and Reut Tsarfaty. 2024. Mitigat-ing hallucinations in large vision-language models (lvlms) via language-contrastive decoding (lcd). In 
+
+Findings of the Association for Computational Lin-guistics: ACL 2024 , pages 6008–6022. Sean O’Brien and Mike Lewis. 2023. Contrastive de-coding improves reasoning in large language models. 
+
+arXiv preprint arXiv:2309.09117 .Maxime Oquab, Timothée Darcet, Théo Moutakanni, Huy Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fer-nandez, Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, and 1 others. 2023. Dinov2: Learning robust visual features without supervision. arXiv preprint arXiv:2304.07193 .Nhi Pham and Michael Schott. 2024. H-pope: Hierar-chical polling-based probing evaluation of hallucina-tions in large vision-language models. arXiv preprint arXiv:2411.04077 .Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sas-try, Amanda Askell, Pamela Mishkin, Jack Clark, and 1 others. 2021. Learning transferable visual models from natural language supervision. In International conference on machine learning , pages 8748–8763. PmLR. 
+
+10 Anna Rohrbach, Lisa Anne Hendricks, Kaylee Burns, Trevor Darrell, and Kate Saenko. 2018. Object hallu-cination in image captioning. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 4035–4045. Amanpreet Singh, Vivek Natarajan, Meet Shah, Yu Jiang, Xinlei Chen, Dhruv Batra, Devi Parikh, and Marcus Rohrbach. 2019. Towards vqa models that can read. In Proceedings of the IEEE/CVF con-ference on computer vision and pattern recognition ,pages 8317–8326. Mingjie Sun, Xinlei Chen, J Zico Kolter, and Zhuang Liu. 2024. Massive activations in large language models. arXiv preprint arXiv:2402.17762 .Wei Suo, Lijun Zhang, Mengyang Sun, Lin Yuanbo Wu, Peng Wang, and Yanning Zhang. 2025. Oc-topus: Alleviating hallucination via dynamic con-trastive decoding. In Proceedings of the Computer Vision and Pattern Recognition Conference , pages 29904–29914. Barrett Tang, Zile Huang, Chengzhi Liu, Qiang Sun, Harry Yang, and Ser-Nam Lim. 2025. Intervening anchor token: Decoding strategy in alleviating hal-lucinations for mllms. In International Conference on Learning Representations , volume 2025, pages 27745–27776. Bingkui Tong, Jiaer Xia, and Kaiyang Zhou. 2025. Mitigating hallucination in multimodal llms with layer contrastive decoding. arXiv preprint arXiv:2509.25177 .Junyang Wang, Yuhang Wang, Guohai Xu, Jing Zhang, Yukai Gu, Haitao Jia, Jiaqi Wang, Haiyang Xu, Ming Yan, Ji Zhang, and 1 others. 2023. Amber: An llm-free multi-dimensional benchmark for mllms halluci-nation evaluation. arXiv preprint arXiv:2311.07397 .Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhi-hao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, and 1 others. 2024a. Qwen2-vl: Enhancing vision-language model’s perception of the world at any resolution. arXiv preprint arXiv:2409.12191 .Xintong Wang, Jingheng Pan, Liang Ding, and Chris Biemann. 2024b. Mitigating hallucinations in large vision-language models with instruction contrastive decoding. In Findings of the Association for Compu-tational Linguistics: ACL 2024 , pages 15840–15853. Sangmin Woo, Donguk Kim, Jaehyuk Jang, Yubin Choi, and Changick Kim. 2025. Don’t miss the forest for the trees: Attentional vision calibration for large vi-sion language models. In Findings of the Association for Computational Linguistics: ACL 2025 , pages 1927–1951. Jiulong Wu, Yucheng Shen, Haixin Sun, and Min Cao. 2025. Mitigating hallucinations in large vision-language models via dual contrastive decoding. In 
+
+Proceedings of the 7th ACM International Confer-ence on Multimedia in Asia , pages 1–8. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations , volume 2024, pages 21875–21895. Dingchen Yang, Bowen Cao, Guang Chen, and Changjun Jiang. 2024. Pensieve: Retrospect-then-compare mitigates visual hallucination. arXiv preprint arXiv:2403.14401 .Tianyu Yu, Yuan Yao, Haoye Zhang, Taiwen He, Yifeng Han, Ganqu Cui, Jinyi Hu, Zhiyuan Liu, Hai-Tao Zheng, Maosong Sun, and 1 others. 2024. Rlhf-v: Towards trustworthy mllms via behavior alignment from fine-grained correctional human feedback. In 
+
+Proceedings of the IEEE/CVF Conference on Com-puter Vision and Pattern Recognition , pages 13807– 13816. Xiaofeng Zhang, Yihao Quan, Chen Shen, Chaochen Gu, Xiaosong Yuan, Shaotian Yan, Jiawei Cao, Hao Cheng, Kaijie Wu, and Jieping Ye. 2025a. Shal-low focus, deep fixes: Enhancing shallow layers vi-sion attention sinks to alleviate hallucination in lvlms. In Proceedings of the 2025 Conference on Empiri-cal Methods in Natural Language Processing , pages 3512–3534. Yuhui Zhang, Alyssa Unell, Xiaohan Wang, Dhruba Ghosh, Yuchang Su, Ludwig Schmidt, and Serena Yeung-Levy. 2024. Why are visually-grounded lan-guage models bad at image classification? Advances in Neural Information Processing Systems , 37:51727– 51753. Zhi Zhang, Srishti Yadav, Fengze Han, and Ekaterina Shutova. 2025b. Cross-modal information flow in multimodal large language models. In Proceedings of the Computer Vision and Pattern Recognition Con-ference , pages 19781–19791. Jianfei Zhao, Feng Zhang, Xin Sun, Lingxing Kong, Zhixing Tan, and Chong Feng. 2025. Cross-image contrastive decoding: Precise, lossless suppression of language priors in large vision-language models. 
+
+arXiv preprint arXiv:2505.10634 .Deyao Zhu, Xiaoqian Shen, Xiang Li, Mohamed El-hoseiny, and 1 others. 2024. Minigpt-4: Enhanc-ing vision-language understanding with advanced large language models. In International Conference on Learning Representations , volume 2024, pages 18378–18394. Lanyun Zhu, Deyi Ji, Tianrun Chen, Peng Xu, Jieping Ye, and Jun Liu. 2025. Ibd: Alleviating halluci-nations in large vision-language models via image-biased decoding. In Proceedings of the Computer Vision and Pattern Recognition Conference , pages 1624–1633. 
+
+11 A Appendix 
+
+Overview. This appendix provides additional analyses and implementation details for YARD .We first report the inference-time comparison A.1 to analyze the hallucination–efficiency trade-off, followed by the implementation details A.2 used across experiments. We then provide distribu-tional analyses of clean and degraded branches, including both aggregate divergence metrics A.3 and a top-token case study A.8, to further explain why register-conditioned feature-level degradation forms a more suitable degraded branch than pixel-level or text-only alternatives. Next, we examine the sensitivity of YARD to the number of regis-ter tokens and the contrastive strength α A.4. We also evaluate YARD on general multimodal bench-marks A.5 to verify that hallucination mitigation is not achieved by sacrificing general visual un-derstanding. Finally, we describe the evaluation benchmarks A.6, present a detailed formulation of YARD and contrastive decoding A.7, and provide additional qualitative examples. 
+
+A.1 Efficiency Analysis Baseline VCD ICD Ours 
+
+> Method
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> Inference Time (IT)  IT
+> CHi
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> 12
+> CHi
+
+Figure 5: Comparison of inference time and halluci-nation rate across decoding methods. YARD achieves lower CH i with only a modest inference overhead com-pared with the baseline, while prior contrastive decoding methods introduce substantially higher cost or halluci-nation. 
+
+We further analyze the inference cost of YARD compared with representative decoding-time hallu-cination mitigation methods. Figure 5 reports in-ference time (IT) and CH i on LLaVA-1.5-7B (Liu et al., 2024b). The vanilla baseline requires 2.6 sec-onds and obtains a CH i of 10.5. VCD (Leng et al., 2024) reduces CH i to 8.3, but requires an additional degraded forward pass, increasing inference time to 5.1 seconds. ICD (Wang et al., 2024b) further reduces CH i to 7.4, but still incurs a substantial inference overhead, requiring 4.3 seconds. In contrast, YARD achieves the lowest CH i of 6.5 with only a modest increase in inference time from 2.6 to 3.2 seconds. This efficiency comes from the Y-Architecture design: the clean and de-graded branches share the shallow decoder lay-ers, and the degraded branch is only computed after the middle-layer split. Thus, YARD provides a stronger hallucination–efficiency trade-off than prior contrastive decoding methods that rely on largely separate degraded computation. 
+
+A.2 Implementation Details 
+
+YARD is applied in a fully training-free manner without parameter updates, additional supervision, or external verifiers. Unless otherwise specified, we construct the degraded branch at approximately one-third of the LLM decoder depth, following our observation that text-to-vision grounding begins to emerge in the middle layers. For LLaVA-1.5-7B(Liu et al., 2024b), this corresponds to branching after the 10-th decoder layer. For other backbones, we use the same one-third-depth rule to select the branching layer. We use 1 register token to construct the degraded visual condition in all experiments. The contrastive strength is set to α = 1 by default. These hyperpa-rameters are kept fixed across benchmarks unless explicitly stated otherwise. All evaluations are con-ducted with the original model weights and the default decoding settings of each backbone. All reported results are consistently reproduced across multiple independent runs, indicating that the ob-served improvements are stable rather than inciden-tal. 
+
+Table 6: Distributional gap between clean and degraded branches. Top-1 Match measures whether the two branches predict the same top token. KL, symmetric KL, JS, and TV measure distributional divergence be-tween clean and degraded output distributions.                     
+
+> Method Top-1 Match ↓KL ↑Sym. KL ↑JS ↑TV ↑
+> Pixel-level 0.9233 0.0617 0.1246 0.0130 0.0682 Ours-Reg. 0.7121 0.7380 1.6726 0.1197 0.2740 Text-only 0.6675 0.8667 2.0323 0.1406 0.3067
+
+A.3 Distributional Analysis of Clean and Degraded Branches 
+
+To further understand the behavior of different degraded-branch constructions, we compare the output distributions of the clean and degraded 12 branches in Table 6. Top-1 Match measures how often the two branches predict the same most likely token, while KL, symmetric KL, JS, and TV quan-tify the distributional discrepancy between the two output distributions. We use these metrics as di-agnostic tools rather than direct performance mea-sures: an effective degraded branch should be dif-ferent enough from the clean branch to expose hallucination-prone predictions, but should not be so distant that it becomes unrelated to the current image. Pixel-level degradation remains too close to the clean branch. It obtains a high Top-1 Match of 0.9233 and very small divergence values across KL, JS, and TV. This suggests that the pixel-level degraded branch still preserves substantial nor-mal visual semantics and correct object evidence from the clean branch. Consequently, when the clean-logit anchoring term is removed in the w/o 
+
+α stress test, direct subtraction may suppress not only hallucination-related logits but also visually grounded predictions, leading to a large increase in CH s and CH i in Table 1. Text-only degradation exhibits the opposite be-havior. It has the lowest Top-1 Match and the largest distributional divergences, indicating that its degraded logits are much farther from the clean branch. Although this strong shift can induce hallucination-prone predictions, the resulting dis-tribution is largely image-agnostic and dominated by language priors. Therefore, it is less aligned with image-specific hallucination components in the clean branch and does not faithfully model the case where the model has seen the image but fails to use local visual evidence correctly. Feature-level degradation with register tokens yields a more balanced distributional gap. Com-pared with pixel-level degradation, it produces a much larger discrepancy from the clean branch, suggesting that local grounding has been effectively weakened. Compared with text-only degradation, it remains closer to the clean branch, indicating that it still preserves image-level semantics rather than collapsing into a pure language prior. This intermediate behavior matches our intended de-graded condition: image-aware but locally under-grounded. Together with the w/o α stress test, these results support that register-conditioned feature-level degradation provides a more targeted con-trastive signal for suppressing visually unsupported predictions.                              
+
+> Table 7: Sensitivity analysis on the number of register tokens. The shaded column denotes the default setting used in our experiments. Higher F1 is better, while lower CH sand CH iindicate fewer hallucinations.
+> # Reg. Tokens 124816 32 F1 ↑85.9 86.0 85.9 86.1 86.0 85.7 CH s↓19.7 20.3 21.7 20.7 19.3 21.3 CH i↓6.5 6.5 7.0 7.1 6.2 6.7
+
+A.4 Parameter Sensitivity Analysis Number of register tokens. Table 7 studies the effect of using different numbers of register tokens in the degraded branch. Overall, YARD is rela-tively robust to this hyperparameter: across 1 to 32 register tokens, POPE F1(Li et al., 2023b) remains within a narrow range from 85.7 to 86.1, while CH s and CH i also remain consistently low. Using too few register tokens may provide insufficient capacity to represent global image-level semantics, whereas using too many registers can introduce redundant degraded visual conditions and slightly weaken the contrastive signal. We choose 1 register token as the default setting.                         
+
+> Table 8: Sensitivity analysis on the contrastive strength
+> α. The shaded column denotes the default setting used in our experiments. Higher F1 is better, while lower CH sand CH iindicate fewer hallucinations.
+> αw/o 0.25 0.5 0.75 1.0 F1 ↑85.0 85.2 85.5 85.9 85.9
+> CH s↓21.0 20.3 17.7 18.0 19.7 CH i↓7.0 7.0 6.6 5.9 6.5
+
+Contrastive strength α. Table 8 analyzes the sensitivity of YARD to the contrastive strength α.As α increases, the degraded-branch signal is more strongly subtracted, which generally improves both POPE F1(Li et al., 2023b) and hallucination met-rics. For example, increasing α from 0 to 1.0 im-proves POPE F1(Li et al., 2023b) from 85.0 to 85.9 and reduces CH i from 7.0 to 6.5. We use α = 1 .0 as the default setting, as it offers a stable trade-off between discriminative accuracy and hallucination reduction. 
+
+A.5 General Multimodal Benchmark Results 
+
+Hallucination mitigation methods may reduce un-supported generations by making the model overly conservative or by weakening its general visual un-derstanding ability. To examine whether YARD 13 Table 9: General multimodal benchmark results on LLaVA-1.5-7B. YARD preserves general visual under-standing performance while improving hallucination robustness. Higher values indicate better performance.                   
+
+> Benchmark Baseline YARD ∆
+> GQA 61.9 62.1 +0.2 MMBench 64.7 64.9 +0.2 TextVQA 58.2 58.2 0.0 SQA I69.5 69.6 +0.1 MME 1594 1741 +147
+
+introduces such a trade-off, we additionally eval-uate it on standard multimodal benchmarks that are not specifically designed for hallucination mea-surement. These benchmarks cover different as-pects of general LVLM capability, including visual question answering, text-rich visual understanding, science question answering, and comprehensive multimodal perception. As shown in Table 9, YARD largely preserves the general multimodal performance of the base LLaVA-1.5-7B(Liu et al., 2024b) model. On GQA(Hudson and Manning, 2019), MMBench(Liu et al., 2024d), and SQA I, YARD achieves small but consistent improvements over the baseline. On TextVQA(Singh et al., 2019), where fine-grained text recognition and visual-linguistic alignment are important, YARD maintains the same performance as the baseline. These results suggest that the pro-posed register-conditioned degraded branch does not simply suppress visual information or make the model less responsive to image content. Notably, YARD improves the MME(Fu et al., 2025) score from 1594 to 1741. Since MME evalu-ates a broad range of perception and cognition abil-ities, this improvement indicates that YARD can enhance hallucination robustness while preserving, and in some cases improving, general visual per-ception. Together with the hallucination-specific results in the main paper, these findings suggest that YARD provides a targeted contrastive signal: it sup-presses visually unsupported predictions without broadly degrading the model’s multimodal under-standing ability. 
+
+A.6 Benchmark Details AMBER(Wang et al., 2023). AMBER is a hallucination-oriented benchmark for evaluating both generative and discriminative hallucination in LVLMs. For generative evaluation, it reports hallucination-related metrics such as CH, Hal., and Cog., together with coverage, which reflects whether the model preserves sufficient visual con-tent. For discriminative evaluation, it measures whether the model correctly judges visual content. We report both generative metrics and discrimina-tion accuracy/F1. 
+
+Object HalBench / CHAIR(Yu et al., 2024). 
+
+Object HalBench evaluates object hallucination in image captioning and open-ended generation. It measures whether generated object mentions are supported by the image. We report CH s and CH i, where lower values indicate fewer halluci-nated objects at the sentence and instance levels. This benchmark directly reflects whether YARD suppresses visually unsupported object predictions. 
+
+MME-Hallucination(Fu et al., 2025). MME-Hallucination evaluates fine-grained hallucination-related perception abilities, including object exis-tence, count, position, and color. These categories test whether the model can produce visually faith-ful responses under different grounding require-ments. We report each subcategory score and the total score, where higher values indicate better per-formance. 
+
+POPE-MSCOCO(Li et al., 2023b). POPE-MSCOCO evaluates object hallucination through binary object-existence questions. It contains ran-dom, popular, and adversarial sampling settings, where the adversarial split includes objects more likely to trigger language-prior hallucination. We report accuracy and F1 for each split and the overall result. 
+
+GQA(Hudson and Manning, 2019). GQA is a visual question answering benchmark emphasizing real-world visual reasoning and compositional un-derstanding. It covers objects, attributes, spatial relations, and multi-step reasoning. We use GQA to evaluate whether YARD preserves general visual reasoning beyond hallucination-specific settings. 
+
+MMBench(Liu et al., 2024d). MMBench eval-uates general multimodal understanding across perception and reasoning categories. It contains multiple-choice questions covering diverse visual and linguistic abilities. We report overall accuracy to assess broad multimodal capability. 
+
+TextVQA(Singh et al., 2019). TextVQA evalu-ates visual question answering over text-rich im-ages. It requires recognizing and reasoning over 14 scene text, making it sensitive to fine-grained visual-text alignment. We use it to examine whether YARD preserves text-oriented visual un-derstanding. 
+
+ScienceQA-IMG(Lu et al., 2022). ScienceQA-IMG is the image subset of ScienceQA. It covers science questions requiring both visual understand-ing and textual reasoning. We report accuracy on this subset to evaluate multimodal reasoning in sci-entific contexts. 
+
+MME(Fu et al., 2025). MME is a comprehensive benchmark for perceptual and cognitive abilities of multimodal large language models. It covers object recognition, counting, spatial reasoning, color per-ception, OCR, and commonsense reasoning. We re-port the total MME score to assess whether YARD preserves general multimodal perception while mit-igating hallucinations. 
+
+A.7 Detailed Formulation of YARD 
+
+This section provides a more detailed formulation of YARD. Given an input image I and a text query 
+
+x, the vision encoder first produces a sequence of patch-level visual tokens 
+
+Z = [ z1, . . . , zN ] ∈ RN ×dv , (9) where each zj corresponds to a local image patch. The visual tokens are then mapped into the LLM hidden space through the multimodal projector 
+
+ϕ(·):
+
+˜Z = ϕ(Z) ∈ RN ×d. (10) For simplicity, we use Z to denote the projected visual tokens in the following derivation. 
+
+Training-free register construction. YARD constructs register tokens in a training-free man-ner. Following test-time register construction, we append M non-image register tokens to the visual sequence: 
+
+R(0) = [ r(0) 1 , . . . , r(0)  
+
+> M
+
+] ∈ RM ×d. (11) These tokens are not associated with any spatial image patch. Instead, they are used to absorb global image-level information that would otherwise be stored in high-norm outlier patch tokens. Let Kreg denote the set of register neurons identi-fied in the vision encoder. For a selected MLP layer, let aj,k denote the activation of neuron k on patch token j. For each register neuron k ∈ K reg , we redirect the maximum anomalous activation from patch tokens to the appended register token: 
+
+ar,k ← max  
+
+> 1≤j≤N
+
+aj,k ,aj,k ← 0, ∀j ∈ { 1, . . . , N }.
+
+(12) This operation shifts high-norm activation away from image patch tokens and into the register to-kens, yielding register representations that preserve coarse image-level semantics while lacking reliable patch-level correspondence. The final LLM input sequence is therefore 
+
+X(0) = [ Z; R; T], (13) where T = [ t1, . . . , tL] denotes the text-token se-quence. 
+
+Shared-prefix decoding. Let the LLM decoder contain D layers, denoted as 
+
+F1: D = FD ◦ FD−1 ◦ · · · ◦ F1. (14) YARD chooses a branching layer K around the middle decoder layers, where text-to-vision ground-ing begins to emerge. Before branching, the clean and degraded branches share the same computa-tion: 
+
+H(K) = F1: K (X(0) ) = [ Z(K); R(K); T(K)].
+
+(15) This shared prefix serves two purposes. First, it allows both branches to inherit the same early mul-timodal context. Second, it avoids recomputing the shallow decoder layers, reducing the overhead compared with input-level contrastive decoding. 
+
+Y-Architecture branch construction. At layer 
+
+K, YARD splits the computation into a clean branch and a degraded branch: 
+
+H(K) 
+
+> c
+
+= [ Z(K); R(K); T(K)], (16) 
+
+H(K) 
+
+> d
+
+= [ R(K); T(K)]. (17) The clean branch retains the original patch-level visual tokens Z(K) and therefore preserves access to fine-grained local visual evidence. In contrast, the degraded branch removes Z(K) and relies only on register tokens R(K) as the visual condition. Since register tokens contain global image seman-tics but lack stable local correspondence, the de-graded branch remains image-aware while being locally under-grounded. 15 The two branches are then forwarded through the remaining decoder layers: 
+
+H(D) 
+
+> c
+
+= FK+1: D
+
+
+
+H(K)
+
+> c
+
+
+
+,
+
+H(D) 
+
+> d
+
+= FK+1: D
+
+
+
+H(K)
+
+> d
+
+
+
+.
+
+(18) Let h(D) 
+
+> c,i
+
+and h(D) 
+
+> d,i
+
+denote the hidden states used for next-token prediction at decoding step i in the clean and degraded branches. The corresponding vocabulary-level logits are 
+
+ℓci = gLM (h(D) 
+
+> c,i
+
+), ℓdi = gLM (h(D) 
+
+> d,i
+
+), (19) where gLM (·) is the language modeling head. 
+
+Register-conditioned contrastive decoding. 
+
+YARD combines the clean and degraded logits using the standard contrastive decoding form: 
+
+ℓyard  
+
+> i
+
+= (1 + α)ℓci − αℓdi , (20) where α controls the strength of contrastive subtrac-tion. The next-token distribution is then computed as 
+
+pyard (yi | I, x, y <i ) = softmax 
+
+
+
+ℓyard 
+
+> i
+
+
+
+> yi
+
+. (21) Following common contrastive decoding prac-tice, we apply a clean-branch plausibility constraint to avoid promoting tokens that are unlikely under the clean branch. Let 
+
+pc(y) = softmax( ℓci )y (22) be the clean-branch probability for token y. We define the candidate set 
+
+Vi =
+
+
+
+y ∈ V | pc(y) ≥ τ max  
+
+> y′∈V
+
+pc(y′)
+
+
+
+, (23) where τ is a plausibility threshold and V is the vocabulary. The final distribution is restricted to 
+
+Vi:
+
+pyard (yi) = exp( ℓyard  
+
+> i,y i
+
+)I[yi ∈ V i]
+
+P 
+
+> y∈V i
+
+exp( ℓyard  
+
+> i,y
+
+) . (24) 
+
+Dual degradation effect. YARD creates a dual degradation mechanism. The first degradation comes from the branching position. Since the de-graded branch splits at layer K, it only inherits early-to-middle multimodal representations: 
+
+H(K) = [ Z(K); R(K); T(K)], (25) where text-to-vision grounding has begun to emerge but fine-grained local evidence has not yet been fully integrated into text-side representations. The second degradation comes from the visual con-dition after branching: 
+
+[Z(K); R(K)] −→ [R(K)]. (26) This removes patch-level local evidence while re-taining register-level global semantics. As a result, the degraded logits tend to emphasize predictions that are plausible under coarse image semantics but insufficiently supported by local visual ground-ing. Contrastive subtraction then suppresses such predictions: 
+
+ℓyard  
+
+> i,y
+
+= ℓci,y + α
+
+
+
+ℓci,y − ℓdi,y 
+
+
+
+. (27) If a token y is overly favored by the locally under-grounded degraded branch, i.e., 
+
+ℓdi,y ≫ ℓci,y , (28) its final logit is reduced. This is the mechanism by which YARD suppresses language-plausible but visually unsupported hallucination-prone tokens. 
+
+Computational advantage. Compared with input-level contrastive decoding, which requires two largely independent forward passes, 
+
+Cost input -CD ≈ 2 · Cost( F1: D), (29) YARD shares the prefix computation and only du-plicates the remaining layers: 
+
+Cost YARD ≈ Cost( F1: K )+ Cost( FK+1: D; |Z| + |R| + |T|)+ Cost( FK+1: D; |R| + |T|) .
+
+(30) Since the degraded branch removes the N patch-level visual tokens after layer K, its remaining sequence length is shorter: 
+
+|R| + |T| ≪ | Z| + |R| + |T|. (31) Thus, YARD improves efficiency by both shar-ing shallow-layer computation and reducing the sequence length of the degraded branch. 
+
+Contrastive decoding. Contrastive decoding is an inference-time strategy for mitigating hallucina-tions by contrasting the model prediction under a clean visual condition with that under a degraded condition. Given an image v, a text query t, and 16 previously generated tokens y<i at decoding step i,an LVLM produces vocabulary-level logits condi-tioned on the original multimodal input: 
+
+ℓci = fθ(v, t, y <i ) ∈ R|V| , (32) where V denotes the vocabulary and the superscript 
+
+c indicates the clean branch. The corresponding clean next-token distribution is 
+
+pci (y) = exp( ℓci,y )
+
+P 
+
+> y′∈V
+
+exp( ℓci,y ′ ) . (33) To obtain a hallucination-prone reference, con-trastive decoding further constructs a degraded con-dition vd and computes the degraded logits: 
+
+ℓdi = fθ(vd, t, y <i ) ∈ R|V| , (34) with the corresponding degraded distribution 
+
+pdi (y) = exp( ℓdi,y )
+
+P 
+
+> y′∈V
+
+exp( ℓdi,y ′ ) . (35) The degraded branch is expected to assign higher probability to tokens that are plausible under weak-ened visual grounding, and therefore serves as a reference for identifying hallucination-prone pre-dictions. The contrastive logits are then computed by sub-tracting the degraded logits from the clean logits: 
+
+ℓcd i = (1 + α)ℓci − αℓdi , (36) where α ≥ 0 controls the contrastive strength. Equivalently, for each candidate token y ∈ V , the contrastive score is 
+
+si(y) = (1 + α)ℓci,y − αℓdi,y . (37) The next-token distribution is obtained by applying softmax to the contrastive logits: 
+
+pcd (yi = y | v, v d, t, y <i ) = exp( si(y)) 
+
+P 
+
+> y′∈V
+
+exp( si(y′)) .
+
+(38) The next token is then selected as 
+
+yi = arg max  
+
+> y∈V
+
+pcd (y | v, v d, t, y <i ), (39) or sampled from pcd depending on the decoding strategy. In practice, contrastive decoding is often com-bined with a clean-branch plausibility constraint to avoid over-promoting tokens that receive very low probability under the original visual input. Let 
+
+β ∈ [0 , 1] denote a plausibility threshold. The candidate set can be defined as 
+
+Vhead  
+
+> i
+
+=
+
+
+
+y ∈ V | pci (y) ≥ β max  
+
+> y′∈V
+
+pci (y′)
+
+
+
+.
+
+(40) The final decoding decision is then restricted to this candidate set: 
+
+yi = arg max 
+
+> y∈V head
+> i
+
+si(y). (41) This constraint ensures that the contrastive objec-tive mainly suppresses tokens over-favored by the degraded branch, rather than introducing unlikely tokens that are not supported by the clean branch. Intuitively, the clean logits contain both visu-ally grounded predictions and hallucination-related components, while the degraded logits are intended to emphasize predictions that remain plausible when visual grounding is weakened. By subtract-ing the degraded logits, contrastive decoding sup-presses tokens that rely more on priors or insuffi-cient grounding than on reliable visual evidence. Conventional input-level methods construct vd by perturbing the image or instruction, e.g., through image noise, masking, or instruction perturbation. Such methods typically require an additional de-graded forward pass: 
+
+ℓci = fθ(v, t, y <i ), ℓdi = fθ(vd, t, y <i ), (42) which doubles a large portion of the inference com-putation. In contrast, our method constructs the degraded branch inside the decoder, allowing the clean and degraded branches to share early-layer computation while still producing contrastive logits for hallucination mitigation. 
+
+A.8 Top-Token Case Study of Degraded Branches 
+
+To provide a more intuitive view of how different degraded branches behave during decoding, we present a next-token case study in Figure 6. This example compares the clean branch with three de-graded branches at the same decoding step, where the baseline response eventually hallucinates the object chair . The prefix before prediction is “The image depicts a well-lit workstation with a black”, and we inspect the top-5 next-token predictions from each branch. The pixel-level degraded branch produces top predictions that are highly similar to the clean 17 Input image                                      
+
+> Hallucinated object: chair
+> Prefix: “The image depicts a well-lit workstation with a black”
+> Next baseline token: office
+> Top-5 next-token predictions
+> Branch Top-5 next tokens
+> Clean Sony ,computer ,and ,keyboard ,pair
+> Pixel-level deg. Sony ,and ,computer ,pair ,head
+> Ours-register deg. computer ,and ,des ,chair ,keyboard
+> Text-only deg. des ,and ,computer ,background ,chair
+> Distributional gap to the clean branch
+> Branch vs. clean Top-10 overlap SymKL
+> Pixel-level deg. 0.80 0.22 Ours-register deg. 0.60 7.80 Text-only deg. 0.40 9.20 Pixel-level degradation largely copies the clean distribution. Text-only degradation drifts toward generic language-prior tokens such as background . In contrast, the register-based branch remains scene-aware by retaining tokens such as computer and keyboard , while exposing the hallucination-prone token chair .
+
+Figure 6: Next-token case study comparing clean and degraded branches. Pixel-level degradation stays close to the clean visual-context distribution, while text-only degradation moves toward image-agnostic language priors. The register-based degraded branch remains related to the visual scene while surfacing the hallucination-prone token 
+
+chair , illustrating its image-aware but locally under-grounded behavior. 
+
+branch. For example, both branches assign high ranks to scene-relevant tokens such as Sony , com-puter , and keyboard , and their Top-10 overlap re-mains high. This suggests that pixel-level degra-dation does not sufficiently separate the degraded branch from the clean visual-context distribution. As a result, its degraded logits may still contain sub-stantial correct visual evidence, making contrastive subtraction less precise. The text-only degraded branch shows the oppo-site behavior. It moves farther away from the clean branch and surfaces the hallucination-prone token 
+
+chair , but it also drifts toward generic language-prior completions such as background . Since this branch is no longer conditioned on the image, its top predictions are less aligned with the current visual scene. Thus, although text-only degradation can expose hallucination-prone tokens, the result-ing contrastive signal is overly image-agnostic. In contrast, the register-based degraded branch provides a more balanced behavior. It still pre-serves image-related tokens such as computer and 
+
+keyboard , showing that it remains semantically con-nected to the visual scene. Meanwhile, it also exposes the hallucination-prone token chair , in-dicating that local visual grounding has been weak-ened. This supports our motivation for feature-level degradation: the degraded branch should be image-aware but locally under-grounded, rather than ei-ther copying the clean distribution or collapsing into a text-only prior. 
+
+Potential Risks. YARD is designed to mitigate hallucinations in LVLMs, but it does not eliminate all visually unsupported generations. In safety-critical applications, such as medical, legal, or au-tonomous decision-making scenarios, its outputs should still be verified by humans or external tools. In addition, because YARD modifies decoding be-havior without retraining, its effectiveness may vary across model architectures, prompts, and vi-sual domains. A potential risk is over-reliance on reduced hallucination rates as a guarantee of fac-tual correctness. We therefore recommend using YARD as a complementary inference-time miti-gation method rather than as a standalone safety mechanism. 
+
+B Implementation Details of Training-Free Register Construction 
+
+Register construction on LLaVA-v1.5. In our main LLaVA-v1.5 setting, we do not train new reg-ister tokens. Instead, we construct them on the fly inside the CLIP ViT visual tower using forward hooks. During the register discovery stage, we use register_discovery_max_images=128 cal-ibration images. For each image, we append 
+
+num_register_tokens= M zero-valued register slots to the end of the original visual token se-quence, and register forward hooks on the mlp.fc1 
+
+18 module of each ViT layer to record the intermediate activations. To identify register-related dimensions, we score neurons by averaging the absolute fc1 activa-tions at anomalous token positions across layers and calibration images. We then select the top 
+
+register_topk_neurons=10 globally activated neurons and store them in a neuron cache. This cache is computed once and reused during infer-ence. At inference time, we load the cached neu-ron indices and again append zero register slots to the visual token sequence. In the corre-sponding fc1 hooks, we apply sink shift with 
+
+register_intervention_scale=1.0 : for the se-lected neuron dimensions, the strongest sink activa-tions are redirected to the appended register slots, while ordinary patch tokens keep their original val-ues under register_normal_values=same . The resulting register tokens are then passed through the multimodal projector to align them with the LLM hidden dimension. For contrastive decoding, we use 
+
+merge_pool_mode=register to construct the degraded visual condition from the projected register representations. The clean branch retains the full set of original visual tokens. The two branches share the shallow LLM decoder computation and split at split_layer=10 ; after branching, the degraded branch is forwarded for num_degraded_layers=22 layers. This implementation constructs the degraded branch without retraining and avoids a complete second forward pass. 19 Input image Baseline 
+
+The image features a skateboard next to a tree, with some leaves covering a portion of the snowboard. The skateboard is mostly located on top of a fence, and the tree branches reach towards it. The fence beneath the skateboard also has a camera placed at the bottom of the image. 
+
+YARD 
+
+The image features a snowboard leaning against a fence with green leaves in the background. The snowboard is quite large and is resting on a wooden fence. It has a blue design and is placed on its side, making it stand out against the green foliage. The fence is visible in the background, partially covered by leaves, while the snowboard remains the main object in the scene. 
+
+Figure 7: Qualitative comparison between the baseline and YARD. The baseline repeatedly hallucinates skateboard 
+
+and introduces an unsupported camera , while YARD correctly describes the visible snowboard and avoids unsup-ported objects. Hallucinated words are highlighted in red. 
+
+Input image Baseline 
+
+The scene depicts a large, peaceful, grassy field where a mixed herd of sheep and baby lambs is grazing. There are people observing the flock from a nearby bush or landscaped position. The sheep are scattered throughout the field, with some lambs huddled together while others graze farther across the hillside. 
+
+YARD 
+
+The image depicts a peaceful scene of several sheep grazing on a lush green hillside. There are ten sheep in total, with some standing and others lying down on the grassy field. The sheep are scattered throughout the field, some closer to the foreground, while others are further in the background. The overall scene is calm and natural, with the green hillside providing a simple backdrop for the flock. 
+
+Figure 8: Qualitative comparison between the baseline and YARD. The baseline hallucinates unsupported people ,while YARD focuses on visually grounded content and correctly describes the flock of sheep on the grassy hillside. Hallucinated words are highlighted in red. 
+
+Input image Baseline 
+
+The image features a man skillfully riding a board in ocean waves while holding onto a sail, demonstrating his expertise in kite surfing. He is wearing a wetsuit and is completely engaged in the thrilling watersport. The kite is visible in the wind’s motion, providing power for the rider as he moves quickly across the water. 
+
+YARD 
+
+The image captures a man skillfully windsurfing on a body of water. He is wearing a black wet suit and riding a red and black wind surfboard. The windsurfer is leaning back as he enjoys the thrill of the sport, with the sail attached to the board clearly visible and helping propel him across the water. 
+
+Figure 9: Qualitative comparison between the baseline and YARD. The baseline hallucinates an unsupported kite ,while YARD correctly focuses on the visually grounded windsurfing scene, including the person, the sail, and the surfboard. Hallucinated words are highlighted in red. 
+
+20 Input image 
+
+Baseline 
+
+The image features a bright blue passenger train traveling near a forest. It occupies almost the entire visible width of the scene, running parallel to the tracks near the road sign. There are six visible cars on the train, each with a clear blue color and easy to distinguish by their alignment. The train is moving steadily along the railway, with the surrounding greenery providing a natural backdrop. 
+
+YARD 
+
+The image features a long blue passenger train traveling on the tracks. The train is stretched out across the scene, covering a significant portion of the image. The tracks appear to be made of metal, and the train is moving along them in a straight line. In addition to the train, there is surrounding greenery and a signpost visible near the railway, completing the outdoor scene. 
+
+Figure 10: Qualitative comparison between the baseline and YARD. The baseline hallucinates unsupported cars 
+
+as separate objects, while YARD consistently focuses on the visually grounded train and its surrounding scene. Hallucinated words are highlighted in red. 
+
+Input image Baseline 
+
+The scene displays a small dog sitting inside a wire basket placed on a transport motorcycle. The dog appears to be comfortable in its enclosed space, offering a sense of security. Behind the motorcycle, there is a trash can with a cardboard box on it. Near the edge of the image, additional street-side objects can also be seen. 
+
+YARD 
+
+The scene features a dog sitting inside a wire basket attached to the front of a blue bicycle. The dog appears to be a black and white terrier, comfortably occupying the basket. The bicycle is parked next to a garbage can, which is located on the right side of the image. A bench and a car can also be seen in the surrounding street scene. 
+
+Figure 11: Qualitative comparison between the baseline and YARD. The baseline hallucinates an unsupported 
+
+motorcycle , while YARD correctly identifies the bicycle and preserves other visually grounded content such as the dog, the garbage can, and the surrounding street scene. Hallucinated words are highlighted in red. 
+
+Input image 
+
+Baseline 
+
+The image shows a clean bathroom that features a white toilet under a towel rail. Toilet paper can be seen on the wall, and there is a toothbrush holder with toothbrushes. Above the toilet, a pull-down window blind helps control the light entering the room, while other bathroom items are arranged around the sink area. 
+
+YARD 
+
+The image shows a bathroom with white towels hanging from a towel rack on the wall. The towels are folded neatly, and there are four of them, with two on each side. The toilet is located in the middle of the bathroom, with a window nearby and a sink area visible in the surrounding space. The scene appears clean and orderly, with simple bathroom fixtures arranged along the wall. 
+
+Figure 12: Qualitative comparison between the baseline and YARD. The baseline hallucinates unsupported 
+
+toothbrushes , while YARD focuses on visually grounded bathroom elements such as the toilet, towels, window, and sink area. Hallucinated words are highlighted in red. 
+
+21
