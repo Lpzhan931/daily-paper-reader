@@ -1,0 +1,811 @@
+Title: From Rigid to Dynamic: Entropy-Guided Adaptive Inference for Long-Context LLMs
+
+URL Source: https://arxiv.org/pdf/2606.09508v1
+
+Published Time: Tue, 09 Jun 2026 02:21:06 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# From Rigid to Dynamic: Entropy-Guided Adaptive Inference for Long-Context LLMs 
+
+Zhanchao Xu 1, Haoyang Li 1, Qingfa Xiao 2, Fei Teng 3,Chen Jason Zhang 1, Lei Chen 2, Qing Li 11Department of Computing, PolyU 2DSA, HKUST(GZ) 3CSE, HKUST     
+
+> zhanchaoxu0228@gmail.com ,{haoy1li, csqli}@comp.polyu.edu.hk ,jason-c.zhang@polyu.edu.hk qxiao183@connect.hkustgz.edu.cn ,fteng@connect.ust.hk ,leichen@cse.ust.hk
+
+Abstract 
+
+Existing sparse attention and KV cache com-pression methods for long-context LLM in-ference typically apply fixed sparsity patterns or uniform budgets across all attention heads, overlooking the substantial variation in atten-tion behavior among heads and contexts. We observe two distinct entropy patterns among attention heads: Rigid Heads , whose entropy stays near zero across input segments, and Dy-namic Heads , whose entropy fluctuates signifi-cantly. Crucially, the distribution of these types is context-dependent and cannot be predeter-mined offline. We therefore propose Entropy-Infer, a training-free framework that uses at-tention entropy to adaptively allocate compute at the granularity of individual heads and seg-ments during prefilling. For decoding, we in-troduce a latent KV cache compression scheme that leverages generated output tokens, rather than prefill tokens alone, to identify and retain the most critical cache entries. Extensive exper-iments on Llama, Qwen and openPangu model series show that EntropyInfer consistently out-performs baselines including SnapKV, AdaKV, and CritiPrefill, achieving up to 2.39 × end-to-end speedup beyond 100k tokens with minimal quality degradation compared to full attention. The code is released in https://github.com/ SHA-4096/EntropyInfer .
+
+1 Introduction 
+
+Long-context inference has emerged as a critical bottleneck for modern LLM deployment. As con-text lengths grow into the long-context regime, two cost centers dominate end-to-end latency: the quadratic attention computation during prefilling, and the linearly growing KV cache during decod-ing. Reducing either cost typically requires discard-ing information from the attention computation or the cache, creating a persistent tension between in-ference efficiency and generation quality. We show that attention entropy, measured per head and per segment during inference, exposes structure that ex-isting methods fail to exploit and enables inference acceleration with negligible quality loss. Attention computation overhead during prefill-ing grows quadratically with context length and dominates first-token latency in long-context sce-narios. Existing approaches accelerate prefilling by computing only a subset of the attention ma-trix, and the strategies for choosing that subset fall into three categories, each with a structural limitation. Methods with predefined sparsity pat-terns (e.g., MInference (Jiang et al., 2024)) assume a fixed geometric structure that cannot adapt to context-dependent attention shifts. Globally adap-tive methods (e.g., FlexPrefill (Lai et al., 2025)) tune a single sparsity threshold across all heads, ignoring head-level heterogeneity. Block-level crit-icality methods (e.g., CritiPrefill (Lv et al., 2025)) allocate a uniform per-segment budget, treating ev-ery head as equally informative. All three families assume a form of homogeneity, across positions, across heads, or across contexts, that we find em-pirically does not hold. During decoding, the linearly growing KV cache becomes the dominant memory pressure on the GPU. Eviction-based methods such as SnapKV (Li et al., 2024) and AdaKV (Feng et al., 2026) com-press the cache by retaining only tokens deemed important under the prefill-stage attention pattern. This design has a fundamental blind spot: recent studies (Li et al., 2025b; Wu et al., 2026) show that the attention pattern shifts substantially once generation begins, so tokens that look important under the prefill signal are not reliably the tokens that drive the decoding process. Permanently evict-ing tokens at the boundary between the prefill and decode stage therefore risks discarding precisely the entries the generator will later need. A complementary line of work recognizes that different attention heads play different roles, as ob-served in RazorAttention (Tang et al., 2025). How-1
+
+> arXiv:2606.09508v1 [cs.AI] 8 Jun 2026
+
+ever, RazorAttention and similar head-aware meth-ods rely on offline profiling over a calibration set, baking head categories into static configurations. Through a per-head entropy analysis on Llama-3.1-8B-Instruct and Qwen-2.5-7B-Instruct, we find two phenomena that make offline categorization funda-mentally limited. First, attention heads cleanly sep-arate into two regimes: Rigid Heads , whose row-wise entropy stays below 10 −5 regardless of input and whose attention is therefore near-deterministic, and Dynamic Heads , whose entropy fluctuates sub-stantially across query positions and carries gen-uine context-dependent semantic structure. Second, the assignment of a given head to one regime is it-self context-dependent, meaning the same head can behave as Rigid on one input and Dynamic on an-other. Together, these observations imply that head categorization must happen online, and that entropy fluctuation itself provides a cheap online signal for allocating compute. Building on this insight, we propose EntropyIn-fer , a training-free framework that uses attention entropy as an online signal to allocate inference cost adaptively across both stages. During pre-filling, we estimate per-head, per-segment entropy from a low-cost observation attention matrix; Rigid heads receive a fixed minimal budget, while Dy-namic heads receive a budget that scales with en-tropy fluctuation between adjacent segments, con-centrating compute where attention is most uncer-tain. During decoding, we introduce latent KV cache compression : rather than commit to a token selection at the end of prefilling, we delay compres-sion until a small number of output tokens have been generated, then include those output tokens in the observation window to re-rank cache entries. This re-ranking corrects the prefill to decoding mis-match identified above. The full pipeline requires no fine-tuning and integrates as a drop-in attention replacement. Our contributions are: • We identify two regimes of attention heads, Rigid and Dynamic, by segment-wise entropy, and show their assignment is context-dependent and therefore cannot be captured by offline head pro-filing. • We propose EntropyInfer, a training-free frame-work that uses online entropy fluctuation to al-locate per-head prefill budgets and re-ranks KV cache entries with output tokens during decod-ing. • EntropyInfer achieves up to 2.39 × end-to-end speedup at context lengths beyond 100k tokens with minimal quality drop on LongBench and InfiniteBench, outperforming baselines including SnapKV, AdaKV and CritiPrefill. 
+
+2 Related Work 
+
+We use Qh, K h, V h ∈ RN ×d to denote the query, key, and value matrices of attention head h on an in-put of length N , and Ah = softmax( QhK⊤ 
+
+> h
+
+/√d)
+
+for its attention weights. The row-wise entropy 
+
+H(ah,i :) = − P 
+
+> j
+
+ah,i,j log ah,i,j measures how concentrated the i-th query’s attention is over the keys and is the central quantity our method exploits. Below we review prior efforts to reduce the cost of computing or storing Ah.
+
+2.1 Prefilling Acceleration 
+
+Sparse attention methods reduce the quadratic cost of computing Ah by selecting only a subset of en-tries, and they differ in which axis they vary the budget along. Longformer (Beltagy et al., 2020) and BigBird (Zaheer et al., 2020) fix the subset geo-metrically (local windows plus a handful of global tokens) for every input and every head, sacrific-ing context adaptivity. MInference (Jiang et al., 2024) makes the subset head-aware by maintain-ing a small library of per-head sparsity templates and assigning a template at runtime, but each tem-plate is itself static. FlexPrefill (Lai et al., 2025) removes the predefined templates and tunes a sin-gle sparsity threshold per layer, recovering context adaptivity but flattening the differences between heads inside that layer. CritiPrefill (Lv et al., 2025) preserves head-awareness by partitioning the ma-trix into blocks and selecting the top-k blocks per segment, yet the same k is shared across all heads in the segment, forcing heads with very different attention concentration patterns into the same com-pute envelope. Each step relaxes one assumption while retaining another, and no existing method varies the budget along all three axes simultane-ously: position, head, and context. 
+
+2.2 KV Cache Compression 
+
+Eviction-based methods, the dominant family, com-press the KV cache at the end of prefilling by retaining only tokens with the highest attention scores (Li et al., 2025a). H2O (Zhang et al., 2023), SnapKV (Li et al., 2024), AdaKV (Feng et al., 2026), and PyramidKV (Yang et al., 2024) ex-plore different choices of importance estimator 20 10 20 30 40 50 60             
+
+> Segment Index
+> 0.00
+> 1.00
+> Entropy  Layer 2 - Head 5 010 20 30 40 50 60
+> Segment Index
+> 0.00
+> 1.00
+> Entropy  Layer 3 - Head 22 010 20 30 40 50 60
+> Segment Index
+> 0.00
+> 0.50
+> Entropy  Layer 5 - Head 16
+
+(a) Dynamic heads. Maximum segment entropy > 10 −5.0 10 20 30 40 50 60                 
+
+> Segment Index
+> 0
+> 5
+> Entropy  1e−13 Layer 3 - Head 10 010 20 30 40 50 60
+> Segment Index
+> 0.0
+> 2.5
+> Entropy  1e−6 Layer 6 - Head 14 010 20 30 40 50 60
+> Segment Index
+> 0
+> 2
+> Entropy  1e−12 Layer 15 - Head 14
+
+(b) Rigid heads.Maximum segment entropy ≤ 10 −5.
+
+Figure 1: Entropy curves exhibit two distinct patterns across different heads. 
+
+and budget shape: H2O scores tokens against a global heavy-hitter criterion, SnapKV restricts the scoring to an observation window at the end of the input, AdaKV reallocates the per-head budget from that signal, and PyramidKV redistributes the total budget across layers in a pyramidal pattern. StreamingLLM (Xiao et al., 2024) sidesteps the importance question by keeping only sink and re-cent tokens at the cost of irrecoverable mid-context information. A second thread tries to improve the importance estimator itself. UNComp (Xiong et al., 2025) and EntropyGuidedKVCaching (Kim and Jung, 2025) use the magnitude of attention entropy as a static importance cue at the layer or token level. Ra-zorAttention (Tang et al., 2025) groups attention heads into functional roles (e.g., retrieval versus echo heads) via static analysis prior to inference, and Duo-Attention (Xiao et al., 2025) similarly par-titions heads using a learned classifier; both apply role-specific compression rules at runtime. These refinements push the eviction paradigm closer to its quality ceiling but inherit two assumptions from it: prefill-stage attention reliably predicts decoding-stage importance, and head behavior can be char-acterized before any input is seen. LoopServe and LouisKV (Li et al., 2025b; Wu et al., 2026) empiri-cally falsify the first by showing that the attention pattern shifts substantially once decoding begins, and our entropy analysis in Section3 falsifies the second by showing that the same head can fall into different regimes on different inputs. Quantization (KIVI (Liu et al., 2024), KVQuant (Hooper et al., 2024)) and offloading (FlexGen (Sheng et al., 2023), KVSwap (Zhang et al., 2025)) reduce KV cost from precision and storage angles orthogonal to selection and can be layered on top of eviction-based methods, including ours. EntropyInfer departs from prior work along both of the assumptions identified above: it categorizes each head online from the entropy signal of the current input, and it defers KV compression past the prefill-decoding boundary so that selection is informed by the tokens the model has begun to generate. 
+
+3 Motivations 
+
+3.1 Motivation 1: Attention entropy varies across heads. 
+
+Previous studies (Kim and Jung, 2025; Xiong et al., 2025) have revealed the potential for using Shan-non’s Entropy (Shannon, 1948) as a way to mea-sure the degree of attention dispersion. Formally, for query and key sequences Qh ∈ RN,d and 
+
+Kh ∈ R N,d , where h denotes the index of atten-tion head, N denotes the sequence length, and d de-notes the hidden dimension, we have the attention weight matrix Ah = sof tmax ( QK T
+
+> √dk
+
+) ∈ R N ×N .For each row of Ah , we can measure the disper-sion level of the attention between each query with all keys by calculating the entropy value for each row. Formally, for the ith row, the entropy is cal-culated as H(ai:) = − PNj=1 ai,j log ai,j , where 
+
+ai,j corresponds to the attention weight between the ith query and the jth key. The higher H(ai:)
+
+means the query attends to all keys more evenly, indicating a more evenly distributed importance, while a lower value indicates the concentration of attention on a specific token. To look into how attention entropy shifts across different queries, we conduct an experiment to plot each head’s entropy-query curve. The results are shown in Figure 1. The curves exhibit two distinct patterns. For the first pattern, the entropy is always below a very small value (e.g. 10 −5), indicating dense and relatively rigid attention distribution. For another pattern, the entropy shifts dynamically with different query, indicating a dynamic pattern of 30
+
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Head Index
+> 0
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> Layer Index
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Entropy
+
+(a) GovReport (Averaged). 0 
+
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Head Index
+> 0
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> Layer Index
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Entropy
+
+(b) Musique (Averaged). 0 
+
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> Head Index
+> 0
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> Layer Index
+> 0
+> 1
+> 2
+> 3
+> Entropy
+
+(c) GovReport. 0 
+
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> Head Index
+> 0
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> Layer Index
+> 0
+> 1
+> 2
+> 3
+> 4
+> Entropy
+
+(d) Musique. 
+
+Figure 2: Entropy pattern varies across heads and different contexts. "Averaged" means aggregating attention entropies per GQA group. 
+
+semantic information in this head. We refer the first type of heads as Rigid Heads , and the second type of heads as Dynamic Heads . Such difference indicates that the responsibilities of different heads in the model are heterogeneous, as also discovered in previous works (Tang et al., 2025). 
+
+3.2 Motivation 2: The sparsity level of heads shifts across different contexts. 
+
+To further understand the impact of different con-textual information on the attention entropy dis-tribution across different heads, we visualize the distribution of different type of heads under dif-ferent contexts. The experiment is conducted on Llama-3.1-8B-Instruct. Following Algorithm 1 and Algorithm 2’s practice, we segment the input key and query, obtaining an observation attention ma-trix, and visualize each head’s maximum attention entropy across all segments. The results indicate that the distribution of Dynamic Heads and Rigid Heads is context-dependent, highlighting the need for determining the type of the attention head on-line. 
+
+4 Methods 
+
+In this section, we describe the algorithm used in EntropyInfer. The overall framework is demon-strated in Figure 3. 
+
+4.1 Key Notations 
+
+To formalize the framework, we define several key notations. The input context length is denoted by 
+
+N . LS and CS refers to segment size and segment count, while LB refers to block size. Each segment corresponds to different block count and budget, denoted as CBi and Bi respectively. Bh denotes the base budget for entropy-based sparse prefill and 
+
+Bd denotes budget for latent KV cache eviction in decode stage. 
+
+4.2 Entropy-Guided Sparse Prefill 
+
+We leverage the entropy information to dynami-cally determine the importance of different part of the attention matrix. Since calculating attention entropy for each row of the matrix incurs quadratic computation complexity and therefore not realis-tic, we follow the prior work (Lv et al., 2025) to break the attention matrix into blocks to create a smaller “observation attention matrix”, denoted as 
+
+Aobs . The algorithm for creating the matrix is de-scribed in Algorithm 1 and Algorithm 2. 
+
+Algorithm 1 Calculation of QRep . KRep follows similar process. 
+
+Require: Query States Q, Segment Size LS
+
+Ensure: Representation Vector QRep 
+
+1: QM ax ← Q. reshape( NS , L S , d ). max( dim = 1) 
+
+2: QM in ← Q. reshape( NS , L S , d ). min( dim = 1) 
+
+3: QRep ← { QM ax , Q M in }
+
+4: return QRep 
+
+Algorithm 2 Observation Attention Calculation 
+
+Require: Query States Q, Segment Size LS
+
+Ensure: Observation Attention Attn Obs 
+
+1: Qmax , Q min ← QRep 
+
+2: Kmax , K min ← KRep 
+
+3: S1 ← Softmax( Qmax KT
+
+> max
+
+)
+
+4: S2 ← Softmax( Qmax KT
+
+> min
+
+)
+
+5: S3 ← Softmax( Qmin KT
+
+> max
+
+)
+
+6: S4 ← Softmax( Qmin KT
+
+> min
+
+)
+
+7: AObs ← max   S1+S2 
+
+> 2
+
+, S3+S4
+
+> 2
+
+
+
+8: return AObs 
+
+After we have obtained Aobs , we calcu-late each row’s attention entropy H(ai:) =
+
+− PNj=1 ai,j log ai,j . As shown in Algorithm 3. To effectively determine the optimal numbers of blocks for each row to reserve, we utilize the fluctu-ation of the attention entropy across different rows, inspired by prior work (Xiong et al., 2025). We categorize the attention entropy into two categories, 4𝑄           
+
+> 𝐾
+> 𝑄 !"#
+> 𝐾 !"#
+> Observation
+> Attention Matrix
+> Dynamic Head –Adaptive Budget
+> Rigid Head –Fixed Budget Sparse Attention Top -K Selection
+> Representation
+> Vectors
+> Input Query + Key
+> Selected Chunks / KV Cache
+> Chunks For Selection / Input KV Cache
+> Masked Chunks
+> Decode 𝑁 $Tokens
+> KV Cache
+> Index Selection
+> Generated 𝑁 !KV Cache Input KV Cache
+> Observation Window KV Cache
+> Compression Observation Window Construction
+> Generated KV Cache
+> Observation Window
+> Entropy -Based Sparse Prefill
+> Latent KV Cache Compression
+> Entropy Profiling
+
+Figure 3: Framework Overview. 
+
+the Dynamic Head and the Rigid Head. They’re de-termined by whether the highest attention entropy value exceeds a threshold et . For rigid head, the fluctuation of attention entropy is less informative, making it more suitable to allocate fixed budget for each row. Dynamic head, on the contrary, can be semantically described using the attention entropy information. We set an initial budget for the first row, and for the subsequent rows, we measure the fluctuation level of its attention entropy compared to the previous rows. The higher fluctuation rate means more drastic change in its semantic informa-tion interpretation, therefore requiring more budget for precise comprehension. Lower fluctuation rate, on the contrary, reveals a smooth pattern in the semantic information interpretation, suggesting ap-plying similar budget with the previous row for semantic consistency. 
+
+Algorithm 3 Budget Allocation based on Head Entropy 
+
+Require: Head entropy {ei} for i ∈ [0 , C S ], Base budget 
+
+Bh
+
+Ensure: Allocated budget {Bi} for each segment 1: et = 10 −5 ▷ Entropy threshold 2: α = 0 .5 ▷ Budget coefficient 3: ∆t = 0 .4 ▷ Variance percentage threshold 4: % Categorize heads into 2 types: Rigid head and Dynamic head 
+
+5: if max( {ei}) < e t then ▷ Rigid head (e.g., et = 10 −5)6: Bi ← Bh, ∀i ∈ [0 , segment_count ]
+
+7: else ▷ Dynamic head ( max( {ei}) ≥ et)8: B0 ← Bh
+
+9: for i = 1 to segment_count do 
+
+10: ∆budget ← α · Bh ·
+
+ |ei−ei−1| 
+
+> ei−1
+
+− ∆t
+
+
+
+11: Bi ← Bi−1 + ∆ budget 
+
+12: Bi ← max(min( Bi, B 0), 3 · B0)
+
+13: end for 
+
+14: end if 
+
+15: return {Bi}
+
+4.3 Latent KV cache compression during decoding stage 
+
+To mitigate the growing size of the KV cache, it’s common practice to compress KV cache during the generation process. Existing works (Li et al., 2024; Feng et al., 2026) compress the KV cache right after the prefilling stage, and utilize an observation window at the end of the input to select important tokens. Such practice is not satisfying, since recent studies have revealed that output tokens is more effective in selecting important tokens during gen-eration, and has distinct attention pattern compared to input tokens (Li et al., 2025b; Wu et al., 2026). We design an algorithm to dynamically select im-portant KV cache after generating Nd tokens, as shown in Algorithm 4. 
+
+4.4 Complexity Analysis 
+
+The attention computation complexity for each at-tention head is upper-bounded by 
+
+O(( 1
+
+LS LB
+
++ 32LS LB
+
+log Bh
+
+LB
+
+)N 2 + 3 BhN )
+
+Since the coefficient of N 2 is negligible compared to dense attention, the attention computation’s com-plexity is nearly linear, as also shown in Figure 4. The proof is detailed in Appendix A. Compared to dense attention computation, which has a complexity of O(N 2), EntropyInfer exhibits solid efficiency gain, especially in long context scenarios as N grows beyond 100K. 
+
+5 Experiment 
+
+5.1 Experimental Settings 5.1.1 Dataset and Model 
+
+For effectiveness evaluation, we use LongBench (Bai et al., 2024) and InfiniteBench (Zhang et al., 2024) to evaluate the model’s effectiveness. Both 5Table 1: Results on LongBench. CPrefill stands for CritiPretill. Results in bold refers to the best results while underlined results refers to the second best.                                                                                                                                                                                                                           
+
+> Model Llama-3.1-8B-Instruct Qwen2.5-7B-Instruct Method Base Adakv CPrefill SnapKV Ours Ours w/o LD Base AdaKV CPrefill SnapKV Ours Ours w/o LD NrtvQA 29.71 29.53 27.29 29.64 29.86 30.20 28.73 28.43 25.44 28.57 26.81 26.81
+> Qsp 45.30 42.91 45.43 43.89 45.18 45.38 44.21 42.20 44.20 42.61 43.98 44.14
+> MFQA_en 55.13 53.70 55.46 54.12 54.74 55.20 53.05 51.86 51.19 51.34 51.73 52.13 HotpotQA 55.50 55.23 56.54 54.72 55.28 55.37 57.98 56.95 54.65 57.16 57.20 57.30 2WikiMQA 44.30 44.84 43.62 44.81 45.88 44.25 46.33 44.54 45.92 44.54 47.09 47.16 Musique 31.32 30.62 29.38 29.99 31.74 31.68 30.03 29.77 27.81 29.54 30.85 30.92 GovReport 35.16 28.36 35.04 28.62 30.02 35.18 31.86 26.60 31.45 27.05 28.74 31.48 QMSum 25.31 24.11 24.96 24.20 24.97 25.27 23.23 23.11 23.19 23.11 23.18 23.60 MultiNews 27.30 26.00 27.26 26.05 26.21 27.45 23.96 22.39 23.76 22.75 23.38 23.82 TREC 72.50 68.50 72.00 67.50 73.50 73.00 72.00 68.50 70.00 67.50 71.00 71.00 TriviaQA 91.64 91.48 90.98 91.73 91.18 91.49 88.81 87.52 89.09 86.69 89.09 89.09 SamSUM 43.66 42.40 44.18 42.67 44.23 43.94 45.64 44.91 46.76 45.03 46.22 46.23
+> PsgCount 6.96 7.01 4.64 6.82 6.49 5.97 8.00 8.00 7.00 8.00 6.50 6.50
+> PsgRetrieval_en 99.50 99.50 97.50 99.50 98.50 98.50 100.00 100.00 91.00 100.00 91.50 91.50
+> LCC 63.04 62.33 63.24 62.13 62.77 63.23 60.07 59.55 60.27 59.75 60.30 60.40 Repobench-P 56.67 56.35 55.55 56.24 56.20 56.47 67.26 65.75 65.63 65.19 65.26 65.53
+> Avg 48.94 47.68 48.32 47.66 48.55 48.91 48.82 47.51 47.34 47.43 47.68 47.98
+
+datasets contain diverse tasks including Question Answering, Summarization, Retrieval and Code Generation, etc. The two datasets can comprehen-sively evaluate LLM’s performance under diverse scenarios and context lengths, with input sequences of beyond 100K tokens in InfiniteBench. For efficiency evaluation, we modify Needle-in-a-Haystack’s (Li et al., 2025c) prompt to instruct LLM to generate the summary of the context, and stop the generation process once the LLM has gen-erated 100 tokens. We use Llama-3.1-8B-Instruct (Grattafiori et al., 2024) and Qwen-2.5-7B-Instruct (Qwen et al., 2025) as the backbone model for the experiments. 
+
+5.1.2 Baselines 
+
+We compare EntropyInfer with the following SOTA methods, covering KV cache compression and sparse prefilling optimizations. • SnapKV (Li et al., 2024) is a method that compress KV cache with a snapshot mach-anism, which reduces inference latency and better utilize memory. • AdaKV (Feng et al., 2026) reallocates bud-gets across different attention heads, dynami-cally allocates more cache budget for attention heads with more dispersed patterns. • CritiPrefill (Lv et al., 2025) is a method that utilize a criticality-based prefilling method to accelerate the prefill stage. 
+
+5.1.3 Evaluation Metrics 
+
+The metrics used by LongBench and In-finiteBench’s datasets are detailed as follows. • For LongBench’s metrics, NarrativeQA, Qasper, MultifieldQA-en, HotpotQA, 2WikiMQA and Musique use F1 Score, MultiNews, GovReport and QMSum use Rouge-L Score, TREC, SAMSum, Passage Count and Passage Retrieval use Accuracy, LCC and RepoBench-P use Edit Sim. • For InfiniteBench’s metrics, En.QA and Zh.QA use F1 Score, En.Sum uses Rouge-L-Sum, En.MC, En.Dia, Code.Debug and Retrieve.PassKey use Accuracy, Re-trieve.Number and Math.Find use exact match. The metrics are explained as follows. • F1 Score: The harmonic mean of precision and recall, providing a balanced evaluation metric for imbalanced datasets. • Accuracy: The proportion of correctly pre-dicted instances out of the total number of predictions, reflecting the overall correctness of the model. • ROUGE-L: A metric that measures the Longest Common Subsequence (LCS) be-tween the generated and reference texts to evaluate sequential similarity. It is calculated as: ROUGE-L = LCS (C,R ) 
+
+> |R|
+
+where LCS (C, R )
+
+represents the length of the longest common subsequence between the candidate text C and the reference text R, and |R| denotes the total length of the reference text. • Edit Sim : The edit sim (Svyatkovskiy et al., 2020) calculates the Levenstein distance of 6Table 2: Results on InfiniteBench. R stands for Retrieve, M stands for math, C stands for Code. CPrefill stands for CritiPrefill. Results in bold refers to the best results while underlined results refers to the second best. 
+
+Model Llama-3.1-8B-Instruct Qwen2.5-7B-Instruct Method Base SnapKV AdaKV CPrefill Ours Ours w/o LD Base SnapKV AdaKV CPrefill Ours Ours w/o LD 
+
+R.PassKey 100.00 100.00 100.00 100.00 100.00 100.00 100.00 85.42 83.56 99.15 96.44 96.44 R.Number 99.49 85.59 82.37 99.15 95.42 95.42 93.22 4.41 4.07 89.49 86.78 86.78 En.Dia 21.00 11.50 15.00 11.00 16.50 19.00 16.00 11.00 12.00 10.50 12.00 15.00 
+
+En.Sum 26.32 22.35 22.00 24.97 22.02 26.48 21.95 19.95 20.62 19.84 19.75 19.40 En.MC 66.81 66.81 66.38 56.77 62.01 62.01 46.72 46.72 46.29 37.99 44.10 44.98 En.QA 14.44 11.77 12.21 12.92 14.02 14.14 4.81 4.60 4.71 4.43 5.26 4.84 Zh.QA 13.22 12.03 12.05 11.03 12.46 12.70 9.12 9.32 9.18 8.39 9.02 8.64 M.Find 33.14 33.14 32.86 34.86 35.14 35.14 38.57 35.14 35.71 34.57 44.57 44.57 
+
+C.Debug 22.08 22.08 22.08 26.65 25.38 25.38 26.14 25.63 25.63 24.11 23.35 23.35 Avg 44.06 40.59 40.55 41.93 42.55 43.36 39.62 26.91 26.86 36.50 37.92 38.22 
+
+two text sequences, which is commonly used in evaluation for code generation scenarios. • Exact Match : The metric measures the percentage of model responses that exactly matches the ground truth. 
+
+5.1.4 Hyperparameters 
+
+For SnapKV and AdaKV, we set the kv cache bud-get to 1024 tokens. For streaming LLM, we set the budget to 4096 with 4 sink tokens. For CritiPrefill, we set the prefill budget of each segment to 2048 tokens. For our method, we set the base budget of sparse prefill to 2048 tokens, and the budget for cache eviction to 1024 tokens. 
+
+5.1.5 Hardware Settings 
+
+We use a single NVIDIA H100 80G GPU with 192GB CPU memory and 8 CPU Cores to conduct experiments. 
+
+5.2 Main Results 5.2.1 Longbench Results 
+
+We evaluate 16 datasets from LongBench using our method and other baselines, with the backbone model of Llama-3.1-8B-Instruct and Qwen2.5-7B-Instruct. The results are shown in Table 1. The results show that our method outperforms all other baselines in both Llama and Qwen in terms of aver-age score, and have narrow effectiveness gaps com-pared to the base model, while in some datasets (e.g. SAMSum and LCC) even outperforming the base model. 
+
+5.2.2 InfiniteBench Results 
+
+To evaluate our method’s effectiveness on ultra-long context, we conduct experi-ments on InfiniteBench using Llama-3.1-8B-Instruct (Grattafiori et al., 2024) and Qwen2.5-7B-Instruct (Qwen et al., 2025). The results are shown 0 20000 40000 60000 80000 100000 120000 140000 
+
+> Context Length
+> 5
+> 10
+> 15
+> 20
+> E2E Latency (Seconds)
+> 2.39x
+> Base
+> SnapKV
+> AdaKV
+> Criti-Prefill
+> Ours(w/o LD)
+> Ours
+> Base (accel. ratio)
+> SnapKV (accel. ratio)
+> AdaKV (accel. ratio)
+> Criti-Prefill (accel. ratio)
+> Ours(w/o LD) (accel. ratio)
+> Ours (accel. ratio)
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Acceleration Ratio
+
+Figure 4: End-to-end latency test under different context lengths on Llama 3.1-8B-Instruct. Lower latency and higher acceleration ratio are better. 
+
+in Table 2. The results show that our method consistently outperform other baselines on both Llama and Qwen model, highlighting its ability to maintain generation quality even when the input context length is beyond 100K tokens. 
+
+5.3 End-to-end Latency Evaluation 
+
+We evaluate the end-to-end latency using Llama-3.1-8B-Instruct. The model is tasked to summarize essays of different context lengths varying from 4K tokens to 140K tokens, and generate a summary of 100 tokens. Once the generation length reaches 100 tokens, the generation process stops and the end-to-end latency is recorded. The results are shown in Figure 4. According to the results, EntropyInfer achieves a solid effi-ciency gain in long context scenarios compared to other baselines, with a speedup ratio of up to 2.39x. Since EntropyInfer requires performing attention calculation under different budget for each head, its latency is slightly higher than CritiPrefill when us-ing only sparse prefilling (Ours w/o LD), while still greatly outperforming other baselines. With latent decoding enabled, this gap is resolved by reduced 7128 
+
+> 256
+> 512
+> Segment Size
+> 8
+> 16
+> 32
+> Block Size
+> 28.2
+> 28.8
+> 29.4
+> 30.0
+> Rouge-L Score
+
+(a) GovReport. 128  
+
+> 256
+> 512
+> Segment Size
+> 8
+> 16
+> 32
+> Block Size
+> 24.6
+> 25.2
+> 25.8
+> 26.4
+> Rouge-L Score
+
+(b) MultiNews. 128  
+
+> 256
+> 512
+> Segment Size
+> 8
+> 16
+> 32
+> Block Size
+> 96.8
+> 97.6
+> 98.4
+> 99.2
+> Accuracy Score
+
+(c) Passage-Retrieval. 128  
+
+> 256
+> 512
+> Segment Size
+> 8
+> 16
+> 32
+> Block Size
+> 43.2
+> 44.0
+> 44.8
+> 45.6
+> F1 Score
+
+(d) Qasper. 
+
+Figure 5: Parameter Sensitivity Experiment on Segment and Block Size. 
+
+decoding latency, making EntropyInfer the most efficient method in long context scenario compared to other baselines. 
+
+5.4 Parameter Sensitivity 5.4.1 Segment and Block Size. 
+
+We perform a grid search to study the parameter sensitivity of Segment Size and Block Size. The results are shown in Figure 5. For segment size, larger segment size yields better performance in summary tasks such as GovReport and MultiNews, while retrieval and question answering tasks prefer smaller segment size. For block size, the results remains mostly insensitive, while in some cases larger block size yields better performance. This phenomenon is likely attributed to the consistency of semantic information when using larger block size, as also observed in (Chen et al., 2025b). 
+
+5.4.2 Prefill and Decode Budget. 
+
+We study the impact of sparse prefill base budget and decode cache budget on EntropyInfer’s perfor-mance. The results are shown in Figure 6 (b). For prefill budget, the results demonstrate that EntropyInfer is essentially insensitive to this hy-perparameter in terms of effectiveness. Such in-sensitivity credits to the adaptive nature of the entropy-based sparse prefill, which dynamically adjusts budget to balance efficiency and genera-tion quality, demonstrating the robustness of the method. For decode cache budget, the results sug-gest that higher budgets can lead to better effec-tiveness performance. However, such effectiveness gain is limited in particular datasets, and would incur extra computation and memory overhead. 
+
+5.5 Ablation Study 
+
+We conduct ablation study using Llama-3.1-8B-Instruct and Longbench. The ablation study in-volves the following three settings. • Ours: Enable entropy-based sparse prefill and latent decode. • Ours w/o SP: Disable entropy-based sparse at-tention, enable latent decode. • Ours w/o LD: Enable entropy-based sparse at-tention, disable latent decode. The effectiveness results are shown in Figure 6 (a). The result exhibits that enabling latent de-code and entropy-based sparse prefill only have a very slight impact on generation quality, while both modules work in tandem with each other to achieve optimal efficiency results (as shown in Figure 4). HPQA MN QSP SAM   
+
+> 0
+> 20
+> 40
+> F1/Rouge-L/Accuracy  Ours Ours w/o SP Ours w/o LD
+
+(a) Ablation Study. 512 1024 2048 4096  
+
+> KV Cache Budget Size
+> 27.5
+> 30.0
+> 32.5
+> GovReport
+> (Rouge-L Score)  GovReport (P)
+> GovReport (D)
+> MultiNews (P)
+> MultiNews (D)
+> 26
+> 27
+> MultiNews
+> (Rouge-L Score)
+
+(b) Budget Sensitvity. 
+
+Figure 6: Ablation Study and Parameter Sensitivity Results. P refers to Prefill, D refers to Decode. 
+
+5.6 Extra expriment on Pangu Model Series. 
+
+To extensively evaluate our method’s adaptibil-ity, we integrate our method into openPangu-Embedded-1B-v1.1 and openPnagu-Embedded-7B-v1.1 (Chen et al., 2025a). We conduct end-to-end efficiency experiment under different context lengths, as shown in Figure 7. The results show that our method consistently accelerates model in-ference under different long context lengths, and the acceletation is more significant for longer con-texts. For effectiveness, we use LongBench (Bai et al., 2024) and LoCoMo (Maharana et al., 2024) to evaluate our method’s effectiveness on long con-text and multi-turn conversation scenarios. The results are shown in Table 3 and Table 4. The 8Table 3: LongBench results on openPangu-Embedded-1B and openPangu-Embedded-7B-v1.1. 
+
+Model Method NrtvQA Qasper MFQA-en HotpotQA 2WikiMQA Musique Avg opanPangu-7B Base 14.82 37.46 44.37 35.64 29.58 20.08 30.33 
+
+Ours 15.12 35.53 43.28 34.91 31.06 18.04 29.66 
+
+Ours w/o LD 14.86 36.94 44.44 35.23 31.00 18.41 30.15 openPangu-7B w/ CoT Base 15.07 37.75 37.21 47.79 61.24 31.31 38.40 
+
+Ours 16.10 37.39 36.84 50.84 53.91 31.94 37.84 
+
+Ours w/o LD 13.83 38.01 36.43 51.53 61.29 32.26 38.89 openPangu-1B Base 10.36 28.75 43.66 34.69 36.05 19.63 28.86 
+
+Ours 10.45 28.86 42.75 32.90 35.17 18.11 28.04 
+
+Ours w/o LD 10.46 29.38 43.95 32.92 35.11 18.17 28.33 
+
+Table 4: LoCoMo results on openPangu-Embedded-1B and openPangu-Embedded-7B. 
+
+Model Method Multi-Hop Temporal Open-domain Single-Hop Adversarial Overall openPangu-7B Base 27.84 16.04 10.73 31.53 3.14 21.12 
+
+Ours 27.41 14.66 10.55 31.63 2.91 20.82 Ours w/o LD 26.40 14.14 10.70 31.51 3.36 20.65 
+
+openPangu-7B w/ CoT Base 27.16 19.07 15.52 27.50 29.82 26.03 
+
+Ours 25.61 22.58 11.21 27.30 21.08 24.12 
+
+Ours w/o LD 24.14 19.93 13.64 25.10 33.86 25.54 openPangu-1B Base 20.08 14.16 11.69 22.32 9.64 17.32 
+
+Ours 18.88 13.45 10.77 21.99 7.40 16.35 
+
+Ours w/o LD 19.16 13.53 10.95 22.12 7.85 16.56 
+
+efficiency and effectiveness results demonstrates that our method achieves a sigificant acceleration in end-to-end generation while maintaining high generation quality. 42K 58K 75K 91K 107K 
+
+> Context Length
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> Acceleration Ratio
+> Base
+> Ours(w/o LD)
+> Ours
+
+Figure 7: Efficiency results on openPangu-Embedded-7B-v1.1. 
+
+6 Conclusion 
+
+In this work, we propose EntropyInfer, a method for accelerating LLM inference while preserving generation quality. By utilizing the attention en-tropy information during prefill stage to dynami-cally select important attention blocks, and perform latent kv cache compression in decoding stage, En-tropyInfer achieves a speedup of up to 2.39x in end-to-end generation while maintaining genera-tion quality. EntropyInfer can serve as an effective solution for long context LLM inference without the need for fine-tuning the models, making it a practical method for real-world applications. 
+
+Limitations 
+
+We observe limited performance boost in short context inference, likely due to the introduced ob-servation attention calculation and entropy profil-ing overhead. However, the introduced overhead does not incur significant latency in short context lengths, and the performance gain of sparse prefill and latent decode outweighs the extra overhead as the context length increases. 
+
+Ethics Statement 
+
+This work does have any ethical issues. 
+
+References 
+
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A bilingual, multi-task benchmark for long context understanding. In 
+
+Proceedings of the 62nd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 3119–3137, Bangkok, Thailand. Association for Computational Linguistics. Iz Beltagy, Matthew E. Peters, and Arman Cohan. 2020. Longformer: The long-document transformer. 
+
+arXiv:2004.05150 .Hanting Chen, Yasheng Wang, Kai Han, Dong Li, Lin Li, Zhenni Bi, Jinpeng Li, Haoyu Wang, Fei Mi, Mingjian Zhu, Bin Wang, Kaikai Song, Yifei Fu, Xu He, Yu Luo, Chong Zhu, Quan He, Xueyu Wu, Wei He, and 5 others. 2025a. Pangu Embedded: An 
+
+9Efficient Dual-system LLM Reasoner with Metacog-nition. Preprint , arXiv:2505.22375. Jinhan Chen, Jianchun Liu, Hongli Xu, Xianjun Gao, and Shilong Wang. 2025b. SABlock: Semantic-Aware KV Cache Eviction with Adaptive Compres-sion Block Size. Preprint , arXiv:2510.22556. Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S Kevin Zhou. 2026. Ada-KV: Optimizing KV cache eviction by adaptive budget allocation for efficient LLM inference. In The Thirty-Ninth Annual Confer-ence on Neural Information Processing Systems .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 542 others. 2024. The Llama 3 Herd of Models. Preprint , arXiv:2407.21783. Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024. KVQuant: To-wards 10 million context length LLM inference with KV cache quantization. In Proceedings of the 38th International Conference on Neural Information Pro-cessing Systems , Nips ’24, Red Hook, NY, USA. Curran Associates Inc. Huiqiang Jiang, Yucheng Li, Chengruidong Zhang, Qianhui Wu, Xufang Luo, Surin Ahn, Zhenhua Han, Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. MInference 1.0: Acceler-ating pre-filling for long-context LLMs via dynamic sparse attention. In Proceedings of the 38th Interna-tional Conference on Neural Information Processing Systems , Nips ’24, Red Hook, NY, USA. Curran As-sociates Inc. Heekyum Kim and Yuchul Jung. 2025. Entropy-guided KV caching for efficient LLM inference. Mathemat-ics , 13(15):1–14. Xunhao Lai, Jianqiao Lu, Yao Luo, Yiyuan Ma, and Xun Zhou. 2025. FlexPrefill: A context-aware sparse attention mechanism for efficient long-sequence in-ference. In The Thirteenth International Conference on Learning Representations .Haoyang Li, Yiming Li, Anxin Tian, Tianhao Tang, Zhanchao Xu, Xuejia Chen, HU Nicole, Wei Dong, Li Qing, and Lei Chen. 2025a. A survey on large lan-guage model acceleration based on kv cache manage-ment. Transactions on Machine Learning Research .Haoyang Li, Zhanchao Xu, Yiming Li, Xuejia Chen, Darian Li, Anxin Tian, Qingfa Xiao, Cheng Deng, Jun Wang, Qing Li, Lei Chen, and Mingxuan Yuan. 2025b. LoopServe: An Adaptive Dual-phase LLM Inference Acceleration System for Multi-Turn Dia-logues. Preprint , arXiv:2507.13681. Mo Li, Songyang Zhang, Taolin Zhang, Haodong Duan, Yunxin Liu, and Kai Chen. 2025c. NeedleBench: Evaluating LLM retrieval and reasoning across vary-ing information densities. Transactions on Machine Learning Research .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM knows what you are looking for before genera-tion. In Proceedings of the 38th International Con-ference on Neural Information Processing Systems ,Nips ’24, Red Hook, NY, USA. Curran Associates Inc. Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. KIVI: A tuning-free asymmet-ric 2bit quantization for KV cache. arXiv preprint arXiv:2402.02750 .Junlin Lv, Yuan Feng, Xike Xie, Xin Jia, Qirong Peng, and Guiming Xie. 2025. CritiPrefill: A segment-wise criticality-based approach for prefilling acceleration in llms. In ICASSP 2025 - 2025 IEEE International Conference on Acoustics, Speech and Signal Process-ing (ICASSP) , pages 1–5. Adyasha Maharana, Dong-Ho Lee, Sergey Tulyakov, Mohit Bansal, Francesco Barbieri, and Yuwei Fang. 2024. Evaluating very long-term conver-sational memory of llm agents. arXiv preprint arXiv:2402.17753 .Qwen, An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jingren Zhou, Junyang Lin, and 24 others. 2025. Qwen2.5 Technical Report. Preprint ,arXiv:2412.15115. C. E. Shannon. 1948. A Mathematical Theory of Communication. Bell System Technical Journal ,27(3):379–423. Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christo-pher Ré, Ion Stoica, and Ce Zhang. 2023. FlexGen: High-throughput generative inference of large lan-guage models with a single GPU. In Proceedings of the 40th International Conference on Machine Learn-ing , ICML’23, Honolulu, Hawaii, USA. JMLR.org. Alexey Svyatkovskiy, Shao Kun Deng, Shengyu Fu, and Neel Sundaresan. 2020. IntelliCode compose: Code generation using transformer. In Proceedings of the 28th ACM Joint Meeting on European Software Engineering Conference and Symposium on the Foun-dations of Software Engineering , pages 1433–1443, Virtual Event USA. ACM. Hanlin Tang, Yang Lin, Jing Lin, Qingsen Han, Danning Ke, Shikuan Hong, Yiwu Yao, and Gongyi Wang. 2025. RazorAttention: Efficient KV cache compres-sion through retrieval heads. In The Thirteenth Inter-national Conference on Learning Representations .
+
+10 Wenbo Wu, Qingyi Si, Xiurui Pan, Ye Wang, and Jie Zhang. 2026. LouisKV: Efficient KV cache retrieval for long input-output sequences. In The Fourteenth International Conference on Learning Representa-tions .Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, junxian guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. 2025. DuoAttention: Efficient long-context LLM inference with retrieval and streaming heads. In 
+
+The Thirteenth International Conference on Learning Representations .Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In International Conference on Learning Representations , volume 2024, pages 21875–21895. Jing Xiong, Jianghan Shen, Fanghua Ye, Chaofan Tao, Zhongwei Wan, Jianqiao Lu, Xun Wu, Chuanyang Zheng, Zhijiang Guo, Min Yang, Lingpeng Kong, and Ngai Wong. 2025. UNComp: Can Matrix En-tropy Uncover Sparsity? — A Compressor Design from an Uncertainty-Aware Perspective. In Proceed-ings of the 2025 Conference on Empirical Methods in Natural Language Processing , pages 4179–4199, Suzhou, China. Association for Computational Lin-guistics. Dongjie Yang, Xiaodong Han, Yan Gao, Yao Hu, Shilin Zhang, and Hai Zhao. 2024. PyramidInfer: Pyramid KV cache compression for high-throughput LLM inference. In Findings of the Association for Com-putational Linguistics: ACL 2024 , pages 3258–3270, Bangkok, Thailand. Association for Computational Linguistics. Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago On-tanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and 1 others. 2020. Big bird: Transformers for longer sequences. Advances in Neural Informa-tion Processing Systems , 33. Huawei Zhang, Chunwei Xia, and Zheng Wang. 2025. KVSwap: Disk-aware KV Cache Offload-ing for Long-Context On-device Inference. Preprint ,arXiv:2511.11907. Xinrong Zhang, Yingfa Chen, Shengding Hu, Zihang Xu, Junhao Chen, Moo Hao, Xu Han, Zhen Thai, Shuo Wang, Zhiyuan Liu, and Maosong Sun. 2024. 
+
+∞Bench: Extending Long Context Evaluation Be-yond 100K Tokens. In Proceedings of the 62nd An-nual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 15262– 15277, Bangkok, Thailand. Association for Compu-tational Linguistics. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-hitter oracle for efficient generative inference of large lan-guage models. In Proceedings of the 37th Interna-tional Conference on Neural Information Processing Systems , Nips ’23, Red Hook, NY, USA. Curran As-sociates Inc. 
+
+11 A Proof for Complexity Analysis 
+
+We denote the computation overhead for an input sequence of length N as T (N ).The complexity of the sparse attention process mainly consists of three parts, including observation attention calculation process Tobs (N ), Top-K block selection process Ttopk (N ) and sparse attention computation process Tspa (N ). They’re expressed in Equations (1) (2) and (3) separately. 
+
+Tobs (N ) = CS × CB = NLS
+
+× NLB
+
+= N 2
+
+LS LB
+
+(1) 
+
+Ttopk (N ) = 
+
+> CS
+
+X
+
+> i=0
+
+CBi log Bi
+
+LB
+
+= 32
+
+> CS
+
+X
+
+> i=0
+
+CB log Bh
+
+LB
+
+= 32 CS CB log Bh
+
+LB
+
+= 3N 2
+
+2LS LB
+
+log Bh
+
+LB
+
+(2) 
+
+Tspa (N ) = 
+
+> CS
+
+X
+
+> i=0
+
+Bi × LS ≤ 3
+
+> CS
+
+X
+
+> i=0
+
+BhLS = 3 CS BhLS = 3 BhN (3) Therefore, the total complexity Ttotal (N ) can be expressed as Equation (4). 
+
+Ttotal (N ) = Tobs (N ) + Ttopk (N ) + Tspa (N ) = O(( 1
+
+LS LB
+
++ 32LS LB
+
+log Bh
+
+LB
+
+)N 2 + 3 BhN ) (4) 
+
+B Latent KV Cache Compression Algorithm 
+
+The latent KV cache compression algorithm is detailed in Algorithm 4. 
+
+Algorithm 4 Latent Decode KV Cache Compression via Importance Scoring 
+
+Require: 
+
+Original Key states matrix: K ∈ RL×d
+
+Original Value states matrix: V ∈ RL×d
+
+Query states matrix: Q ∈ RL×d
+
+Observation window size: NW , Number of newly inferred tokens: ND
+
+Cache budget: Bd
+
+Ensure: 
+
+Compressed KV Cache: KV compressed  
+
+> 1:
+
+Step 1: Construct observation window index set  
+
+> 2:
+
+Determine window indices IW ⊂ { 1, . . . , L } such that |I W | = NW . 
+
+> 3:
+
+Extract observation window Query matrix: QW ← Q[IW , :] ▷ Q W ∈ RNW ×d 
+
+> 4:
+
+Step 2: Compute global importance scores  
+
+> 5:
+
+Compute interaction matrix: S ← QW K⊤ ▷ S ∈ RNW ×L 
+
+> 6:
+
+Aggregate to obtain importance vector: w ← PNW 
+
+> i=1
+
+Si, : ▷ w ∈ R1×L 
+
+> 7:
+
+Step 3: Sparse index selection  
+
+> 8:
+
+Select the indices of the Bd tokens with the highest weights:  
+
+> 9:
+
+Iidx ← T opK (w, B d) 
+
+> 10:
+
+▷ Iidx = {j | wj is among the top B largest elements in w} 
+
+> 11:
+
+Step 4: Cache eviction and compression  
+
+> 12:
+
+KV compressed ← { (Kj, :, V j, :) | j ∈ I idx } 
+
+> 13:
+
+return KV compressed 
+
+12
