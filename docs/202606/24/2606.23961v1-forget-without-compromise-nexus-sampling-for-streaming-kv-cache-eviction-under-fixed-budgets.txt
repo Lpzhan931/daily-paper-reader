@@ -1,0 +1,1250 @@
+Title: Forget Without Compromise: Nexus Sampling for Streaming KV-Cache Eviction Under Fixed Budgets
+
+URL Source: https://arxiv.org/pdf/2606.23961v1
+
+Published Time: Wed, 24 Jun 2026 00:15:48 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# Forget Without Compromise: Nexus Sampling for Streaming KV-Cache Eviction Under Fixed Budgets 
+
+Duc Duong ∗1, Hoang Anh Duy Le ∗2, Jianwen Xie 4, Anshumali Shrivastava 2, and Zhaozhuo Xu 31Department of Computer Science, Grinnell College 
+
+> 2
+
+Department of Computer Science, Rice University 
+
+> 3
+
+Workato 
+
+> 4
+
+Lambda, Inc 
+
+Abstract 
+
+Long-context and agentic LLM workloads push the KV cache past any fixed memory budget, forcing the inference stack to permanently evict tokens at every step of a continuous-inference stream. Existing methods all share the same template, a per-step direct-attention score followed by deterministic top-K selection, which converts a single below-cutoff step into an irreversible verdict and permanently erases any subtly important token that direct attention cannot single out from noise. To address this challenge, we propose Nexus Sampling , a training-free eviction method that pairs Nexus scoring , an iterative walk over direct attention that surfaces bridge tokens, with weighted reservoir sampling , which retains tokens with inclusion probability in place of deterministic top-K. Theoretically, we show that Nexus Sampling dominates deterministic top-K in long-run survival of subtly important tokens. Empirically, at 80% KV cache eviction, Nexus Sampling matches dense attention within 
+
+∼1 point on LongBench while outperforming top-K baselines on retrieval-heavy tasks, with up to 10 × smaller per-sequence cache memory. 
+
+# 1 Introduction 
+
+GPU memory imposes a hard ceiling on what an LLM inference stack can hold during long-context generation, yet the Key-Value (KV) cache grows linearly with context length and quickly exceeds this budget [ 19 , 6]. The gap widens further in long-lived, agent-style deployments such as multi-turn assistants, persistent reasoning loops [ 18 ], and repository-scale coding agents [ 1 , 12 ], where the effective context grows toward an unbounded stream. Sparse attention methods [ 20 , 14 , 24 ] address this efficiency problem partially by reading a still-full cache more efficiently. But once the cache no longer fits in memory, reading it efficiently is not enough: the inference stack must permanently evict tokens. A growing body of work [ 25 , 22 , 3, 8 , 16 , 9 ] performs this KV cache eviction ,retaining the tokens that score highest under the current (or recent) queries’ attention and dropping the rest. Existing methods all share the same per-step design as sparse attention: at every eviction step, they retain the K
+
+highest-scoring tokens by deterministic top-K selection. We argue, however, that eviction is fundamentally different from sparse attention: while sparse attention performs a one-time read of a still-full cache, eviction is a streaming, fixed-budget problem in which tokens arrive continuously, evictions are irreversible, and the policy must repeatedly decide what to retain against future queries it has not yet seen. Under this view, per-step deterministic top-K is a suboptimal primitive: it treats each step in isolation and inherently confuses transient marginality with permanent unimportance, so a token whose score is only intermittently above the cutoff is dropped on the first marginal step, even though its long-run average importance across steps may be high. 
+
+Deterministic top-K misses tokens whose importance fluctuates. Per-step importance scores in KV caches are noisy and time-varying. Attention in modern LLMs is heavy-tailed [ 25 , 14 ]: a small head of tokens holds most of the attention mass, while the rest of the cache sits at near-uniform low scores where the relative ranking between tokens is dominated by noise (Figure 1). A token important to query t may look marginal at t+1 and important again at t+10 . Top-K, however, treats each of these per-step scores as a final verdict: a token that lands below    
+
+> ∗Equal contribution. Contact: el72@rice.edu and zhaozhuo.xu@workato.com .
+
+1
+
+> arXiv:2606.23961v1 [cs.LG] 22 Jun 2026
+
+the cutoff at any single step is dropped with the same finality as a token deep in the tail, regardless of how close its score was to the cutoff. A long context produces many such verdicts, and the per-step errors compound. The result is monotone marginal erosion : every token whose score is only intermittently above the cutoff is silently and permanently lost. 
+
+Figure 1: Attention scores are heavy-tailed: ∼80% of cumulative mass concentrates on the first ∼15% of token positions (black curve), with a small head of high-score tokens (top-left cluster) and a long, noisy tail of marginal-score tokens (bottom band) where deterministic top-K
+
+eviction is forced to choose between near-identical scores. 
+
+Reservoir sampling is the streaming-algorithms answer to this setting. Weighted reservoir sam-pling [ 21 , 7] retains each token with probability propor-tional to its current score, so that a token’s long-run survival across many steps tracks its average importance across steps rather than collapsing on the first step where its score happens to land below the cutoff. We believe this is the right candidate of selection primitive for KV cache eviction, but it inherits the calibration of the score it samples against. The direct-attention magnitude used by existing methods is, however, lo-cally myopic: it counts only what the current query attends to, and misses what we call bridge tokens - to-kens that no single recent query attends to strongly, but that hold together a strongly-connected cluster of mutually-attended tokens across the context, such that removing one would sever the cluster’s internal connec-tions. Bridges are a canonical instance of marginal-rank tokens: deterministic top-K evicts them at every step, even though the clusters they hold together may be highly important. We therefore lift the reservoir’s input weight from this direct-attention score to a Nexus score 
+
+that surfaces bridges before any selection happens. We propose Nexus Sampling , a training-free KV cache eviction method built around two new mechanisms that together address both failure modes identified above, applied uniformly across prefill and decode. Upstream, Nexus scoring passes the direct-attention score through a short iterative walk recurrence that surfaces bridge tokens before any selection happens. Downstream, weighted reservoir sampling draws the K retained tokens with inclusion probability proportional to this walk-augmented weight, replacing the deterministic top-K selection step that every prior eviction method shares. Each fix recovers a category of importance the existing template cannot see: the walk recovers bridges that direct-attention top-K misses, and the reservoir recovers the marginal-rank tokens that any deterministic top-K erodes. Theoretically, Nexus’s long-run token survival decays as a product of per-step inclusion probabilities (a mean over steps), where deterministic top-K’s collapses to zero on the first below-cutoff step (details in App. A). The contributions are: 
+
+• We identify a fundamental limitation of deterministic-top-K KV cache eviction: it converts transient marginality into permanent loss, producing monotone marginal erosion in the streaming, fixed-budget regime that is inherent to KV cache eviction. 
+
+• We propose Nexus Sampling , a training-free KV cache eviction method that applies uniformly to prefill and decode, combining weighted reservoir sampling with a Nexus score that surfaces bridge tokens , tokens anchoring strongly-connected clusters of mutually-attended tokens across the window. 
+
+• We establish theoretical guarantees showing that reservoir sampling’s long-run token survival is a product over steps where deterministic top-K’s is a min over steps , and empirically demonstrate at 20% density that Nexus Sampling stays within ∼1 point of dense attention on LongBench while outperforming top-K
+
+baselines on retrieval-heavy long-context tasks, with up to 10 × smaller per-sequence cache memory than dense FlashAttention-2. 
+
+# 2 Nexus Sampling 
+
+We introduce Nexus Sampling , a KV cache eviction method that runs alongside decoding: at every eviction step t (whenever the budget is hit during the decoding stream), Nexus produces the retention set St via two 2components applied in sequence: Nexus scoring followed by weighted reservoir selection . Nexus scoring passes the per-block attention score through a short iterative walk recurrence that surfaces bridge tokens , tokens anchoring strongly-connected clusters of mutually-attended tokens, and yields a per-block sampling weight w(t) that reflects indirect importance. The reservoir step then draws the K retained blocks with inclusion probability proportional to w(t) under the weighted-without-replacement law, replacing the deterministic top-K selection that every prior eviction method shares. The name reflects the two roles each component plays at every step in the stream: Nexus scoring identifies the nexus blocks that hold a cluster together, and the reservoir samples from the resulting weights so that every positive-weight block keeps positive inclusion probability rather than being deterministically condemned the first time it lands at the marginal rank. 
+
+2.1 Preliminaries and Notation 
+
+Streaming view. We treat KV cache eviction as a streaming problem over the steps of inference. At each step 
+
+t, the LLM ingests one new query qt ∈ R1×D (a prompt token during prefill or a decoded token during decode), attends over the current cache Kt, V t, and appends one new (key, value) pair, after which the cache may exceed the memory budget. An eviction step occurs whenever the budget is hit: a subset St ⊆ { 1, . . . , T t} of B positions is retained, the rest are dropped, and inference continues with KSt , V St . Eviction is therefore relevant in both phases: a long prompt can trigger a one-shot eviction at the end of prefill, while a long generation produces a long stream of eviction steps throughout decode. In both cases, eviction is irreversible: positions evicted at step t are not recoverable at any step t′ > t .
+
+Block granularity. We work at the granularity of key blocks rather than individual tokens, amortizing the per-decision cost over b tokens ( b = 32 ); blocks are indexed by j ∈ { 1, . . . , N k} with Nk = ⌈Tk/b ⌉ where Tk is the number of cached keys. 
+
+Per-block base score. Single-query attention is noisy and dominated by the immediate token, so follow-ing standard practice [ 16 , 9 ] we score blocks against a length-W observation window of recent queries Q ∈
+
+RW ×D on head-averaged representations. The per-block base score a ∈ RNk is the row average of ̂ S =rownorm(BlockSum b(softmax( QK ⊤/√D))) :
+
+a = 1 
+
+> W
+> ∑Ww=1 ̂
+
+Sw, ·, ∑ 
+
+> j
+
+aj = 1 , (1) 
+
+Notation. Throughout the rest of the section we use W for the observation-window length, ̂ S ∈ RW ×Nk for the per-row block distribution, a ∈ RNk for the base score (Eq. 1), c ∈ RNk for the walk state, w ∈ RNk for the combined sampling weight, B for the total retained-block budget, and n for the reservoir averaging count. A full notation table appears in App. A.1. 
+
+2.2 Nexus Scoring 
+
+Nexus scoring assigns each block a two-term Nexus score 
+
+sj = aj + λ ˜cj , (2) that captures both the direct importance aj of block j (how much the recent queries attend to it) and an indirect 
+
+importance ˜cj that measures how strongly block j acts as a bridge token , i.e., how strongly it anchors a cluster of mutually-attended tokens across the window even when no single recent query attends to it strongly. The two terms cover complementary failure modes of a single-query attention score: aj scores blocks the current query has reason to look at; ˜cj scores blocks the current query has reason to remember , by virtue of their role in the recent context. The mixing weight λ ≥ 0 balances the two terms. Both terms are computed from the same per-query rows of ̂ S. Denote the rows by a(q) ∈ RNk , so a(q) =̂ Sq, · is the block distribution of window query q. The direct importance is the uniform row-average, 
+
+a = 1 
+
+> W
+> ∑Wq=1
+
+a(q), (3) which treats each window query as an equal vote. The bridge score, by contrast, aggregates the same rows through an alignment-weighted iterative walk. Starting from C = 0, the walk runs for H steps; at each step we plug in a fresh window query row a(q) and update 
+
+C ← C + γq a(q), γq = 1 + ⟨a(q), C⟩, (4) 3Figure 2: Overview of Nexus Sampling at one eviction step. Nexus scoring (top) combines a direct importance term (windowed per-query attention) with a bridge term obtained by an iterative walk over the same query rows. 
+
+Streaming reservoir sampling (bottom) then draws the retained blocks with inclusion probability proportional to the resulting weight, replacing the deterministic top-K used by every prior eviction method. from which ˜c = C/∥C∥1. The per-block weight fed to the reservoir is the Nexus score plus a small recency tie-break, 
+
+wj = sj + εtie rj , rj = j/ (Nk − 1) , (5) with rj a linear ramp from 0 (oldest block) to 1 (newest), and εtie small enough that it does not flip any real signal but large enough to deterministically break ties in favor of more-recent blocks. 
+
+2.3 Weighted Reservoir Block Selection 
+
+Given the per-block weight w ∈ RNk from §2.2, the reservoir step decides which K of the Nk blocks survive the eviction step. The choice of selection rule here, not the choice of weight, is what distinguishes Nexus Sampling from every prior eviction method. Following standard practice, we retain the attention-sink block and a small recency window unconditionally; these account for Bforced slots of the total budget B, leaving K = B − Bforced slots for the reservoir step below. 
+
+n-averaged reservoir priority. For every remaining candidate block j, we draw n independent uniform variates 
+
+u(1)  
+
+> j
+
+, . . . , u (n) 
+
+> j
+
+∼ U (0 , 1) and form the n-averaged reservoir priority 
+
+πj = 1
+
+n
+
+> n∑
+> i=1
+> (
+
+u(i) 
+
+> j
+> )1/w j
+
+. (6) We then keep the top K candidates by πj .
+
+# 3 Why Nexus Sampling for KV Cache Eviction? 
+
+Every existing eviction method makes two implicit choices: that a token’s importance is read off from direct 
+
+per-step attention, and that the K surviving tokens are picked by deterministic top-K. Both choices are defensible 4for a one-shot prefill against a still-dense cache, but both might break in the streaming, fixed-budget regime that defines KV cache eviction (§2). Nexus Sampling replaces them with two components, Nexus scoring and weighted reservoir selection, each addressing a failure mode that the other cannot reach on its own. 
+
+Deterministic top-K erases subtly important tokens at the cutoff; the reservoir preserves them. Astreaming eviction policy is applied at every step, and under deterministic top-K a token at rank K +1 is dropped with the same finality as a token at rank 10 6, so a token survives the first e steps only if its weight clears the cutoff at every step. Long-run survival is thus a min over steps and collapses to zero on the first below-cutoff step, permanently erasing any token whose per-step weight sits just below the cutoff, even if it is subtly important on average and would be relevant later in the stream. Weighted reservoir sampling [ 7] replaces this min with a product: per-step inclusion probability is monotone in the weight and strictly positive whenever the weight is, so long-run survival 
+
+p(e) 
+
+> j
+
+= ∏
+
+> e′≤e
+
+Pr (j ∈ top -K by π(e′))
+
+stays bounded away from zero whenever w(e′) 
+
+> j
+
+does (§2.3; Lemma 4.1). The reservoir thus fixes the selection rule : it converts transient marginality into a controlled per-step probability rather than an irreversible verdict, and exactly the subtly important tokens the deterministic rule would erase are the ones it keeps at a controlled non-zero rate. 
+
+Direct attention misses bridge tokens; Nexus scoring lifts them. Bridge tokens are a canonical instance of the subtly important tokens above: tokens that no single recent query attends to strongly , but that sit at the intersection of many mutually-attended tokens in the window and structurally hold their cluster together. The direct score a is a uniform average of per-query distributions and does not reward this structural role: a bridge typically picks up moderate mass from many queries but rarely a peak from any one, so it lands in the noisy mid-band of the heavy-tailed score distribution [ 25 , 14 ] rather than in the head. Even a perfect selection rule cannot recover such a token from this score, because sampling (or top-K) proportional to a weight that does not see the structural signal samples from the wrong distribution. The bridge term ˜cj in the Nexus score (§2.2) is built precisely to extract this higher-order signal: an iterative walk over the same per-query rows compounds mass on tokens that successive queries agree on , amplifying exactly the cluster-anchoring positions a uniform average flattens out, which we formalize as hub amplification (Theorem 4.2). The walk thus fixes the weight construction : it ensures the input to selection already reflects indirect importance, so the reservoir’s preservation guarantee applies to bridges rather than to a wrong notion of importance. 
+
+Both fixes are needed, and they compose. The two components are not redundant; each guards against a failure mode the other cannot. The reservoir alone cannot save bridge tokens: if they are not lifted into the head of the weight, sampling proportional to weight samples from the wrong distribution. The walk alone cannot save subtly important tokens that still sit at the cutoff after scoring: a comprehensive per-step weight is still terminated by deterministic top-K the first time it lands below the cutoff. Bridge tokens are recovered upstream in the weight; near-cutoff subtly important tokens are recovered downstream in the selection; together they remove both of the implicit assumptions above. The empirical picture in §5 matches: existing methods do well when the score has a clear head and the relevant tokens are stably top-ranked, and existing methods degrade on multi-hop retrieval, long summarization, and tasks whose answer depends on subtly important tokens that the recent query does not directly attend to. 
+
+# 4 Theoretical Guarantees 
+
+The arguments of §3 have formal counterparts. The reservoir’s long-run survival decays as a product over eviction steps where deterministic top-K’s collapses to zero on the first below-cutoff step (Lemma 4.1), the walk provably amplifies hub tokens above the uniform window average (Theorem 4.2), and the two together yield an end-to-end bound on per-step eviction quality (Proposition 4.3). Proofs and supporting lemmas are deferred to App. A. 
+
+Lemma 4.1 (Min over steps vs. product over steps) . Consider a sequence of eviction steps e = 1 , . . . , E with per-step weights w(e) 
+
+> j
+
+> 0 at every step, and let w(e)(K) denote the K-th largest weight at step e. Then the long-run 
+
+5survival probabilities of block j under deterministic top-K and weighted reservoir sampling satisfy 
+
+Stop-Kj (E) = ∏Ee=1 1[w(e) 
+
+> j
+
+≥ w(e)(K)
+
+> ]
+
+,Sres  
+
+> j
+
+(E) = ∏Ee=1 q(e) 
+
+> j
+
+,
+
+where q(e) 
+
+> j
+
+∈ (0 , 1] is strictly positive whenever w(e) 
+
+> j
+
+> 0. The first product collapses to zero as soon as any single step has w(e) 
+
+> j
+
+< w (e)(K); the second stays bounded away from zero as long as w(e) 
+
+> j
+
+does. 
+
+Lemma 4.1 formalizes the min-vs-product contrast from §3: deterministic top-K converts a single below-cutoff step into an irreversible verdict, while reservoir sampling decays survival only as the product of per-step inclusion probabilities, exactly the property that lets subtly important tokens at the cutoff have a chance to persist across a long stream. 
+
+Theorem 4.2 (Hub amplification) . Assume the H walk-step rows a(1) , . . . , a(H) are i.i.d. with mean a⋆ and covariance Σ, and define the hub score hj = Σ⊤ 
+
+> j
+
+a⋆. The walk recurrence (4) satisfies 
+
+E[˜ c(H) 
+
+> j
+
+] = a⋆,j + DH 
+
+> BH
+
+hj + O(∥Σ∥2 
+
+> F
+
+),
+
+with BH ≥ H and DH ≥ H(H − 1) /2 both block-independent. In particular, E[ ˜c(H) 
+
+> j
+
+] ≷ a⋆,j ⇐⇒ hj ≷ 0: hub blocks are amplified above the unwalked score and peripheral blocks are attenuated. 
+
+Theorem 4.2 formalizes the bridge-recovery claim of §3: the walk does not merely denoise the direct score, it injects a block-dependent term proportional to the hub score hj , which is exactly the higher-order signal a uniform average 
+
+a over per-query rows cannot recover. Because reservoir inclusion is monotone in the sampling weight (App. A.2), the hub amplification carries through to the selection step: bridge-like tokens that the direct score a leaves in the noisy mid-band are lifted into the head of the Nexus score, and the reservoir then keeps them at the controlled non-zero rate of Lemma 4.1. Lemma 4.1 and Theorem 4.2 are component-level guarantees on selection and scoring; we close the loop by combining them into an end-to-end bound on the retained-utility error of one eviction step. Let zj ≥ 0 denote the utility that block j would contribute to future attention if it remained in cache (e.g., its future block-attention mass over a short horizon). 
+
+Proposition 4.3 (Eviction-quality bound) . Fix one eviction step and let Ij be the reservoir inclusion indicator with pj = Pr (Ij = 1) . The Horvitz–Thompson estimator ̂ ZHT = ∑ 
+
+> j
+
+Ij zj /p j is unbiased for Z = ∑ 
+
+> j
+
+zj , and if 
+
+pj ≥ pmin > 0 and 0 ≤ zj ≤ Zmax , then with probability ≥ 1 − δ,
+
+|̂ZHT − Z| ≤ Zmax 
+
+> √
+
+KN k/(δ p min ).
+
+Moreover, if the Nexus weight approximates future utility as ∥w − z∥∞ ≤ η, then the expected evicted utility 
+
+L = ∑ 
+
+> j
+
+(1 − Ij )zj satisfies ∣∣E[L] − ∑ 
+
+> j
+
+(1 − pj )wj 
+
+> ∣∣
+
+≤ ηN k.
+
+Proposition 4.3 separates the two sources of approximation: the reservoir step (Lemma 4.1) contributes no systematic bias once inclusion probabilities are accounted for, so the remaining error is controlled by how well the Nexus weight w tracks the future utility z, which is precisely what the walk (Theorem 4.2) is designed to improve over the direct score a.
+
+# 5 Experiments 
+
+We evaluate Nexus Sampling on two long-context benchmarks under two eviction regimes, comparing against competitive baselines in each regime. 65.1 Setup 
+
+Models. We evaluate three long-context instruction-tuned models at different scales: Llama-3.1-8B-Instruct, Llama-3.2-1B-Instruct, and Qwen3-8B, all supporting context lengths up to 128K tokens, with the default chat template for each model. Benchmarks. We evaluate on two complementary long-context benchmarks: (i) LongBench [2 ], spanning single- and multi-document QA, summarization, to few-shot tasks; and (ii) RULER [10 ], a synthetic diagnostic stressing retrieval and position-sensitive reasoning over very long contexts (4K–64K tokens). On RULER we report average accuracy across the 13-task suite at each context length. Baselines. We compare Nexus Sampling against SnapKV [ 16 ] and PyramidKV [3 ] in the prefill-only setting and against H2O [25 ] and MorphKV [9] in the prefill + decode setting, with Full Attention as an upper-reference. We additionally report Ada-KV variants (Ada-SnapKV, Ada-PyramidKV), which layer the head-adaptive budget allocation of Feng et al. [8] on top of each score; see Appendix C for the isolated comparison. All methods are at 20% density (80% eviction). 
+
+Implementation details. We implement Nexus Sampling on top of HuggingFace Transformers, with block-wise eviction at block size b = 32 and dense attention on the retained cache served by FlashAttention-2 kernels [ 5 ]. Observation window W = 16 ; walk depth H = 3 ; mixing weight λ = 0 .5; tie-break magnitude εtie = 10 −6; reservoir averaging n = 5 . Because the reservoir step is stochastic, all reported numbers use a fixed random seed; the n = 5 
+
+priority averaging (Eq. 6) further suppresses per-seed variation, which we find negligible relative to the gaps in Tables 1–2. All experiments run on a single NVIDIA H200 (143 GB) with greedy decoding. 
+
+5.2 LongBench Results 
+
+Table 1: LongBench accuracy at 80% KV cache eviction ( B/N k = 0 .20 , i.e., Density = 20% ) across three models and 16 tasks. Prefill blocks evict only during the prefill phase (baselines: SnapKV, PyramidKV); Prefill + Decode 
+
+blocks evict throughout the entire inference stream (baselines: H2O, MorphKV). Bold marks the leading method per row across the eviction methods (Full Attention shown for reference).                                                                                                                                                                                                                                                                                                                                                                                                                                            
+
+> Model Method Density WIKI GOV HPQA LCC MNews MFQA MUS NQA COUNT Retr. QAS QMS REPO SamS TREC TRIV Avg.
+> Prefill-only eviction.
+> Llama-3.1-8B Full Attention 100% 47.75 34.70 56.96 55.20 26.76 56.16 32.77 29.91 9.66 99.50 45.06 25.39 47.80 43.27 73.00 92.14 48.50 SnapKV 20% 47.17 28.69 58.61 55.42 23.19 55.44 31.53 30.28 10.25 99.50 40.03 24.60 48.75 42.17 68.50 91.43 47.22 PyramidKV 20% 47.96 28.07 57.33 53.46 22.37 56.11 32.97 30.49 10.33 99.50 42.36 24.90 47.02 42.53 71.00 91.68 47.38
+> Nexus Sampling 20% 48.82 30.07 58.03 54.62 22.65 57.83 32.68 29.24 10.00 99.00 43.47 25.24 47.87 42.93 73.00 92.66 48.01
+> Llama-3.2-1B Full Attention 100% 31.23 29.65 35.47 29.83 25.88 43.35 18.45 20.40 3.67 4.50 16.35 21.84 36.04 39.77 61.50 78.54 31.03 SnapKV 20% 30.45 22.92 35.48 30.75 19.61 39.04 17.15 21.58 3.67 5.00 15.06 21.18 35.86 37.40 58.00 79.31 29.53 PyramidKV 20% 28.40 20.27 34.89 28.62 16.92 39.91 16.19 19.63 3.00 5.00 14.47 20.80 35.13 37.37 58.00 78.45 28.57
+> Nexus Sampling 20% 31.86 24.58 34.52 30.79 20.91 41.87 17.53 20.75 5.67 5.00 15.30 21.74 36.23 37.71 58.50 79.95 30.18
+> Qwen3-8B Full Attention 100% 42.62 33.58 57.94 57.39 24.82 52.94 34.33 27.64 4.50 100.00 47.91 23.85 56.67 44.17 71.50 90.71 48.16 SnapKV 20% 42.38 28.76 56.94 58.07 20.29 52.76 33.92 27.96 6.00 100.00 43.55 23.17 56.60 43.90 66.50 90.71 46.97 PyramidKV 20% 39.56 26.87 55.25 55.24 18.44 48.48 31.78 26.02 6.50 100.00 36.61 22.29 53.29 43.40 68.00 90.55 45.14
+> Nexus Sampling 20% 42.49 31.73 57.68 56.93 22.11 52.52 33.73 27.44 5.00 99.50 43.72 23.89 56.23 43.85 71.00 91.36 47.45
+> Prefill + decode eviction.
+> Llama-3.1-8B Full Attention 100% 47.75 34.70 56.96 55.20 26.76 56.16 32.77 29.91 9.66 99.50 45.06 25.39 47.80 43.27 73.00 92.14 48.50 H2O 20% 48.52 28.05 56.97 52.67 22.17 53.24 32.14 29.87 8.96 99.00 38.78 24.42 45.88 43.37 73.00 91.65 46.79 MorphKV 20% 48.30 28.41 57.15 54.63 23.17 54.14 30.09 30.35 10.12 99.50 38.96 24.26 47.76 42.51 52.50 92.36 45.89
+> Nexus Sampling 20% 48.06 29.44 57.61 53.74 22.15 56.78 32.37 30.89 10.00 99.00 41.16 25.23 46.64 42.75 70.00 92.62 47.40
+> Llama-3.2-1B Full Attention 100% 31.23 29.65 35.47 29.83 25.88 43.35 18.45 20.40 3.67 4.50 16.35 21.84 36.04 39.77 61.50 78.54 31.03 H2O 20% 30.80 23.38 35.45 28.62 21.00 39.66 17.63 20.65 2.67 4.50 14.62 21.16 34.60 38.92 61.50 78.50 29.60 MorphKV 20% 28.89 23.58 33.64 28.69 21.51 34.95 16.78 19.56 3.17 4.50 14.50 21.17 35.12 36.77 47.00 79.50 28.08
+> Nexus Sampling 20% 30.97 24.63 34.41 30.46 20.81 41.16 17.62 21.59 4.64 5.00 15.18 21.01 37.48 38.73 62.00 78.88 30.29
+> Qwen3-8B Full Attention 100% 42.62 33.58 57.94 57.39 24.82 52.94 34.33 27.64 4.50 100.00 47.91 23.85 56.67 44.17 71.50 90.71 48.16 H2O 20% 42.08 29.60 57.83 55.19 19.50 51.76 33.73 28.18 3.50 100.00 43.72 23.28 55.10 44.81 71.50 90.71 46.91 MorphKV 20% 40.15 29.44 55.96 57.36 20.88 50.66 31.51 27.26 4.50 100.00 40.45 23.01 56.32 43.64 53.50 90.80 45.34
+> Nexus Sampling 20% 42.38 30.80 59.21 56.79 20.60 52.17 34.11 26.96 5.00 100.00 43.95 23.31 56.29 43.10 70.00 91.36 47.25
+
+Table 1 reports per-task LongBench accuracy at 80% eviction. In the prefill-only regime, Nexus Sampling matches or exceeds SnapKV and PyramidKV on the average across all three models, recovering most of the gap to Full Attention. In the prefill + decode regime, where eviction errors compound across decoding steps and the reservoir’s product-over-steps guarantee (Lemma 4.1) is structurally relevant, Nexus Sampling wins the average against baselines. The gain on MultiFieldQA-en (MFQA) is especially indicative of the marginal-erosion failure mode: in the prefill + decode regime Nexus Sampling tops both deterministic top-K baselines (Llama-3.1-8B: 56.78 vs. H2O 53.24 and MorphKV 54.14) and matches Full Attention (56.16). MFQA answers often hinge on a span the recent 7Table 2: RULER accuracy (%) across 4K–64K context lengths at 80% KV cache eviction. Prefill blocks evict only during prefill; Prefill + Decode blocks evict throughout the entire inference stream. Bold marks the leading eviction method per row (Full Attention shown for reference). Qwen3-8B supports a maximum context length of 32K, so its 64K column cannot be evaluated and is reported as “–”.                                                                                                                                                       
+
+> Model Method Density 4K 8K 16K 32K 64K Avg.
+> Prefill-only eviction.
+> Llama-3.1-8B Full Attention 100% 96.15 95.91 95.43 91.35 86.30 93.03 SnapKV 20% 82.69 68.51 73.8 64.42 73.32 72.55 PyramidKV 20% 75.00 83.65 86.30 86.30 81.97 82.64
+> Nexus Sampling 20% 89.42 88.46 94.23 88.46 89.18 89.95
+> Llama-3.2-1B Full Attention 100% 76.68 70.67 65.38 64.66 60.34 67.55 SnapKV 20% 45.43 42.55 37.02 37.02 30.05 38.41 PyramidKV 20% 41.11 45.91 43.51 46.88 41.59 43.80
+> Nexus Sampling 20% 58.89 61.78 56.97 63.70 61.54 60.58
+> Qwen3-8B Full Attention 100% 97.60 95.43 88.46 92.79 –93.57 SnapKV 20% 70.49 67.01 73.61 79.17 –72.57 PyramidKV 20% 61.54 61.06 65.14 65.38 –63.28
+> Nexus Sampling 20% 77.16 83.41 80.29 82.45 –80.83
+> Prefill + decode eviction.
+> Llama-3.1-8B Full Attention 100% 96.15 95.91 95.43 91.35 86.30 93.03 H2O 20% 68.03 68.99 77.40 74.52 69.23 71.63 MorphKV 20% 84.62 65.38 66.83 61.30 68.27 69.28
+> Nexus Sampling 20% 91.35 91.35 94.47 89.18 84.86 90.24
+> Llama-3.2-1B Full Attention 100% 76.68 70.67 65.38 64.66 60.34 67.55 H2O 20% 36.06 33.65 35.34 40.15 37.26 36.49 MorphKV 20% 22.84 17.31 15.39 18.75 12.98 17.45
+> Nexus Sampling 20% 58.89 59.13 59.14 62.98 58.89 59.81
+> Qwen3-8B Full Attention 100% 97.60 95.43 88.46 92.79 –93.57 H2O 20% 66.83 71.88 74.04 70.19 –70.74 MorphKV 20% 67.31 62.50 61.30 57.45 –62.14
+> Nexus Sampling 20% 73.56 81.49 77.16 84.14 –79.09
+
+query does not strongly attend to, a subtly important token that deterministic top-K drops once its score dips below the cutoff and that reservoir sampling instead keeps alive at a controlled rate. 
+
+5.3 RULER Across Context Lengths 
+
+Table 2 reports RULER accuracy across 4K–64K context lengths. Note that Qwen3-8B supports a maximum context length of 32K, so we cannot evaluate it at 64K and its average is taken over the 4K–32K lengths. Nexus Sampling is the leading eviction method in nearly every cell, with margins that grow with context length. In 
+
+prefill-only , Nexus matches Full Attention within ∼3 points on Llama-3.1-8B on average, while SnapKV loses 
+
+15 –25 points; on the smaller Llama-3.2-1B the gap to SnapKV widens further ( 60 .58 vs. 38 .41 on average). In 
+
+prefill + decode , the same pattern is amplified: H2O and MorphKV both sit ∼20 points below Nexus at every length (avg 71.63 and 69.28 vs. Nexus 90.24), with MorphKV degrading further as the stream lengthens, while Nexus Sampling stays within ∼1.5 points of Full Attention on Llama-3.1-8B at 64K, and on Llama-3.2-1B, Nexus almost doubles the next-best baseline ( 59 .81 vs. H2O 36 .49 ). This is the empirical signature of the min-vs-product survival argument: on retrieval-heavy synthetic tasks where every step’s decisions matter, deterministic top-K
+
+silently erodes the relevant tokens while reservoir sampling does not. 85.4 Agentic Coding 
+
+We further evaluate Nexus Sampling on an agentic coding benchmark, where the model operates as a multi-turn coding agent over a long, growing interaction trace and is scored by Resolved/Pass@1 on 50 tasks sampled from SWE-bench [ 12 ]. Concretely, we use DeepSWE-Preview [ 17 ], trained on top of Qwen3-32B within the R2E-Gym environment [ 11 ]. This setting stresses eviction in two orthogonal ways. First, we vary the scoring scope : in 
+
+Prefill-only the cache is compressed once during prefill, while in Prefill + Decode eviction runs throughout the entire generation stream. Second, and more importantly, we vary the eviction protocol . Under Full context every turn ,the entire history is re-prefilled at each agent turn and compression is re-applied from scratch, so the cache is only an inference-time approximation of full attention and evicted tokens can re-enter on later turns; eviction is always conditioned on the current turn’s query, so it is effectively a single-turn problem of deciding what is relevant to the question being answered right now , with full access to the history each time. Under True eviction , the cache persists across turns and evicted tokens are gone permanently, making it a genuinely multi-turn problem: the method must commit to keeping or discarding a token before knowing which later turn will need it, so it must retain information whose relevance only surfaces several turns later. Mistakes are irreversible and compound over the agent’s lifetime. Table 3: Agentic coding accuracy ( Resolved/Pass@1 over 50 tasks) at 20% KV density (80% eviction). Full context every turn re-prefills and re-compresses the entire history at every agent turn (evicted tokens can return); True eviction carries a persistent cache across turns (evicted tokens are gone for good). Bold marks the leading eviction method per block (Dense shown for reference).                                             
+
+> Scope Protocol Method KV density Resolved/Pass@1 Prefill-only  Full context every turn Dense 100% 12 (24%) SnapKV 20% 8 (16%) PyramidKV 20% 7 (14%) AdaSnapKV 20% 6 (12%) AdaPyramidKV 20% 6 (12%)
+> Nexus Sampling 20% 9 (18%)
+> True eviction Dense 100% 12 (24%) SnapKV 20% 8 (16%)
+> PyramidKV 20% 1 (2%) AdaSnapKV 20% 8 (16%)
+> AdaPyramidKV 20% 1 (2%)
+> Nexus Sampling 20% 8 (16%) Prefill + Decode
+> Full context every turn Dense 100% 12 (24%) H2O 20% 1 (2%) MorphKV 20% 6 (12%)
+> Nexus Sampling 20% 7 (14%)
+> True eviction Dense 100% 12 (24%) H2O 20% 4 (8%) MorphKV 20% 9 (18%) Nexus Sampling 20% 8 (16%)
+
+Table 3 reports the results. Under Full context every turn , Nexus Sampling leads all eviction baselines in both scoring scopes, confirming that the Nexus score is a stronger selection signal than direct attention even when no token is permanently lost. The protocol shift to True eviction is where the structural differences surface: PyramidKV and AdaPyramidKV collapse from 7/6 to 1/1 once their evicted tokens can no longer be recovered, the failure mode an irreversible deterministic top-K verdict induces, whereas Nexus Sampling remains stable at 
+
+8 and matches the best baseline. In the hardest Prefill + Decode · True eviction setting, Nexus Sampling stays competitive at 8, one task behind MorphKV and ahead of H2O. 9Figure 3: Ablations of the five Nexus knobs on Llama-3.1-8B at 20% density, evaluated on three multi-hop QA tasks (HotpotQA, 2WikiMQA, MultiFieldQA-en). 
+
+5.5 Ablations 
+
+Nexus Sampling is robust to its hyperparameters: across walk depth H, mixing weight λ, observation window 
+
+W , block size b, and density (Figure 3), the defaults of §5.1 sit inside a flat region on Llama-3.1-8B across three multi-hop QA tasks (HotpotQA, 2WikiMQA, MultiFieldQA-en). First, the walk-depth sweep saturates by H = 3 
+
+and is indistinguishable from H = 5 , matching the rank-1 propagation analysis of §4: a few walk steps are enough to surface bridge tokens, and additional iterations only resharpen what is already there, so H does not need per-task tuning. Second, accuracy is essentially flat from 20% to 80% density on all three tasks, confirming the aggressive setting we report in §5.2–5.3 loses no accuracy headroom; this is the empirical signature of the marginal-mass argument of §3, where reservoir sampling preserves subtly important tokens that deterministic top-K would erode rather than collapsing on the first below-cutoff step. Details discussion appears in App. B. 
+
+5.6 Inference Efficiency 
+
+We measure the two efficiency axes that long-context eviction must improve under a fixed memory budget: decode throughput and steady-state per-sequence memory. All runs use Llama-3.1-8B-Instruct in bf16 on a single H200 (143 GB), prefill length Tp = 8 K, batch size 1, against dense FlashAttention-2 [ 5 ] and the baselines from Tables 1–2. Table 4: Decode throughput (tokens/s) and per-step latency (ms) at Tp = 8 K prefill, batch size 1, on Llama-3.1-8B-Instruct (H200, bf16). Higher is better for throughput; lower is better for per-step latency. Bold marks the best value per row.                                      
+
+> Decode DMetric Dense SnapKV MorphKV Nexus Sampling
+> 4K Throughput (tok/s, ↑)35.1 40.2 31.4 45.5
+> Per-step (ms, ↓)28.53 24.85 31.84 22.00
+> 8K Throughput (tok/s, ↑)35.0 34.2 29.2 45.2
+> Per-step (ms, ↓)28.55 29.27 34.27 22.12
+> 16K Throughput (tok/s, ↑)36.0 35.0 32.8 43.8
+> Per-step (ms, ↓)27.81 28.55 30.49 22.83
+
+10 Decode throughput. Table 4 reports decode-time throughput and per-step latency across decode lengths 
+
+D ∈ { 4K, 8K, 16 K}. Nexus Sampling delivers 1.22 –1.30 × throughput and 15 –23% lower per-step latency over dense FlashAttention-2, beating both SnapKV and MorphKV at every D.Table 5: Steady-state per-sequence decode memory ( mem post − mem after_load , model weights excluded) on Llama-3.1-8B-Instruct (bf16, H200, batch size 1) at Tp = 8 K. Nexus Sampling pins the cache at a constant ≈1638-token budget regardless of decode length, so its decode memory is essentially flat in D, while dense FlashAttention-2 grows linearly. Bold marks the lower memory footprint per row.                 
+
+> Decode DDense FA-2 Nexus Sampling Saving
+> 4K 1.5 GiB 0.3 GiB 5.0×
+> 8K 2.0 GiB 0.3 GiB 6.7×
+> 16K 3.0 GiB 0.4 GiB 7.5×
+> 32K 5.0 GiB 0.5 GiB 10 .0×
+
+Per-sequence memory. Table 5 reports the steady-state per-sequence decode memory (GPU memory each sequence holds during decoding excluding model weights, which determines how many concurrent sequences fit under a fixed GPU budget). Nexus Sampling saves 5.0–10 .0× over dense FlashAttention-2, with the saving growing with D because the dense cache scales as Tp + D while Nexus pins the working cache at a constant 20% density of 
+
+Tp; at D = 32 K this 10 × reduction translates into a comparable factor in achievable batch size on the same GPU. 
+
+# 6 Related Work 
+
+We situate Nexus Sampling within the broader landscape of KV cache compression and reservoir sampling. KV cache eviction methods ( StreamingLLM [22 ], H2O [ 25 ], SnapKV [ 16 ], PyramidKV [ 3 ], Ada-KV [ 8 ], and 
+
+MorphKV [ 9 ]) all reduce to different scoring strategies fed into the same deterministic top-K selection rule, leaving them vulnerable to the irreversible-verdict failure mode discussed in §3. Nexus Sampling is orthogonal to KV cache selection (sparse attention) methods such as Quest [20 ], BLASST [24 ], and Sketch-and-Walk [ 14 ], and can be composed with them: eviction decides which tokens stay resident in the cache, and sparse attention then decides which of the surviving tokens to read at each step, so the two stack naturally as a memory-side and a compute-side compression on the same cache. Nexus Sampling also connects to classical weighted reservoir sampling [ 4 , 21 , 7 ]. See Appendix D for a detailed discussion of each method and its relationship to our approach. 
+
+# 7 Conclusion 
+
+We presented Nexus Sampling , a training-free KV cache eviction method that pairs an iterative walk surfacing bridge tokens with weighted reservoir sampling, replacing the deterministic top-K selection that every prior eviction method shares. Theoretically, the walk provably amplifies hub tokens above any uniform window average, and the reservoir’s long-run survival decays as a product over eviction steps rather than collapsing on the first below-cutoff step. Empirically, at 80% KV cache eviction, Nexus Sampling matches dense attention within ∼1point on LongBench while outperforming top-K baselines on retrieval-heavy long-context tasks, with up to 10 ×
+
+smaller per-sequence cache memory than dense FlashAttention-2. 
+
+Implications for agentic context. As LLM workloads shift from one-shot prompts toward long-running agents, eviction moves from a one-time cost to a continuous, lifetime-shaping decision. We expect that in this regime the algorithmic question of what selection primitive to use eclipses the question of what scoring function to use :existing methods already produce reasonable per-token weights, but only a primitive that preserves marginal mass across a long stream of eviction steps, like the reservoir step at the core of Nexus Sampling, is structurally matched to a streaming-budget setting. 11 References 
+
+[1] Anthropic. Claude Sonnet 4.5. Anthropic model release, 2025. [2] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. LongBench: A bilingual, multitask benchmark for long context understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL) , 2024. [3] Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao. PyramidKV: Dynamic KV cache compression based on pyramidal information funneling. In Conference on Language Modeling (COLM) , 2025. [4] M.-T. Chao. A general purpose unequal probability sampling plan. Biometrika , 69(3):653–656, 1982. [5] Tri Dao. FlashAttention-2: Faster attention with better parallelism and work partitioning. In International Conference on Learning Representations (ICLR) , 2024. [6] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Processing Systems (NeurIPS) ,2022. [7] Pavlos S. Efraimidis and Paul G. Spirakis. Weighted random sampling with a reservoir. Information Processing Letters , 97(5):181–185, 2006. [8] Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S. Kevin Zhou. Ada-KV: Optimizing KV cache eviction by adaptive budget allocation for efficient LLM inference. In Advances in Neural Information Processing Systems (NeurIPS) , 2025. [9] Ravi Ghadia, Avinash Kumar, Gaurav Jain, Prashant Nair, and Poulami Das. Dialogue without limits: Constant-sized KV caches for extended responses in LLMs. In International Conference on Machine Learning (ICML) , 2025. [10] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. RULER: What’s the real context size of your long-context language models? In Conference on Language Modeling (COLM) , 2024. [11] Naman Jain, Jaskirat Singh, Manish Shetty, Liang Zheng, Koushik Sen, and Ion Stoica. R2E-Gym: Procedural environments and hybrid verifiers for scaling open-weights SWE agents. arXiv preprint arXiv:2504.07164 ,2025. [12] Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. SWE-bench: Can language models resolve real-world GitHub issues? In International Conference on Learning Representations (ICLR) , 2024. [13] Sahil Joshi, Agniva Chowdhury, Wyatt Bellinger, Amar Kanakamedala, Ekam Singh, Hoang Anh Duy Le, Aditya Desai, and Anshumali Shrivastava. SOCKET: SOft collision kernel Estimator for sparse attention. 
+
+arXiv preprint arXiv:2602.06283 , 2026. [14] Hoang Anh Duy Le, Sahil Joshi, Zeyu Yang, Zhaozhuo Xu, and Anshumali Shrivastava. Scout before you attend: Sketch-and-walk sparse attention for efficient LLM inference. arXiv preprint arXiv:2602.07397 , 2026. [15] Hoang Anh Duy Le, Shaochen Zhong, Yifan Lu, Yingtong Dou, Jiayi Yuan, Yu-Neng Chuang, Xiran Fan, Guanchu Wang, Yuzhong Chen, and Xia Hu. FAFO: Lossy KV cache compression for lossless inference acceleration via draftless fumble decoding. OpenReview preprint , 2026. https://openreview.net/forum? id=oSk9tP5Mgs .12 [16] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. SnapKV: LLM knows what you are looking for before generation. In Advances in Neural Information Processing Systems (NeurIPS) , 2024. [17] Michael Luo, Naman Jain, Jaskirat Singh, Sijun Tan, Ameen Patel, Qingyang Wu, Erran Ariyak, Colin Cai, Alejandro Cuadron, Tianjun Zhang, Ion Stoica, and Koushik Sen. DeepSWE: Training a fully open-sourced, state-of-the-art coding agent by scaling rl. Notion Blog, 2025. Agentica and Together AI. [18] OpenAI. OpenAI o1 system card. Technical report, OpenAI, 2024. [19] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Anselm Levskaya, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. Efficiently scaling transformer inference. In 
+
+Proceedings of Machine Learning and Systems (MLSys) , 2023. [20] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. Quest: Query-aware sparsity for efficient long-context LLM inference. In International Conference on Machine Learning (ICML) ,2024. [21] Jeffrey S. Vitter. Random sampling with a reservoir. ACM Transactions on Mathematical Software , 11(1): 37–57, 1985. [22] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. In International Conference on Learning Representations (ICLR) , 2024. [23] Jiayi Yuan, Hongyi Liu, Shaochen Zhong, Yu-Neng Chuang, Songchen Li, Guanchu Wang, Duy Le, Hongye Jin, Vipin Chaudhary, Zhaozhuo Xu, Zirui Liu, and Xia Hu. KV cache compression, but what must we give in return? A comprehensive benchmark of long context capable approaches. In Findings of the Association for Computational Linguistics: EMNLP 2024 , pages 4623–4648, 2024. [24] Jiayi Yuan, Cameron Shinn, Kai Xu, Jingze Cui, George Klimiashvili, Guangxuan Xiao, Perkz Zheng, Bo Li, Yuxin Zhou, Zhouhai Ye, Weijie You, Tian Zheng, Dominic Brown, Pengbo Wang, Markus Hoehnerbach, Richard Cai, Julien Demouth, John D. Owens, Xia Hu, Song Han, Timmy Liu, and Huizi Mao. BLASST: Dynamic BLocked attention sparsity via softmax thresholding. arXiv preprint arXiv:2512.12087 , 2025. [25] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. H2O: Heavy-hitter oracle for efficient generative inference of large language models. In Advances in Neural Information Processing Systems (NeurIPS) , 2023. 13 A Theoretical Analysis 
+
+This appendix gives full proofs for the three statements of §4 (Lemma 4.1, Theorem 4.2, and Proposition 4.3), together with several supporting statements that we develop only here: reservoir unbiasedness (Lemma A.1), 
+
+n-averaged concentration (Lemma A.2), window noise reduction (Lemma A.3), and the walk decomposition that underlies Theorem 4.2 (Lemma A.4). Main-text statements are restated verbatim (or in a slightly expanded form when convenient for the proof); appendix-only statements are presented in full. 
+
+A.1 Notation 
+
+Symbol Meaning 
+
+W observation window length (recent query tokens) 
+
+Q ∈ RW ×D trailing W query rows, head-averaged 
+
+K ∈ RTk ×D full key cache, head-averaged 
+
+b tokens per key block 
+
+Nk = ⌈Tk/b ⌉ number of key blocks, indexed by j
+
+P ∈ RW ×Tk token-level attention matrix over the observation window 
+
+M ∈ RW ×Nk block-aggregated attention; Mw,j = ∑jb t=( j−1) b+1 Pw,t 
+
+ˆS ∈ RW ×Nk row-normalized block attention; ˆSw,j = Mw,j / ∑ 
+
+> j′
+
+Mw,j ′
+
+a(q) = ˆSq, · attention distribution of query row q
+
+a⋆ = E[a(q)] population mean block-attention distribution 
+
+Σ covariance matrix; Σjk = Cov( ˆSq,j , ˆSq,k )
+
+C ∈ RNk hub score accumulator from the multi-hop walk 
+
+γq = 1 + ⟨a(q), C⟩ per-step amplification factor 
+
+hj = Σ⊤ 
+
+> j
+
+a⋆ hub score of block j; Σj is the j-th column of Σ
+
+wj combined sampling weight (Eq. 5) 
+
+πj reservoir priority of block j (Eq. 6) 
+
+n reservoir averaging count 
+
+K block retention budget after forced blocks are removed 
+
+e cache-update event index in the streaming analysis 
+
+Table 6: Notation used in §2 and Appendix A. 
+
+A.2 Reservoir Sampling: Unbiasedness and Concentration 
+
+Lemma A.1 (Reservoir unbiasedness, n = 1 ; 7). Let πj = u1/w j 
+
+> j
+
+with uj ∼ U (0 , 1) independent, and let 
+
+Ij = 1{j ∈ S} indicate whether block j belongs to the top-K priority set. The selected set S is a probability-proportional-to-size sample without replacement. In particular pj = Pr (Ij = 1) > 0 whenever wj > 0, pj is monotone in wj , and for any deterministic utility vector z,̂
+
+ZHT =
+
+> Nk
+
+∑
+
+> j=1
+
+Ij zj
+
+pj
+
+satisfies E[̂ ZHT ] = 
+
+> Nk
+
+∑
+
+> j=1
+
+zj .
+
+Proof. The priority rule of Efraimidis and Spirakis [7] is equivalent to drawing independent exponential clocks 
+
+Ej = − log (uj )/w j with rates wj and taking the first K arrivals. This is the standard probability-proportional-to-size without-replacement law. Positivity follows because a positive-rate exponential clock can arrive among the first K with non-zero probability; monotonicity follows by coupling two clocks with the same uj , since u1/w j
+
+> j
+
+increases with wj (equivalently, − log (uj )/w j decreases with wj ). The Horvitz–Thompson identity is immediate: 
+
+E[Ij zj /p j ] = zj for each j, and summing over blocks gives the claim. The statement above is intentionally phrased in terms of inclusion probabilities pj rather than the simplified formula 
+
+Kw j / ∑ 
+
+> j′
+
+wj′ . For fixed-size weighted sampling without replacement, the exact marginal pj has no universal linear closed form for all weights and budgets; what Nexus needs is the weaker but correct fact that positive-weight blocks have positive, monotone inclusion probability and admit unbiased retained-mass estimation. 14 Lemma A.2 (n-averaged concentration) . Let π(n) 
+
+> j
+
+= 1
+
+> n
+> ∑ni=1
+
+(u(i) 
+
+> j
+
+)1/w j with u(i) 
+
+> j
+
+∼ U (0 , 1) independent. Then 
+
+E[π(n) 
+
+> j
+
+] = wj /(wj + 1) and Var (π(n) 
+
+> j
+
+) → 0 at rate 1/n as n → ∞ . If the weights wj are distinct (as guaranteed in practice by the recency tie-break εtie rj ), the rank of block j under π(n) 
+
+> j
+
+converges almost surely to the rank under 
+
+wj /(wj + 1) as n → ∞ .Proof. For u ∼ U (0 , 1) , the random variable X = u1/w has CDF FX (x) = Pr (u ≤ xw) = xw on [0 , 1] , density 
+
+fX (x) = wx w−1, and moments E[Xk] = w/ (w + k). Hence E[X] = w/ (w + 1) and Var (X) = w/ (w + 2) −
+
+(w/ (w + 1)) 2 = w/ [( w + 1) 2(w + 2)] . Averaging n i.i.d. copies gives E[π(n) 
+
+> j
+
+] = wj /(wj + 1) and Var (π(n) 
+
+> j
+
+) = 
+
+wj /[n(wj + 1) 2(wj + 2)] = O(1 /n ). By the strong law of large numbers, π(n)
+
+> ja.s.
+
+−−→ wj /(wj + 1) , and the monotonicity of w/ (w + 1) in w ensures that the rank under π(n) 
+
+> j
+
+converges a.s. to the rank under wj /(wj + 1) .Because wj /(wj + 1) is strictly increasing in wj , the deterministic limit induces the same ordering as top-K by wj
+
+directly. The averaging count n is therefore a single-knob interpolation between unbiased sampling (Lemma A.1) and deterministic top-K (n → ∞ ), with no other change to the pipeline. 
+
+A.3 Streaming Marginal-Mass Survival 
+
+Lemma 4.1 (Min over steps vs. product over steps; restated). Consider a sequence of eviction steps 
+
+e = 1 , . . . , E with per-step weights w(e) 
+
+> j
+
+> 0 and a fixed retention budget K at every step. Let Stop-Kj (E) and Sres  
+
+> j
+
+(E)
+
+denote the long-run survival probability of block j under deterministic top-K and reservoir sampling respectively. Then Stop-Kj (E) = ∏Ee=1 1{w(e) 
+
+> j
+
+≥ w(e)(K)}, which collapses to zero as soon as any single step has w(e) 
+
+> j
+
+< w (e)(K); while 
+
+Sres  
+
+> j
+
+(E) = ∏Ee=1 q(e) 
+
+> j
+
+with q(e) 
+
+> j
+
+∈ (0 , 1] strictly positive whenever w(e) 
+
+> j
+
+> 0.Proof. Under deterministic top-K, block j survives step e iff w(e) 
+
+> j
+
+≥ w(e)(K). Survival of all E steps is therefore the indicator ∏Ee=1 1{w(e) 
+
+> j
+
+≥ w(e)(K)}, which is zero whenever a single step falls below the cutoff. Under reservoir sampling, Lemma A.1 gives a positive per-step inclusion probability q(e) 
+
+> j
+
+whenever w(e) 
+
+> j
+
+> 0. With independent priority draws at different eviction steps, the survival probability is ∏ 
+
+> e
+
+q(e) 
+
+> j
+
+, which is strictly positive whenever every q(e) 
+
+> j
+
+is. This is the precise sense in which the reservoir step is the right primitive for the streaming-budget regime: deterministic top-K converts a single marginal-rank misjudgment into permanent, irrecoverable loss (the block is gone from the cache and cannot re-enter), while reservoir sampling assigns strictly positive inclusion probability at every event, so the long-run survival probability remains bounded away from zero as long as the block’s per-event weight is positive. 
+
+A.4 Window Averaging as Noise Reduction 
+
+Lemma A.3 (Window noise reduction) . If each row a(q) = μ + ξq with E[ξq] = 0 and per-coordinate variance 
+
+≤ ν2, then with probability ≥ 1 − δ,
+
+∥a − μ∥∞ ≤ ν
+
+> √
+
+2 log(2 Nk/δ )/W . 
+
+Proof. By construction a−μ = (1 /W ) ∑ 
+
+> q
+
+ξq, an average of W independent zero-mean coordinate-wise sub-Gaussian random vectors. For any block j, Hoeffding’s inequality (applied to bounded coordinates of ξq on [−1, 1] ) gives 
+
+Pr (| (a − μ)j | ≥ t) ≤ 2 exp( −W t 2/(2 ν2)) .
+
+Taking a union bound over the Nk block coordinates and solving for t at confidence 1 − δ yields the claim. The bound is the standard 1/√W noise-reduction rate, with the Nk-dimensional union bound contributing only a 
+
+log Nk factor. The implication for the reservoir step is that a modest window length ( W ≈ 16 –32 ) suffices to bring the per-block noise floor on the reservoir’s input weights below the typical scale of meaningful per-block weight differences. 15 A.5 Eviction Quality Under Approximate Future Utility 
+
+We restate Proposition 4.3 of §4 in its full three-part form (the main-text statement combines parts 1 and 2 into a single bound) and prove it. Let zj ≥ 0 denote the utility that block j would contribute to future attention if it remained in cache; this can be instantiated as future block-attention mass, or as a value-norm-weighted utility 
+
+zj = ∑ 
+
+> τ
+
+ατ j ∥Vj ∥ over a short future horizon. 
+
+Proposition 4.3 (restated and extended). Fix one cache-update event and let Ij be the reservoir-sampling inclusion indicator with inclusion probability pj = Pr( Ij = 1) . For any deterministic future-utility vector z:
+
+1. The Horvitz–Thompson retained-utility estimator ̂
+
+ZHT =
+
+> Nk
+
+∑
+
+> j=1
+
+Ij zj
+
+pj
+
+is unbiased for the full-cache utility Z = ∑ 
+
+> j
+
+zj .
+
+2. If pj ≥ pmin > 0 and 0 ≤ zj ≤ Zmax , then with probability at least 1 − δ,
+
+|̂ZHT − Z| ≤ 
+
+√√√√√ Kδ
+
+> Nk
+
+∑
+
+> j=1
+
+z2
+
+> j
+
+pj
+
+≤ Zmax 
+
+√
+
+KN k
+
+δp min 
+
+.
+
+3. If the Nexus weight approximates future utility as ∥w−z∥∞ ≤ η, then the expected evicted utility L = ∑ 
+
+> j
+
+(1 −Ij )zj
+
+satisfies ∣∣∣∣∣∣E[L] −
+
+> Nk
+
+∑
+
+> j=1
+
+(1 − pj )wj
+
+∣∣∣∣∣∣ ≤ η
+
+> Nk
+
+∑
+
+> j=1
+
+(1 − pj ) ≤ ηN k.
+
+Proof. The first claim is the Horvitz–Thompson identity already used in Lemma A.1. For the second claim, let 
+
+Aj = Ij zj /p j . Because exactly K blocks are retained, (∑ 
+
+> j
+
+Aj )2 ≤ K ∑ 
+
+> j
+
+A2 
+
+> j
+
+. Therefore 
+
+E[̂ Z2HT ] ≤ K ∑
+
+> j
+
+E
+
+[ Ij z2
+
+> j
+
+p2
+
+> j
+
+]
+
+= K ∑
+
+> j
+
+z2
+
+> j
+
+pj
+
+.
+
+Since Var (̂ ZHT ) ≤ E[̂ Z2HT ], Chebyshev’s inequality yields the stated bound. The final inequality follows from 
+
+z2 
+
+> j
+
+≤ Z2max and pj ≥ pmin . For the third claim, 
+
+E[L] = ∑
+
+> j
+
+(1 − pj )zj ,
+
+and subtracting ∑ 
+
+> j
+
+(1 − pj )wj gives 
+
+∣∣∣∑ 
+
+> j
+
+(1 − pj )( zj − wj )
+
+∣∣∣ ≤ η ∑ 
+
+> j
+
+(1 − pj ).The proposition separates the two sources of approximation. The reservoir step contributes no systematic bias once inclusion probabilities are accounted for; the remaining eviction error is controlled by how well the score w predicts future utility. This is where the observation window and walk matter: Lemma A.3 reduces estimation noise in direct utility, while Theorem 4.2 raises the weight of hub blocks whose future utility is indirect rather than visible in one-hop attention. 
+
+A.6 Multi-Hop Walk: Decomposition and Hub Amplification 
+
+This subsection states a rank-1 decomposition of the walk recurrence that underlies the hub-amplification argument, then proves Theorem 4.2. 
+
+Lemma A.4 (Walk decomposition and hub-score zero-sum) . Let Mq = a(q)(a(q))⊤ ∈ RNk ×Nk be the rank-1 per-query block-affinity matrix. The walk recurrence (4) satisfies the exact identity 
+
+C(H) =
+
+(∑Hq=1 a(q))
+
++
+
+(∑Hq=1 Mq C(q−1) )
+
+.
+
+Furthermore, ∑ 
+
+> j
+
+hj = 0 , i.e., the hub scores sum to zero. 
+
+16 Proof. For each step q, the update increment is 
+
+γq a(q) = (1 + ⟨a(q), C(q−1) ⟩) a(q)
+
+= a(q) + (a(q)⊤C(q−1) ) a(q)
+
+= a(q) + Mq C(q−1) ,
+
+an exact equality with no residual. Summing C(q) = C(q−1) + a(q) + Mq C(q−1) from q = 1 to H with C(0) = 0
+
+yields the stated identity. For the hub-sum claim: since ∑ 
+
+> j
+
+a(q) 
+
+> j
+
+= 1 a.s., we have ∑ 
+
+> j
+
+ξq,j = 0 a.s., so ∑ 
+
+> j
+
+Σjk =
+
+E[∑ 
+
+> j
+
+ξq,j ξq,k ] = 0 for every k, giving 1⊤Σ = 0⊤ and ∑ 
+
+> j
+
+hj = 1⊤Σ a ⋆ = 0 .The first term is the unwalked window aggregate (essentially W a if all window rows are used). The second term is the genuinely multi-hop contribution: each Mq is a rank-1 affinity matrix encoding which block pairs query q
+
+connects, and Mq C(q−1) aggregates the accumulated walk under that affinity structure. The depth H controls the highest-order hop captured; as in Le et al. [14] , small H (e.g., H = 3 ) suffices in practice because effective composed attention depth in transformer stacks is empirically shallow. 
+
+A.6.1 Hub Amplification (Main Theorem) 
+
+We first record the i.i.d. stationarity assumption and the formal definition of a hub block, then restate Theorem 4.2 with the full intermediate quantities and prove it. 
+
+Assumption A.5 (i.i.d. stationarity) . The H walk-step attention distributions a(1) , . . . , a(H) (i.e., the H query rows consumed by the recurrence (4) ) are drawn i.i.d. from a fixed distribution with mean a⋆ and covariance matrix 
+
+Σ.
+
+Definition A.6 (Hub block) . Block j is a hub block if hj = Σ⊤ 
+
+> j
+
+a⋆ > 0, i.e., queries that give high attention to block j tend to also give high attention to other frequently attended blocks. Block j is peripheral if hj ≤ 0.
+
+Theorem 4.2 (restated and extended). Under Assumption A.5, the Nexus walk (Eq. 4) with H steps satisfies 
+
+E[C(H) 
+
+> j
+
+] = BH a⋆,j + DH hj + O(H ∥Σ∥2 
+
+> F
+
+), (7) 
+
+where BH = ∑Hq=1 E[γq] ≥ H is a block-independent amplification factor, DH = ∑H−1 
+
+> q=1
+
+Bq ≥ H(H − 1) /2 is the cumulative covariance-boost coefficient, and the O(·) term captures second-order covariance interactions. Since 
+
+∑ 
+
+> j
+
+hj = 0 (Lemma A.4), L1-normalization gives 
+
+E[˜ c(H) 
+
+> j
+
+] = a⋆,j + DH 
+
+> BH
+
+hj + O(∥Σ∥2 
+
+> F
+
+); 
+
+in particular, E[˜ c(H) 
+
+> j
+
+] ≷ a⋆,j ⇐⇒ hj ≷ 0.
+
+Furthermore, hub blocks have strictly higher expected sampling weight E[wj ]; by the monotonicity of inclusion probability in wj (Lemma A.1), their expected inclusion probability E[pj ] is strictly higher than the window average 
+
+a alone would predict. Proof. Step 1: Unrolling the recurrence. The walk (Eq. 4) gives C(H) = ∑Hq=1 γq a(q), where γq = 1 + 
+
+⟨a(q), C(q−1) ⟩ and γ1 = 1 . Taking expectations entry-wise: 
+
+E[C(H) 
+
+> j
+
+] = 
+
+> H
+
+∑
+
+> q=1
+
+E[γq a(q) 
+
+> j
+
+]=
+
+> H
+
+∑
+
+> q=1
+
+(
+
+E[γq] a⋆,j + Cov( γq, a (q) 
+
+> j
+
+)
+
+)
+
+. (8) 
+
+Step 2: Block-independence of the amplification sum. Under Assumption A.5, a(q) is independent of C(q−1) ,so 
+
+E[γq] = 1 + ⟨a⋆, E[C(q−1) ]⟩.
+
+17 This depends only on a⋆ and Σ through E[C(q−1) ], and crucially not on block index j. Defining BH = ∑Hq=1 E[γq],the first term in (8) contributes BH a⋆,j uniformly across all blocks. 
+
+Step 3: Covariance boost. For q ≥ 2, by the independence of a(q) from C(q−1) (Assumption A.5): 
+
+Cov( γq, a (q) 
+
+> j
+
+) = Cov (⟨a(q), C(q−1) ⟩, a (q)
+
+> j
+
+)
+
+= E[C(q−1) ]⊤Σj ,
+
+where Σj is the j-th column of Σ = E[a(q)a(q)⊤] − a⋆a⊤ 
+
+> ⋆
+
+. (The equality follows by conditioning on C(q−1) and using 
+
+E[a(q)(a(q))⊤] = Σ + a⋆a⊤ 
+
+> ⋆
+
+.) We now compute E[C(q−1) ] by induction. The base case is E[C(1) ] = a⋆ = B1 a⋆ since 
+
+γ1 = 1 . At each step, E[C(q)] = E[C(q−1) ] + E[γq] a⋆ + O(∥Σ∥), giving 
+
+E[C(q−1) ] = Bq−1 a⋆ + O(∥Σ∥),Bq−1 = ∑q−1 
+
+> q′=1
+
+E[γq′ ].
+
+Substituting: 
+
+Cov( γq, a (q) 
+
+> j
+
+) = Bq−1 hj + O(∥Σ∥2 
+
+> F
+
+).
+
+Summing over q = 2 , . . . , H and setting DH = ∑H−1 
+
+> q=1
+
+Bq:
+
+> H
+
+∑
+
+> q=2
+
+Cov( γq, a (q) 
+
+> j
+
+) = DH hj + O(H∥Σ∥2 
+
+> F
+
+).
+
+Combining with Step 2 gives Eq. (7). Note DH ≥ ∑H−1 
+
+> q=1
+
+q = H(H − 1) /2 since Bq ≥ q.
+
+Step 4: Directional consequence. By Lemma A.4, ∑ 
+
+> j
+
+hj = 0 . Therefore the L1-norm of E[C(H)] satisfies 
+
+∑ 
+
+> j
+
+E[C(H) 
+
+> j
+
+] = BH
+
+∑ 
+
+> j
+
+a⋆,j 
+
+︸ ︷︷ ︸
+
+> = 1
+
++DH
+
+∑ 
+
+> j
+
+hj
+
+︸ ︷︷ ︸ 
+
+> = 0
+
++ O(H∥Σ∥2 
+
+> F
+
+)= BH + O(H∥Σ∥2 
+
+> F
+
+).
+
+Dividing Eq. (7) entry-wise by this norm: 
+
+E[˜ c(H) 
+
+> j
+
+] = BH a⋆,j + DH hj
+
+BH
+
++ O(∥Σ∥2 
+
+> F
+
+)= a⋆,j + DH 
+
+> BH
+
+hj + O(∥Σ∥2 
+
+> F
+
+).
+
+Since DH /B H > 0, we have E[˜ c(H) 
+
+> j
+
+] ≷ a⋆,j if and only if hj ≷ 0.
+
+Step 5: Hub retention. By Lemma A.1, the inclusion probability pj (w) = Pr (Ij = 1 | w) is increasing in 
+
+wj with all other weights fixed. The realized weight wj = C(H) 
+
+> j
+
+is random; taking expectations over w gives 
+
+E[pj ] = Ew[pj (w)] . Hub blocks satisfy E[wj ] = E[C(H) 
+
+> j
+
+] > a ⋆,j after normalization (Step 4), while peripheral blocks have E[wj ] < a ⋆,j . Because pj (w) is increasing in wj , a shift in the distribution of wj toward larger values (higher mean) raises E[pj ] via the law of total expectation. Consequently, the expected inclusion probability of hub blocks strictly exceeds what the unwalked window score aj would predict. 
+
+Remark. Assumption A.5 requires i.i.d. query rows, which is an idealization: consecutive tokens within a document are correlated. In practice the window acts as a local mixing device; the theorem should be read as characterizing the tendency of the walk to amplify cross-query consensus blocks rather than as an exact finite-sample guarantee. 
+
+# B Detailed Ablations 
+
+This appendix expands §5.5, walking through each panel of Figure 3. All settings match §5.1: Llama-3.1-8B at 
+
+20% density, evaluated on three multi-hop QA tasks (HotpotQA, 2WikiMQA, MultiFieldQA-en). We selected this 18 slice deliberately: multi-hop QA stresses the two failure modes Nexus Sampling is designed to address (bridge tokens and irreversible eviction), so any knob that mattered should move the numbers here before showing up on broader benchmarks. 
+
+Walk depth H. H = 0 (no walk) is already strong because the windowed direct score a alone is informative; this is the regime every direct-attention baseline already operates in, which is why those baselines are competitive on retrieval tasks where a single bridge hop suffices. H ≥ 1 adds a small but consistent improvement on 2WikiMQA, the most multi-hop-sensitive of the three tasks: each additional walk step lets a token inherit influence from a neighbor one further hop away from the current query, and 2WikiMQA is precisely the dataset where the answer-supporting token is reached through such an intermediate. H ∈ { 2, 3} captures the bulk of the gain and 
+
+H = 5 is essentially indistinguishable from H = 3 , matching the rank-1 propagation analysis of App. A: after a few steps the walk converges toward the principal direction of the attention operator and additional iterations only resharpen what is already there. We therefore default to H = 3 , which keeps the bridge-token benefit while leaving the per-step cost negligible relative to dense attention. 
+
+Mixing weight λ. λ = 0 closes most of the gap to Nexus but stays consistently below λ > 0 on 2WikiMQA, confirming that the bridge term contributes signal beyond what direct attention already captures. λ = 1 .0
+
+overweights the bridge term and slightly hurts HotpotQA, where the answer is often a single hop away and the direct score is the cleaner signal; mixing the two terms is what makes the score robust across multi-hop structures of different depth. The safe operating range is λ ∈ [0 .25 , 0.5] across all three datasets, and within that range the surface is flat, so the choice does not require per-task tuning; we default to λ = 0 .5 throughout. 
+
+Observation window W . Small windows ( W ∈ { 8, 16 , 32 }) track full attention closely. Larger windows degrade sharply on tasks that need short-range responsiveness: MultiFieldQA-en and 2WikiMQA both drop ∼5–10 points at W = 256 , because the per-query distribution gets diluted across queries that are no longer relevant to the current decoding step. This is a familiar effect from streaming attention-scoring methods: averaging the score over too long a window turns the per-step decision into a stale running mean and erases the locality the model relies on. W = 16 is a sweet spot, small enough to remain responsive yet large enough to absorb single-step noise, and matches the window sizes reported by recent eviction work [16, 9]. 
+
+Block size b. b ∈ { 16 , 32 , 64 } are within noise of one another, while b ≥ 128 degrades sharply. The mechanism is straightforward: too-coarse blocks aggregate over too many tokens at once, hiding the single-token signal that the per-block attention distribution needs to resolve. The flat region at small b is what makes block-wise eviction practical at all: it lets implementations align the eviction granularity with the hardware-friendly block sizes already used by FlashAttention kernels without paying an accuracy tax. We default to b = 32 , which is the smallest block size that lets the kernel achieve full memory-bandwidth utilization on the H200. 
+
+Density. Accuracy is essentially flat from 20% to 80% density on all three tasks, confirming that the aggressive 
+
+20% setting we report in §5.2–5.3 does not give up accuracy headroom to less aggressive configurations. This is the empirical signature of the marginal-mass argument of §3: under reservoir sampling, even tight budgets retain the subtly important tokens that deterministic top-K would erode, and the long-run survival probability decays gracefully with the budget rather than collapsing on the first below-cutoff step. Practically, this means the relevant question at deployment time is not “how much can we shrink the cache before accuracy breaks?” but “how much memory headroom does the workload need for other purposes?”, which is the regime modern agentic deployments actually operate in. 
+
+# C Comparison with Head-Adaptive Budget Allocation (Ada-KV) 
+
+Ada-KV [ 8 ] is orthogonal to Nexus Sampling: rather than proposing a new token-importance score, it redistributes a fixed layer-wide budget across attention heads so that heads with more concentrated attention keep more tokens. It can therefore be layered on top of any scoring rule, including SnapKV (yielding Ada-SnapKV) or, in principle, Nexus Sampling itself. Because this head-budget allocation is a separate axis from the scoring contribution we study in the main paper, we report Ada-SnapKV separately here rather than mixing it into Table 1. Table 7 compares Ada-SnapKV against SnapKV and Nexus Sampling in the prefill-only regime, with Full Attention shown for reference. Ada-SnapKV improves over plain SnapKV on average, as expected from its better budget allocation, but Nexus Sampling remains competitive on the average across all three models using a uniform per-head budget, indicating that the scoring contribution we introduce is complementary to the head-adaptive allocation of Ada-KV. 19 Table 7: Prefill-only LongBench accuracy at 20% density, isolating the orthogonal head-adaptive budget allocation of Ada-KV [8]. Ada-SnapKV applies the Ada-KV allocation on top of the SnapKV score; Nexus Sampling uses a uniform per-head budget. Bold marks the leading method per row across the eviction methods (Full Attention shown for reference).                                                                                                                                                                                                                          
+
+> Model Method Density WIKI GOV HPQA LCC MNews MFQA MUS NQA COUNT Retr. QAS QMS REPO SamS TREC TRIV Avg.
+> Llama-3.1-8B Full Attention 100% 47.75 34.70 56.96 55.20 26.76 56.16 32.77 29.91 9.66 99.50 45.06 25.39 47.80 43.27 73.00 92.14 48.50 SnapKV 20% 47.17 28.69 58.61 55.42 23.19 55.44 31.53 30.28 10.25 99.50 40.03 24.60 48.75 42.17 68.50 91.43 47.22 Ada-SnapKV 20% 48.42 29.34 57.90 55.05 22.82 56.32 32.93 30.42 10.08 99.50 43.73 25.15 47.89 42.20 72.00 92.36 47.88
+> Nexus Sampling 20% 48.82 30.07 58.03 54.62 22.65 57.83 32.68 29.24 10.00 99.00 43.47 25.24 47.87 42.93 73.00 92.66 48.01
+> Llama-3.2-1B Full Attention 100% 31.23 29.65 35.47 29.83 25.88 43.35 18.45 20.40 3.67 4.50 16.35 21.84 36.04 39.77 61.50 78.54 31.03 SnapKV 20% 30.45 22.92 35.48 30.75 19.61 39.04 17.15 21.58 3.67 5.00 15.06 21.18 35.86 37.40 58.00 79.31 29.53 Ada-SnapKV 20% 28.58 24.00 35.78 29.75 20.59 40.82 18.24 20.87 2.64 4.50 15.88 21.52 36.25 37.47 61.00 79.15 29.82
+> Nexus Sampling 20% 31.86 24.58 34.52 30.79 20.91 41.87 17.53 20.75 5.67 5.00 15.30 21.74 36.23 37.71 58.50 79.95 30.18
+> Qwen3-8B Full Attention 100% 42.62 33.58 57.94 57.39 24.82 52.94 34.33 27.64 4.50 100.00 47.91 23.85 56.67 44.17 71.50 90.71 48.16 SnapKV 20% 42.38 28.76 56.94 58.07 20.29 52.76 33.92 27.96 6.00 100.00 43.55 23.17 56.60 43.90 66.50 90.71 46.97 Ada-SnapKV 20% 42.25 30.66 57.73 57.36 20.57 52.12 34.28 27.83 5.50 100.00 45.27 23.90 56.95 43.21 70.50 90.71 47.43
+> Nexus Sampling 20% 42.49 31.73 57.68 56.93 22.11 52.52 33.73 27.44 5.00 99.50 43.72 23.89 56.23 43.85 71.00 91.36 47.45
+
+When the same head-adaptive allocation is applied on RULER, the picture is consistent: it lifts every scoring rule, and Nexus Sampling under the Ada-KV allocation (Ada-Nexus Sampling) remains the leading method on the average across all three models, confirming that our scoring contribution composes with the orthogonal budget-allocation axis. Table 8 reports the prefill-only RULER results with the Ada-KV allocation; for Qwen3-8B we additionally report results without the chat template, since RULER’s synthetic prompts are sensitive to the template wrapping. Table 8: Prefill-only RULER accuracy (%) across 4K–64K context lengths at 20% density with the orthogonal Ada-KV [ 8] head-adaptive budget allocation applied to each scoring rule. Bold marks the leading method per row across the eviction methods (Full Attention shown for reference). 
+
+Model Method Density 4K 8K 16K 32K 64K Avg. 
+
+Llama-3.1-8B Full Attention 100% 96.15 95.91 95.43 91.35 86.30 93.03 Ada-SnapKV 20% 82.21 89.18 94.23 92.79 83.89 88.46 Ada-PyramidKV 20% 84.86 89.18 91.83 87.26 81.97 87.02 
+
+Ada-Nexus Sampling 20% 85.80 91.30 94.00 88.70 84.60 88.88 
+
+Llama-3.2-1B Full Attention 100% 76.68 70.67 65.38 64.66 60.34 67.55 Ada-SnapKV 20% 57.69 54.33 50.00 51.68 44.71 51.68 Ada-PyramidKV 20% 56.97 52.64 43.99 49.52 38.46 48.32 
+
+Ada-Nexus Sampling 20% 57.45 52.88 52.64 56.49 50.72 54.04 
+
+Qwen3-8B Full Attention 100% 97.60 95.43 88.46 92.79 – 93.57 Ada-SnapKV 20% 73.56 73.80 79.57 77.41 – 76.09 Ada-PyramidKV 20% 65.38 66.11 69.95 74.28 – 68.93 
+
+Ada-Nexus Sampling 20% 75.48 81.49 83.41 84.38 – 81.19 
+
+Qwen3-8B without chat template. 
+
+Qwen3-8B Full Attention 100% 97.60 95.43 88.46 92.79 – 93.57 Ada-SnapKV 20% 81.73 89.66 88.70 90.38 – 87.62 
+
+Ada-PyramidKV 20% 81.73 86.78 85.10 88.94 – 85.64 
+
+# D Extended Related Work 
+
+KV cache eviction vs. KV cache selection. Long-context LLM inference is bottlenecked by both the compute and the memory footprint of the KV cache, and two complementary lines of work try to address these axes. 
+
+KV cache eviction permanently discards tokens under a fixed memory budget, addressing memory and compute simultaneously; an evicted token is irrecoverable. KV cache selection , often called sparse attention or query-aware sparsity, keeps the full cache and only chooses which tokens to attend to per query, targeting compute alone; missed tokens at step t can be re-selected at step t + 1 . Nexus Sampling and all baselines we compare against in §5 are eviction methods; while representative sparse attention methods include Quest [20 ], BLASST [24 ], 20 Sketch-and-Walk [ 14 ], and SOCKET [13 ]. A third axis is lossless compression, e.g., FAFO [15 ], which drafts off a lossy compressed cache and verifies in parallel against the full cache to recover bitwise-identical generation. Nexus Sampling is orthogonal to both: any selection method can be applied on top of the surviving cache after eviction has run, and lossless schemes like FAFO still need an underlying retention policy when the full cache no longer fits. 
+
+KV cache eviction. Existing eviction methods are best understood as different choices of the score fed to a shared deterministic top-K selection rule, and have been comprehensively benchmarked across long-context tasks alongside other compression families by Yuan et al. [23] . StreamingLLM [22 ] hard-codes a sink-plus-recency retention rule, motivated by the attention-sink phenomenon they identify at the first few absolute positions. H2O [25 ]retains heavy hitter tokens by ranking on cumulative attention over the generation so far, formulating eviction as a dynamic submodular problem. SnapKV [16 ] computes the score against an observation window of the most recent prompt tokens, which it shows are sufficient to identify the important positions for upcoming decode steps. 
+
+PyramidKV [3] introduces a layer-wise budget allocation that retains more tokens in lower layers and fewer in higher ones, motivated by the pyramidal information-funneling pattern of attention. Ada-KV [8 ] adapts the budget across heads instead of layers, exploiting the empirical observation that different heads concentrate their attention on different scales of the cache. MorphKV [9] maintains a constant-size cache by correlation-aware ranking against recent tokens, iteratively refining the retained set with lightweight updates. Despite the diversity of scoring strategies, every method above commits to the surviving tokens by deterministic top-K at each step, and is therefore subject to the irreversible-verdict failure mode of §3 regardless of how good its score is. Nexus Sampling is the first eviction method, to our knowledge, to replace the selection primitive itself rather than refine the score only. 
+
+Reservoir sampling. Classical reservoir sampling for streaming uniform sampling traces to Chao [4] and Vitter [21] ; Efraimidis and Spirakis [7] extended the scheme to weighted-without-replacement sampling via the priority 
+
+u1/w j 
+
+> j
+
+, which is exactly the per-step primitive Nexus uses. We instantiate this rule as an eviction primitive and add the n-fold averaged variant of §2.3, which interpolates between unbiased ( n = 1 ) and effectively deterministic (n → ∞ ) retention with a single knob, recovering the existing deterministic-top-K template as a limit case. 
+
+Connection to Sketch-and-Walk. Le et al. [14] introduce a multi-hop walk for sparse attention over a full cache, propagating block importance across layers by composing per-layer block-attention matrices through an iterative recurrence. The Nexus walk of §2.2 is structurally analogous but operates on an orthogonal dimension: it propagates importance across tokens , using the per-window per-query distribution to expose bridge tokens that no single recent query attends to strongly. The two are therefore complementary rather than competing, addressing two stages of the same pipeline: Sketch-and-Walk reduces the cost of reading from a still-full cache, while Nexus Sampling decides which tokens survive into that cache. 21
