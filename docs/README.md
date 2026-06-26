@@ -6,37 +6,39 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-25
-- 运行时间：2026-06-25 21:04:02 UTC
+- 最新运行日期：2026-06-26
+- 运行时间：2026-06-26 21:44:59 UTC
 - 运行状态：成功
 - 本次总论文数：5
 - 精读区：3
 - 速读区：2
 
 ### 今日简报（AI）
-今日关注长文本生成加速与KV缓存管理，精读两篇高分论文。
-推荐关注Dustin的投机解码稀疏验证提升长文本效率，以及Nexus Sampling在固定预算下无损缓存淘汰。
-普通读者可速读视觉语言模型低延迟方向，了解对齐税缓解技巧。
-- 详情：[/202606/25/README](/202606/25/README)
+今日精选5篇论文，聚焦长上下文生成加速与KV缓存管理两大突破。
+
+最值得精读《Dustin》以推测解码实现高效长上下文验证，以及《Nexus Sampling》在固定预算下无损淘汰流式KV缓存。
+
+建议普通读者优先关注《Dustin》中推测解码的实践，可大幅降低长文本推理延迟。
+- 详情：[/202606/26/README](/202606/26/README)
 
 ### 精读区论文标签
-1. [Dustin: Draft-Augmented Sparse Verification for Efficient Long-Context Generation with Speculative Decoding](/202606/25/2606.24957v1-dustin-draft-augmented-sparse-verification-for-efficient-long-context-generation-with-speculative-decoding)  
+1. [Dustin: Draft-Augmented Sparse Verification for Efficient Long-Context Generation with Speculative Decoding](/202606/26/2606.24957v1-dustin-draft-augmented-sparse-verification-for-efficient-long-context-generation-with-speculative-decoding)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：面向大语言模型投机解码的稀疏验证方法
-2. [Forget Without Compromise: Nexus Sampling for Streaming KV-Cache Eviction Under Fixed Budgets](/202606/25/2606.23961v1-forget-without-compromise-nexus-sampling-for-streaming-kv-cache-eviction-under-fixed-budgets)  
+   evidence：基于草稿模型前瞻的稀疏验证投机解码方法
+2. [Forget Without Compromise: Nexus Sampling for Streaming KV-Cache Eviction Under Fixed Budgets](/202606/26/2606.23961v1-forget-without-compromise-nexus-sampling-for-streaming-kv-cache-eviction-under-fixed-budgets)  
    标签：评分：8.0/10、query:llm
-   evidence：流式LLM推理中的KV缓存驱逐方法
-3. [Towards Fast and Effective Long Video Understanding of Multimodal Large Language Models via Adaptive Quasi-Gaussian Sampling](/202606/25/2606.24187v2-towards-fast-and-effective-long-video-understanding-of-multimodal-large-language-models-via-adaptive-quasi-gaussian-sampling)  
+   evidence：针对LLM推理的KV缓存淘汰采样方法
+3. [GeMoE: Gating Entropy is All You Need for Uncertainty-aware Adaptive Routing in MoE-based Large Vision-Language Models](/202606/26/2606.26287v1-gemoe-gating-entropy-is-all-you-need-for-uncertainty-aware-adaptive-routing-in-moe-based-large-vision-language-models)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：自适应关键帧采样加速MLLM长视频理解
+   evidence：基于MoE的VLM动态专家路由推理加速
 
 ### 速读区论文标签
-1. [Toward Low-Latency Vision-Language Models with Doubly-Correct Predictions in Egocentric Visual Understanding](/202606/25/2606.25160v1-toward-low-latency-vision-language-models-with-doubly-correct-predictions-in-egocentric-visual-understanding)  
+1. [Deeper is Not Always Better: Mitigating the Alignment Tax via Confident Layer Decoding](/202606/26/2606.21906v1-deeper-is-not-always-better-mitigating-the-alignment-tax-via-confident-layer-decoding)  
+   标签：评分：7.0/10、query:llm
+   evidence：无训练解码策略提升LLM推理效率
+2. [Look Before You Zoom: Adaptive Routing for the Resolution-Context Trade-off in Visual RAG](/202606/26/2606.21968v1-look-before-you-zoom-adaptive-routing-for-the-resolution-context-trade-off-in-visual-rag)  
    标签：评分：7.0/10、query:vlm-spec
-   evidence：面向低延迟VLM推断的权重剪枝
-2. [Deeper is Not Always Better: Mitigating the Alignment Tax via Confident Layer Decoding](/202606/25/2606.21906v1-deeper-is-not-always-better-mitigating-the-alignment-tax-via-confident-layer-decoding)  
-   标签：评分：6.0/10、query:llm
-   evidence：无训练的解码策略提升LLM推理效率
+   evidence：自适应路由加速VLM推理
 
 
 <div class="dpr-home-promo-card">
