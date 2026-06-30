@@ -6,43 +6,35 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-29
-- 运行时间：2026-06-29 21:49:53 UTC
+- 最新运行日期：2026-06-30
+- 运行时间：2026-06-30 20:50:23 UTC
 - 运行状态：成功
-- 本次总论文数：7
+- 本次总论文数：5
 - 精读区：3
-- 速读区：4
+- 速读区：2
 
 ### 今日简报（AI）
-今日研究聚焦高效推理与KV缓存管理，2篇高分精读论文及3篇速读文章覆盖生成加速、移动端推理与模型压缩。  
-最值得看的是《Dustin》的草稿增强稀疏验证长上下文生成，以及《Nexus Sampling》在固定预算下无损压缩KV缓存。  
-建议优先精读这两篇，可显著提升大模型部署的推理效率与显存利用率。
-- 详情：[/202606/29/README](/202606/29/README)
+今天聚焦LLM推理加速与投机解码理论，精读两篇9分论文。最值得关注方向：熵引导多令牌预测（EntMTP）与投机解码中接受率的理论分析。建议优先关注高效推理技术，以提升模型实际部署效率。
+- 详情：[/202606/30/README](/202606/30/README)
 
 ### 精读区论文标签
-1. [Dustin: Draft-Augmented Sparse Verification for Efficient Long-Context Generation with Speculative Decoding](/202606/29/2606.24957v1-dustin-draft-augmented-sparse-verification-for-efficient-long-context-generation-with-speculative-decoding)  
+1. [EntMTP: Accelerating LLM Inference with Entropy Guided Multi Token Prediction](/202606/30/2606.27550v1-entmtp-accelerating-llm-inference-with-entropy-guided-multi-token-prediction)  
+   标签：评分：9.0/10、query:llm
+   evidence：基于熵引导的多令牌预测用于自推测解码
+2. [When Is a Draft Accepted? A Theory of Acceptance in Speculative Decoding](/202606/30/2606.30265v1-when-is-a-draft-accepted-a-theory-of-acceptance-in-speculative-decoding)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：长上下文LLM投机解码中的稀疏验证框架
-2. [Forget Without Compromise: Nexus Sampling for Streaming KV-Cache Eviction Under Fixed Budgets](/202606/29/2606.23961v1-forget-without-compromise-nexus-sampling-for-streaming-kv-cache-eviction-under-fixed-budgets)  
-   标签：评分：8.0/10、query:llm
-   evidence：KV缓存驱逐以加速LLM推理
-3. [MVPruner: Dynamic Token Pruning for Accelerating Multi-view Vision-Language Models in Autonomous Driving](/202606/29/2606.27660v1-mvpruner-dynamic-token-pruning-for-accelerating-multi-view-vision-language-models-in-autonomous-driving)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：多视角VLM推理加速的动态令牌剪枝
+   evidence：投机解码接受理论涵盖宽松验证
+3. [Dustin: Draft-Augmented Sparse Verification for Efficient Long-Context Generation with Speculative Decoding](/202606/30/2606.24957v1-dustin-draft-augmented-sparse-verification-for-efficient-long-context-generation-with-speculative-decoding)  
+   标签：评分：8.0/10、query:llm-sd
+   evidence：推测解码的稀疏验证框架
 
 ### 速读区论文标签
-1. [CSD: Content-aware Speculative Decoding for Efficient Image Generation](/202606/29/2606.27829v1-csd-content-aware-speculative-decoding-for-efficient-image-generation)  
-   标签：评分：7.0/10、query:vlm-spec
-   evidence：面向图像生成的内容感知投机解码，方法可迁移至VLM推理加速
-2. [Phase Matters: Characterizing Heterogeneous Vision-Language Inference on a Mobile SoC](/202606/29/2606.27906v1-phase-matters-characterizing-heterogeneous-vision-language-inference-on-a-mobile-soc)  
-   标签：评分：7.0/10、query:vlm-spec
-   evidence：移动SoC上VLM推理的特征分析与加速指导
-3. [Push Puppet Networks: Structured Bayesian Pruning Algorithm for Language Model Compression](/202606/29/2606.28251v1-push-puppet-networks-structured-bayesian-pruning-algorithm-for-language-model-compression)  
+1. [CSD: Content-aware Speculative Decoding for Efficient Image Generation](/202606/30/2606.27829v1-csd-content-aware-speculative-decoding-for-efficient-image-generation)  
+   标签：评分：7.0/10、query:llm-sd
+   evidence：基于内容感知的投机解码，采用熵驱动的概率放松机制
+2. [Predict, Reuse, and Repair: Accelerating Dynamic Sparse Attention for Long-Context LLM Decoding](/202606/30/2606.30389v1-predict-reuse-and-repair-accelerating-dynamic-sparse-attention-for-long-context-llm-decoding)  
    标签：评分：7.0/10、query:llm
-   evidence：结构化剪枝用于大语言模型推理加速
-4. [SpikeVLA: Vision-Language-Action Models with Spiking Neural Networks](/202606/29/2606.27807v1-spikevla-vision-language-action-models-with-spiking-neural-networks)  
-   标签：评分：6.0/10、query:vlm-spec
-   evidence：使用脉冲神经网络的节能型VLA架构用于推理加速
+   evidence：用于动态稀疏注意力的推测-重用-修复运行时
 
 
 <div class="dpr-home-promo-card">
