@@ -6,52 +6,46 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-01
-- 运行时间：2026-07-01 21:59:34 UTC
+- 最新运行日期：2026-07-02
+- 运行时间：2026-07-02 21:11:28 UTC
 - 运行状态：成功
-- 本次总论文数：10
+- 本次总论文数：8
 - 精读区：6
-- 速读区：4
+- 速读区：2
 
 ### 今日简报（AI）
-今日聚焦两篇最高分论文：Dustin提出草稿增强的稀疏验证加速长上下文投机解码，CSD实现内容感知的投机解码提升图像生成效率。  
-最值得关注Dustin和CSD，分别针对文本与图像生成场景，显著降低计算开销。  
-建议普通读者从投机解码原理入手，尝试将这两种方法应用到自己的长文本或图像生成任务中。
-- 详情：[/202607/01/README](/202607/01/README)
+今日精选8篇论文，聚焦推测解码与视觉语言模型的高效推理。
+最值得关注的是推测解码中草案接受理论（10.0分）及视觉语言模型测试时扩展方法（9.0分）。
+建议深入研究这两篇高分论文的理论框架，并探索其在自动驾驶多视图模型加速中的实际应用。
+- 详情：[/202607/02/README](/202607/02/README)
 
 ### 精读区论文标签
-1. [Dustin: Draft-Augmented Sparse Verification for Efficient Long-Context Generation with Speculative Decoding](/202607/01/2606.24957v1-dustin-draft-augmented-sparse-verification-for-efficient-long-context-generation-with-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：提出用于大语言模型投机解码的草稿增强稀疏验证方法
-2. [CSD: Content-aware Speculative Decoding for Efficient Image Generation](/202607/01/2606.27829v1-csd-content-aware-speculative-decoding-for-efficient-image-generation)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：基于熵的概率放松和重采样的内容感知投机解码算法
-3. [When Is a Draft Accepted? A Theory of Acceptance in Speculative Decoding](/202607/01/2606.30265v1-when-is-a-draft-accepted-a-theory-of-acceptance-in-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：投机解码接受准则的理论，包含放松规则
-4. [SeKV: Resolution-Adaptive KV Cache with Hierarchical Semantic Memory for Long-Context LLM Inference](/202607/01/2606.31145v1-sekv-resolution-adaptive-kv-cache-with-hierarchical-semantic-memory-for-long-context-llm-inference)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于高效LLM推理的KV缓存压缩
-5. [Attend, Transform, or Silence: Operator-Level Visual Skipping for Efficient Multimodal LLM Inference](/202607/01/2606.31903v1-attend-transform-or-silence-operator-level-visual-skipping-for-efficient-multimodal-llm-inference)  
+1. [When Is a Draft Accepted? A Theory of Acceptance in Speculative Decoding](/202607/02/2606.30265v1-when-is-a-draft-accepted-a-theory-of-acceptance-in-speculative-decoding)  
+   标签：评分：10.0/10、query:llm-sd
+   evidence：投机解码接受准则的理论，包括宽松规则
+2. [On Test-Time Scaling for Vision-Language Models](/202607/02/2606.28864v1-on-test-time-scaling-for-vision-language-models)  
    标签：评分：9.0/10、query:vlm-spec
-   evidence：算子级视觉令牌跳过实现高效多模态LLM推理
-6. [Depth Exploration for LLM Decoding](/202607/01/2606.29223v1-depth-exploration-for-llm-decoding)  
+   evidence：视觉语言模型测试时推理加速
+3. [Speculative Pre-Positioning: Decoding Stateful Sessions to the Next Decision Point Off the Critical Path](/202607/02/2606.29565v1-speculative-pre-positioning-decoding-stateful-sessions-to-the-next-decision-point-off-the-critical-path)  
+   标签：评分：9.0/10、query:llm
+   evidence：投机预放置利用目标模型自身前向传递在关键路径外预解码状态会话
+4. [Predict, Reuse, and Repair: Accelerating Dynamic Sparse Attention for Long-Context LLM Decoding](/202607/02/2606.30389v1-predict-reuse-and-repair-accelerating-dynamic-sparse-attention-for-long-context-llm-decoding)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：用于LLM动态稀疏注意力的推测-复用-修复方法
+5. [Depth Exploration for LLM Decoding](/202607/02/2606.29223v1-depth-exploration-for-llm-decoding)  
    标签：评分：8.0/10、query:llm
-   evidence：通过并行深度探索实现无损解码加速
+   evidence：通过并行探索多个深度候选并验证，实现无损LLM解码加速
+6. [SeKV: Resolution-Adaptive KV Cache with Hierarchical Semantic Memory for Long-Context LLM Inference](/202607/02/2606.31145v1-sekv-resolution-adaptive-kv-cache-with-hierarchical-semantic-memory-for-long-context-llm-inference)  
+   标签：评分：8.0/10、query:llm
+   evidence：针对长上下文大语言模型推理的KV缓存压缩技术
 
 ### 速读区论文标签
-1. [Speculative Pre-Positioning: Decoding Stateful Sessions to the Next Decision Point Off the Critical Path](/202607/01/2606.29565v1-speculative-pre-positioning-decoding-stateful-sessions-to-the-next-decision-point-off-the-critical-path)  
-   标签：评分：7.0/10、query:llm
-   evidence：提出投机预定位用于高效大语言模型推理
-2. [VisReflect: Latent Visual Reflection for Fine-Grained Perception in Long Visual Context](/202607/01/2606.30288v1-visreflect-latent-visual-reflection-for-fine-grained-perception-in-long-visual-context)  
+1. [MVPruner: Dynamic Token Pruning for Accelerating Multi-view Vision-Language Models in Autonomous Driving](/202607/02/2606.27660v2-mvpruner-dynamic-token-pruning-for-accelerating-multi-view-vision-language-models-in-autonomous-driving)  
+   标签：评分：8.0/10、query:vlm-spec
+   evidence：动态token剪枝加速多视角VLM推理
+2. [CSD: Content-aware Speculative Decoding for Efficient Image Generation](/202607/02/2606.27829v1-csd-content-aware-speculative-decoding-for-efficient-image-generation)  
    标签：评分：7.0/10、query:vlm-spec
-   evidence：提出潜在视觉反射减少视觉token以加速LVLM推理
-3. [Predict, Reuse, and Repair: Accelerating Dynamic Sparse Attention for Long-Context LLM Decoding](/202607/01/2606.30389v1-predict-reuse-and-repair-accelerating-dynamic-sparse-attention-for-long-context-llm-decoding)  
-   标签：评分：7.0/10、query:llm
-   evidence：提出预测-重用-修复运行时加速LLM解码，涉及推测执行和LLM推理加速
-4. [Latent Noise Mask for Reducing Visual Redundancy in Multimodal Large Language Models](/202607/01/2606.30168v1-latent-noise-mask-for-reducing-visual-redundancy-in-multimodal-large-language-models)  
-   标签：评分：6.0/10、query:vlm-spec
-   evidence：减少视觉标记冗余以实现高效MLLM推理
+   evidence：基于熵的概率松弛机制用于令牌接受
 
 
 <div class="dpr-home-promo-card">

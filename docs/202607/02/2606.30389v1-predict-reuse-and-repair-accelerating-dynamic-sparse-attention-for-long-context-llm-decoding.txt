@@ -1,0 +1,623 @@
+Title: Predict, Reuse, and Repair: Accelerating Dynamic Sparse Attention for Long-Context LLM Decoding
+
+URL Source: https://arxiv.org/pdf/2606.30389v1
+
+Published Time: Tue, 30 Jun 2026 02:26:25 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+Predict, Reuse, and Repair: 
+
+# Accelerating Dynamic Sparse Attention for Long-Context LLM Decoding 
+
+Tianyu Wang 1, Gourav Rattihalli 2, Aditya Dhakal 2, Junbo Li 1,Zhiwei Ren 1, Dejan Milojicic 2, Longfei Shangguan 1
+
+> 1
+
+University of Pittsburgh, Pittsburgh, PA, USA 2HPE Labs, Milpitas, CA, USA 
+
+Abstract 
+
+Dynamic sparse attention (DSA) accelerates long-context LLM decoding by attending to only the top-K KV blocks relevant to each query, but it introduces a serialized selection-to-attention dependency that emerges as a new la-tency bottleneck. We present PRR , a speculate-reuse-repair runtime that exploits temporal lo-cality in DSA selections to predict likely blocks, speculate the attention over them while se-lection is in flight, and incrementally repair missed blocks once the true selected set is known. PRR uses a lightweight EMA-based predictor, a profiling-guided speculation bud-get that keeps speculative work off the crit-ical path, and a FlashAttention-based repair kernel that folds missed blocks into the par-tial attention state using online-softmax statis-tics. Across long-context benchmarks and representative DSA methods, PRR reduces per-token decoding latency by up to 40% while preserving downstream task accuracy. Github: https://github.com/Tianyu9748/ Incremental_FlashAttention 
+
+1 Introduction 
+
+Large language models (LLMs) are increasingly deployed for long-context workloads such as deep research (Zheng et al., 2025; Li et al., 2026), multi-step reasoning (Wang et al., 2024; Yuan et al., 2025b), and tool-using agents (He et al., 2025; Yang et al., 2026). However, decoding over long contexts remains expensive because the runtime has to access and compute over a growing KV cache for every generated token. Dynamic sparse attention (DSA) offers a promis-ing remedy by selecting, at each decoding step, only the top-K Key-Value (KV) blocks most rele-vant to the current query (Tang et al., 2024; Xiao et al., 2024a; Zhao et al., 2025; Yuan et al., 2025a). By adapting the sparsity pattern to each query, DSA preserves the most relevant context while substan-Time         
+
+> Speculative attention
+> over P(KV gather + attn. on
+> predicted top-K set P)
+> DSA
+> PRR > 30%
+> latency reduction
+> One transformer layer
+> Selection
+> (Compressed Attn. + Top-K)
+> Attention
+> (KV-gather + attn. on true
+> top-Kset A)
+> FFN
+> Selection
+> (Compressed Attn. + Top-K)FFN
+> Incremental repair
+> (Repair A\P )
+
+Figure 1: Standard DSA serializes selection, attention over the true top-K block set A, and FFN execution. 
+
+PRR predicts a block set P and executes speculative attention over P in parallel with selection. After the true set A is known, PRR incrementally repairs only the missed blocks A \ P before FFN execution, saving over 30% latency for each transformer layer. 
+
+tially reducing attention computation, making it an attractive approach for efficient LLM decoding. While DSA reduces dense attention arithmetic, it introduces a new bottleneck on the decoding criti-cal path. As shown in Figure 1, each decoding step (i.e., a transformer layer) consists of selection , at-tention , and FFN stages . Before attention can run, DSA must first run compressed attention and iden-tify the top-K KV blocks relevant to the current query (within the Selection phase). Because these block identities are unknown until selection com-pletes, attention is strictly serialized after selection. As context length grows, this selection-to-attention 
+
+dependency becomes increasingly costly, with se-lection accounting for up to 41% of per-token gen-eration latency (§2). 
+
+Dynamic, Yet Predictable . Although top-K block selections are computed online in dynamic sparse attention, prior work has observed that such selec-tions often exhibit temporal stability across decod-ing steps (Lee et al., 2024; Levy, 2026). We find that this property also holds broadly for the DSA methods and various workloads. In our measure-ments, about 68% of selected blocks are reused across consecutive decoding steps (§2.2). This temporal locality opens an opportunity to 1
+
+> arXiv:2606.30389v1 [cs.LG] 29 Jun 2026
+
+overlap block selection with attention execution ,as illustrated in Figure 1. Rather than waiting for the current top-K set to be finalized, the runtime can anticipate likely selected blocks, migrate their KV-cache entries, and compute attention specula-tively while block selection is still in flight. When the prediction overlaps with the true selected set, the corresponding attention work is removed from the post-selection critical path, thereby reducing to-ken generation latency. Realizing this opportunity, however, requires addressing two challenges. 
+
+• First, temporal locality alone is not sufficient .Blindly reusing the previous step’s top-K block indices for the current step yields only a modest hit rate. Since each missed block must still be incorpo-rated into the final attention output, a low hit rate leaves much of the sparse attention work on the critical path and limits the benefit of speculation. 
+
+• Second, speculation must preserve the DSA re-sult despite inevitable mispredictions . The final attention output should be computed over the true DSA-selected block set. However, existing infer-ence engines such as vLLM (Kwon et al., 2023) and SGLang (Zheng et al., 2024), as well as atten-tion kernels such as FlashAttention (Dao, 2024), do not expose an interface for incrementally incor-porating missed blocks into a partially computed attention result. As a result, correcting a miss typi-cally requires recomputing attention from scratch over the true selected set, forfeiting much of the la-tency benefit of speculative attention computation. In this paper, we present PRR (predict, reuse, and repair), a correctness-preserving speculative attention runtime for DSA that addresses both chal-lenges. To raise prediction accuracy beyond what prior-step reuse offers, we introduce a lightweight, exponential moving average (EMA)-based predic-tor that tracks the temporal trajectory of per-block importance scores and anticipates , rather than lags, the upcoming top-K set. Its smoothing hyper-parameters are calibrated per-prompt using im-portance scores already produced during prefill, adding negligible model execution cost. To overlap attention computation with block se-lection, PRR executes speculative attention over a predicted block set P in parallel with the current top-K selection. The size of P is controlled by a profiled dynamic budget that keeps speculative exe-cution off the critical path, i.e., it won’t delay FFN. Once the true top-K block set A becomes available, blocks in P ∩A have already been processed, while missed blocks in A \ P are incorporated through incremental attention repair. Blocks in P \ A are retained as additional low-priority context. To make repair efficient, PRR implements a cus-tomized CUDA kernel based on FlashAttention’s online-softmax recurrence that performs incremen-tal attention repair, as depicted in Figure 1. Given the speculative output and its running log-sum-exp statistics, the kernel attends only to the missed blocks and merges their contribution into the ex-isting accumulator. This incurs no accuracy loss since all blocks in A are included, while bounding repair work by |A \ P | rather than |A|.With the above design, PRR preserves the se-mantics of standard DSA: although it speculates on likely top-K blocks, the final attention out-put always covers the true DSA-selected blocks after repairing. As a result, PRR maintains the same accuracy as the original DSA implementa-tion. Across LongBench (Bai et al., 2024), In-finiteBench (Zhang et al., 2024), RULER (Hsieh et al., 2024), AIME (Hugging Face H4, 2024), and MATH500 (Lightman et al., 2023), PRR achieves per-token decoding speedup by 1.42 × over Quest and 1.56 × over InfLLM-v2 across multiple LLMs, while maintaining the same downstream task accu-racy. Our contributions are listed below: 
+
+• We identify the selection-to-attention depen-dency as a new critical-path bottleneck in dy-namic sparse attention mechanisms. 
+
+• We design PRR , a runtime that overlaps specu-lative attention over predicted blocks with selec-tion, reuses correctly predicted block states, and repairs only missed blocks. 
+
+• We implement an online-softmax-based incre-mental repair kernel that ensures full top-K
+
+coverage as standard DSA and bounds post-selection work by the number of missed blocks. 
+
+2 Motivation 
+
+In this section, we first show that DSA shifts decod-ing cost to selection-attention dependency (§2.1). We then show that sparse indices exhibit strong pre-dictability, and that DSA decoding leaves enough idle GPU resources to turn this predictability into an opportunity for speculative attention (§2.2). 
+
+Setup . We use GLM-4-9B (Zeng et al., 2024) to evaluate two representative DSA methods, Quest (Tang et al., 2024) and InfLLM-V2 (Zhao et al., 2025), across long-sequence benchmarks and a range of context lengths. We run these stud-ies on NVIDIA H100 GPUs, with FlashInfer’s 2(b) Latency breakdown of GLM-4-9B                    
+
+> (a) Computation flow of DSA
+> k:t
+> v:t
+> qtcompressed
+> attn.
+> sparse attn.
+> output
+> Xt
+> Sel.
+> Attn.
+> FFN
+> FFNs
+> top-K
+> k:t+1
+> v:t+1
+> qt+1 compressed
+> attn.
+> output
+> Xt+1 Attn.
+> FFN
+> FFNs
+> Step X tat layer #N Step X t+1 at layer #N
+> 16 32 64 128 256 512 16 32 64 128 256 512
+> 25
+> 0
+> 5
+> 10
+> 15
+> 20
+> latency (ms)  InfLLM-V2
+> context length (K tokens) context length (K tokens)
+> Quest
+> Select. Attn. FFN
+> Sel.
+> top-K
+> compress compress
+> sparse attn.
+
+Figure 2: (a) Three stages in DSA and temporal similar-ity in two consecutive top-K selections, and (b) latency breakdown of GLM-4-9B with Quest and InfLLM-V2 under various context lengths. 
+
+BlockSparseAttention (Ye et al., 2025) serving as the optimized sparse-attention backend. 
+
+2.1 The Selection-to-Attention Dependency 
+
+Observation One: DSA significantly reduces atten-tion computation, but exposes a serialized selection-to-attention dependency on the decoding critical path. 
+
+Figure 2(a) shows the computation flow of DSAs. At each layer, the runtime partitions KV tokens into blocks, compresses each block (e.g., mean), and computes compressed attention to pick the top-
+
+K blocks for the current step. Only then can the runtime fetch the selected KV blocks and execute (sparse) attention, followed by the FFN. This cre-ates a strict selection-to-attention dependency. Figure 2(b) shows profiled latency of three stages: selection, attention, and FFN. The serial-ized selection-to-attention path consumes about 60% of decoding latency at 16K tokens and rises to 71% at 512K. Selection alone grows from 4 ms to 8 ms over the same range. Since attention is blocked until top-K selection finishes, this grow-ing selection cost directly delays the attention stage and exposes a substantial critical-path bottleneck. 
+
+2.2 The Opportunity for Speculation 
+
+Prior works (Lee et al., 2024; Takbir et al., 2026) have shown that the same tokens tend to be selected or to receive high attention scores across consecutive decoding steps. Motivated by this, we measure how many blocks are re-peatedly selected in consecutive decoding steps 0    
+
+> 20
+> 40
+> 60
+> 80
+> 100
+> overlap rate(%)
+> Quest InfLLM-v2
+> LongBench InfiniteBench AIME MATH500 RULER
+> GLM-4-9B
+
+Figure 3: Average overlap rate of blocks in consecutive selections of GLM-4-9B under various benchmarks. 
+
+on five representative long-context benchmarks, including LongBench (Bai et al., 2024), In-finiteBench (Zhang et al., 2024), AIME (Hugging Face H4, 2024), MATH500 (Lightman et al., 2023), and RULER (Hsieh et al., 2024). 
+
+Observation Two: The top-K blocks in DSA show strong locality across adjacent decoding steps, which leaves an opportunity to speculative attention. 
+
+Figure 3 shows that temporal block selection locality is not confined to a particular benchmark or DSA method. Across LongBench, InfiniteBench, AIME, MATH500, and RULER, both Quest and InfLLM-V2 consistently reselect more than 65% of blocks across consecutive decoding steps, with an average overlap of about 68% 1.This stability across diverse long-context and reasoning workloads suggests that DSA selections are dynamic but sufficiently predictable for spec-ulation. Instead of waiting for the current top-K
+
+selection to complete, the runtime can predict likely selected blocks and begin executing attention over them while selection is still in progress, as shown in Figure 1. Correctly predicted blocks remove their KV gathering and attention computation from the critical path, while partial predictions leave only the missed blocks to be processed after selec-tion completes. This motivates PRR ’s speculative attention-and-repair execution model. While temporal locality makes speculation pos-sible, it also raises a new question: does the GPU have enough spare memory-bandwidth and com-pute resources to execute speculative KV gathering and attention computation without slowing down the normal DSA pipeline? To answer this question, we profile GPU resource utilization for DSAs. 
+
+Observation Three: Long-context DSA decoding leaves sufficient idle GPU resources to support specu-lative KV gathering and attention computation. 
+
+> 1
+
+We have similar observations on other LLMs in A.3. 
+
+3SM L2 BW DRAM BW         
+
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> utilization (%)
+> 64 128 256 512 64 128 256 512
+> context length (K tokens)
+> Quest InfLLM-v2
+
+Figure 4: SM utilization, L2 bandwidth, and DRAM bandwidth profiled for GLM-4-9B paired with Quest and InfLLM-v2 across varying context lengths. 
+
+We measure the utilization of streaming multi-processors (SMs), L2 bandwidth, and DRAM band-width during decoding across a range of context lengths, up to 512K tokens. As shown in Figure 4, even at a 512K context length, SM, L2-bandwidth, and DRAM-bandwidth utilization all remain below 40%. This substantial headroom indicates that am-ple idle resources are available to precompute the sparse attention speculatively, based on estimated block selections, without contending with the com-pressed attention on the critical path. The same trend holds at larger batch sizes, as shown in A.4. 
+
+3 The Design Space 
+
+These observations suggest a design that, given idle bandwidth and compute, predicts likely blocks, prefetches their KV, and overlaps their attention computation with top-K block selection. This opens two interleaved design spaces to explore: 
+
+Design Space One: Maximize speculative atten-tion accuracy. Let A be the set of blocks chosen by the ground-truth top-K selection in the current round, and P denote the predicted blocks. We cate-gorize the prediction errors into two distinct types: 
+
+• Missed Blocks ( M = A \ P ): these blocks lie on the critical path: every block in M must be migrated and attended to after the true selection completes, and the partial attention output must be corrected accordingly. 
+
+• Wasted Blocks ( N = P \ A): these blocks con-sume extra bandwidth and computing resources, that waste the precious resources. But they don’t extend the critical path. The two costs are therefore asymmetric, and the dominant objective is to minimize |M |. We cast this as a single-objective problem with a budget constraint: 
+
+min |M | = |A \ P | s.t. |P | ≤ δ|A| (1) where δ is the budget ratio that bounds how many blocks the speculator may fetch. Time           
+
+> 𝛿 is too small
+> 𝛿 is too big
+> 𝛿 is appropriate
+> Selection
+> Speculative
+> Attention
+> FFN
+> Increment
+> al Repair
+> Selection
+> Speculative Attention
+> FFN
+> Selection
+> Speculative
+> Attention
+> FFN
+> Latency
+> savings
+
+Figure 5: Impact of the speculation budget ratio δ on PRR’s execution timeline. (top): When δ is too small, the predicted set covers too few true top-K blocks, leav-ing a large incremental repair stage on the critical path. (middle): When δ is too large, speculative attention it-self exceeds the top-K selection window and delays the FFN. (bottom): An appropriate δ balances coverage and speculative cost, allowing speculative attention to over-lap with top-K selection without delaying each other while leaving only a small repair stage before FFN. 
+
+A larger δ admits more candidates and likely reduces |M |, but increases bandwidth pressure and speculative attention computation cost. However, if too many blocks are included, speculative attention may take longer than block selection, extending the critical path and negating the latency gains from speculation, as shown in Figure 5. 
+
+⇒ To shrink |M |, we replace the naive “reuse previ-ous top-K” heuristic with an EMA-based predictor that tracks block-importance scores across past de-coding steps and predicts a top-K set P likely to be selected in the current round (§4.1). Further-more, rather than fixing δ statically, we dynami-cally choose the speculation budget using offline profiles of block-selection latency and speculative-attention latency across context lengths, ensuring that speculative attention remains aligned with the selection stage and does not extend the critical path. 
+
+Design Space Two: Enable incremental atten-tion repair. Even with a high-quality predictor, mispredictions are unavoidable, i.e., |M | > 0.Once the true top-K set A is known, the runtime must reconcile the speculative attention result with the true selected blocks. A simple fallback is to dis-card the speculative result and recompute attention over A from scratch. This preserves correctness, but it puts the attention computation back on the critical path, effectively reverting to standard DSA and leaving little to no latency benefit. 
+
+⇒ To avoid this fallback, we propose a customized attention kernel, built on top of FlashAttention, that supports incremental repair . Given the attention 4state over the predicted set P , including the output and running softmax statistics, the kernel attends only to the missed blocks M = A \ P and merges them into the existing accumulator via log-sum-exp rescaling. This guarantees the full coverage over the true selected set A as standard DSA, while reducing post-selection work from |A| blocks to 
+
+|M | blocks. Thus, the latency benefit scales with prediction coverage instead of being lost whenever the prediction is imperfect. 
+
+4 Design 
+
+To explore these design spaces, we propose PRR , a 
+
+speculation-and-repair runtime that predicts likely blocks (§4.1) and overlaps sparse attention with block selection. The speculator is calibrated online with negligible delay (§4.2). PRR then incremen-tally incorporates missed blocks once the true top-
+
+K set A is available (§4.3), and dynamically sizes the speculative set P to maximize coverage of A
+
+without extending the critical path (§4.4). 
+
+4.1 The Lightweight, EMA-based Predictor 
+
+PRR requires a predictor that is accurate enough to cover the true top-K blocks as much as possible, yet lightweight enough to run off the critical path. A neural network-based predictor is promising for higher accuracy, but it would introduce additional model execution and memory traffic, which can off-set the latency saved by speculation. We therefore choose a training-free, ultra-lightweight exponen-tial moving average (EMA)-based predictor that operates directly on the block-importance scores already produced by DSA. We denote by IS ti the true importance score of block i at decoding step t, produced by the DSA’s top-K block selection stage. Before this stage runs at step t, PRR predicts the score of each block as 
+
+cIS ti using only historical scores observed up to step 
+
+t−1. The predicted scores are used to select a spec-ulative block set P , with the goal of maximizing coverage of the true top-K A set under a bounded speculation budget. 
+
+State and initialization. For each block i, the predictor maintains two state variables after each step t: a smoothed level ℓti and a trend estimate 
+
+vti . When block i first enters the KV cache at step 
+
+τ , we initialize ℓτi = IS τi and vτi = 0 because no prior trend is available. 
+
+Prediction. At the beginning of step t, before the current DSA selection stage produces IS ti , the Importance score Grid search ( 𝜶 , 𝜷 , 𝜸 )      
+
+> Prefill Phase
+> fit
+> Decode Phase
+> Prefill
+> EMA calibration
+> EMA ( 𝜶 ,𝜷 ,𝜸 )
+> predict update
+> true import. scores
+> Decode Decode Decode
+> time
+> predict update
+
+Figure 6: During prefill phase, PRR calibrates EMA over importance scores with grid search. During decode phase, EMA predicts block importance scores and up-dates from true scores produced by block selection. 
+
+predictor extrapolates from the previous state: 
+
+cIS ti = ℓt−1 
+
+> i
+
++ γv t−1 
+
+> i
+
+, (2) where γ ∈ [0 , 1] controls how aggressively the predictor extrapolates the recent trend. 
+
+Update. After the DSA selection stage at step t
+
+produces the true score IS ti , the predictor updates its state using the following equations: 
+
+vti = β IS ti − ℓt−1
+
+> i
+
+ + (1 − β)vt−1 
+
+> i
+
+,ℓti = αIS ti + (1 − α)ℓt−1 
+
+> i
+
+. (3) Here, α ∈ (0 , 1] controls how quickly the level follows newly observed scores, while β ∈ (0 , 1] 
+
+controls how quickly the trend estimate adapts to score changes. 
+
+4.2 Online Predictor Calibration 
+
+The EMA predictor is lightweight, but its predic-tion accuracy depends on the smoothing hyperpa-rameters (α, β, γ ). These parameters determine whether the predictor tracks block-importance dynamics smoothly or reacts quickly to recent changes. A single fixed (α, β, γ ) setting would not be effective because prompt-specific factors such as task type and context length can substantially change the stability of the top-K trajectory. 
+
+PRR instead uses the prefill phase to calibrate these parameters per prompt, as depicted in Fig-ure 6. Because DSA already computes compressed-attention importance scores for each prefill token, prefill provides a ready-made trajectory of block scores at no additional model-execution cost. PRR 
+
+searches over a small (α, β, γ ) candidate grid on this trajectory and selects the setting that best pre-dicts prefill top-K selections, yielding a prompt-adaptive predictor before decoding starts. We elab-orate on the design below. 
+
+Prefill trajectory. Let Tp denote the number of prefill tokens. The prefill phase produces the matrix 5IS ∈ RTp×Np , where row ϕ is the compressed-attention score vector at prefill token ϕ over the Np
+
+dynamic blocks formed during prefill. This matrix is fully available before the first decoding step. 
+
+Calibration objective. Given a candidate hyper-parameter setting θ = ( α, β, γ ), we simulate the predictor over IS from prefill, producing a pre-dicted selection set Pϕ(θ) for each prefill token ϕ,and measure the resulting score-weighted hit rate: 
+
+H θ ; IS  = 1
+
+Tp
+
+X
+
+> ϕ
+
+P 
+
+> b∈Pϕ(θ)∩Aϕ
+
+IS ϕ,b 
+
+P 
+
+> b∈Aϕ
+
+IS ϕ,b 
+
+(4) where Aϕ is the ground-truth top-K block selection set at prefill token ϕ and IS ϕ,b is the importance score of block b at token ϕ. The per-prompt hyper-parameter choice is formulated as: 
+
+θ⋆ = arg max  
+
+> θ
+
+H θ; IS  (5) 
+
+Search procedure. We perform grid search rather than gradient-based solutions for two reasons. First, gradient-based hyperparameter optimization of a set-valued objective (top-K membership) requires a differentiable surrogate for argsort, which intro-duces its own approximation error and implementa-tion dependency. Second, the search space is small, so a direct search is both simpler and sufficient. We set the search grid in our system as follows: 
+
+α ∈ [0 .2, 0.8] with step 0.2, β ∈ [0 .1, 0.5] with step 0.1, and γ ∈ [0 , 0.75] with step 0.25 , yielding 
+
+|Θ| = 80 candidates per prompt. The search over-laps with the prefill phase and adds minimal extra latency (0.06 ms) to the critical path (A.5). 
+
+4.3 Incremental Repair via Online Softmax 
+
+Since mispredictions are unavoidable (i.e., M =
+
+A \ P̸ = ∅) and softmax is sensitive to the maxi-mum logit, ignoring M produces an inexact output, and the error compounds across decoding steps. We propose a repair phase whose cost scales only with 
+
+|M |, built on FlashAttention’s online-softmax re-currence (Dao, 2024). Our customized CUDA ker-nel enables incremental attention repair: a capabil-ity missing from existing inference engines (Kwon et al., 2023; Zheng et al., 2024) and backend ker-nels (Dao, 2024; Ye et al., 2025). 
+
+Instrumented speculative kernel. We modify the FlashAttention forward to write not only the atten-tion output O but also the denominator ℓ and the running maximum m to HBM. The change is surgi-cal: the inner-loop arithmetic is unchanged, and the additional store amounts to two scalars per head, so the kernel retains the memory-access pattern and occupancy of the original forward. The extra bandwidth is negligible relative to KV traffic that already dominates the pass. 
+
+Repair kernel. Given (Ospec , ℓ spec , m spec ) from the speculative sparse attention and the KV entries of M , a second kernel applies the recurrence in Equations (6)–(8) once per missed block: 
+
+m(t+1) = max( m(t), ˜m) (6) 
+
+ℓ(t+1) = em(t)−m(t+1) 
+
+ℓ(t) + e ˜m−m(t+1) ˜ℓ (7) 
+
+O(t+1) = em(t)−m(t+1) 
+
+ℓ(t)
+
+ℓ(t+1) O(t)
+
++ e ˜m−m(t+1) 
+
+ℓ(t+1) 
+
+X
+
+> j
+
+eSt+1 ,j − ˜m Vt+1 ,j (8) Each query is handled independently. The missed blocks are streamed through on-chip mem-ory in the same tiled fashion as the FlashAttention forward, so no intermediate score matrix is materi-alized. The kernel reads Ospec , ℓspec , mspec , and the missed (K, V ) tiles once, and writes the corrected 
+
+(O, ℓ, m ) once. Both FLOPs and memory traffic scale solely with |M |.
+
+4.4 Critical-Path-Aware Speculation Budget 
+
+Recall from Figure 5 that a larger δ allows PRR 
+
+to include more predicted blocks in speculative at-tention, which increases the likelihood that P cov-ers the true selected set A and reduces the missed blocks A \ P . However, it also increases spec-ulative KV movement and speculative attention computation, which may extend the critical path if speculative attention takes longer than selection. 
+
+PRR therefore chooses δ dynamically rather than fixing it globally. For each model-hardware-DSA configuration, we perform a one-time offline profiling sweep that measures selection latency and speculative-attention latency under different con-text lengths and budget ratios. Because the model, hardware backend, DSA method, block size, and DSA top-K are fixed, these latencies are primarily determined by context length and δ. PRR stores the profiling results in a lightweight lookup table indexed by context length, and at runtime selects the largest safe δ whose speculative attention la-tency fits within the current selection window. This ensures that speculative execution remains aligned with block selection and does not extend the criti-cal path. In our implementation, we profile context 6Table 1: Decoding speedup of PRR relative to the serial DSA execution ( 1.00 ×). Higher is better.                                                                        
+
+> Model Long Bench Infinite Bench RULER AIME MATH 500 Avg. Quest
+> GLM-4 1.50 ×1.40 ×1.45 ×1.30 ×1.42 ×1.42 ×
+> GLM-Z1 1.48 ×1.39 ×1.43 ×1.33 ×1.45 ×1.42 ×
+> DeepSeek-R1 1.39 ×1.42 ×1.47 ×1.35 ×1.39 ×1.41 ×
+> Llama3 1.36 ×1.40 ×1.41 ×1.39 ×1.34 ×1.38 ×
+> Qwen3-14B 1.44 ×1.27 ×1.41 ×1.44 ×1.45 ×1.40 ×
+> Qwen3-32B 1.26 ×1.34 ×1.27 ×1.27 ×1.26 ×1.28 ×
+> InfLLM-v2
+> GLM-4 1.64 ×1.38 ×1.58 ×1.62 ×1.59 ×1.56 ×
+> GLM-Z1 1.61 ×1.35 ×1.61 ×1.64 ×1.55 ×1.55 ×
+> DeepSeek-R1 1.30 ×1.48 ×1.61 ×1.52 ×1.28 ×1.44 ×
+> Llama3 1.32 ×1.45 ×1.55 ×1.55 ×1.30 ×1.43 ×
+> Qwen3-14B 1.56 ×1.43 ×1.51 ×1.53 ×1.53 ×1.51 ×
+> Qwen3-32B 1.35 ×1.27 ×1.29 ×1.32 ×1.35 ×1.31 ×
+
+lengths of 4K, 8K, 16K, 32K, and 64K, with de-tails and profiling overhead reported in A.6. Note that here we use five context lengths as an example, one may profile in a much finer-grained manner to achieve more latency reduction. 
+
+5 Evaluation 
+
+We describe the system evaluation in this section. 
+
+5.1 Experiment Setups Evaluation Dataset . We evaluate PRR on five benchmarks covering long-context understanding (e.g., summarization) and complex reasoning (e,g., math). Long-context tasks are assessed using Long-Bench (Bai et al., 2024), InfiniteBench (Zhang et al., 2024), and RULER (Hsieh et al., 2024), while reasoning capability is measured on AIME (Hug-ging Face H4, 2024) and MATH500 (Lightman et al., 2023). 
+
+Models. We conduct experiments on six LLMs: GLM-4-9B-1M (Zeng et al., 2024), GLM-Z1-9B (glm, 2024), DeepSeek-R1-8B (DeepSeek-AI, 2025), Llama3-8B-1M (AI@Meta, 2024), Qwen3-14B (Team, 2025), and Qwen3-32B (Team, 2025). 
+
+DSAs. We consider two plug-and-play DSA mech-anisms: Quest (Tang et al., 2024) and InfLLM-v2 (Zhao et al., 2025). NSA (Yuan et al., 2025a) is excluded as it requires training from scratch for its feature extraction and gating components. 
+
+Testbed. Experiments are run on H100 GPUs with CUDA 12.8, with a tensor parallelism degree of 2. 
+
+5.2 Accelerate Evaluation 
+
+We measure end-to-end decoding latency across all models and benchmarks, and report the speedup of PRR over the standard DSA execution in Table 1. As shown, PRR delivers consistent speedups, achieving an average of 1.35 × speedup under Quest and 1.47 × speedup under InfLLM-v2. These gains come from three complementary mechanisms. First, the EMA predictor achieves an average top-K overlap rate of roughly 91%, en-abling most of the attention work done during spec-ulation. Second, our customized sparse attention CUDA kernel substantially outperforms FlashIn-fer’s BlockSparseAttention (§5.4). The head-room it creates lets PRR include more blocks in speculation, lifting the overlap rate from 91% to 98% at no added latency cost (§5.5). Third, when block misses do occur, incremental attention repair patches in the missing blocks rather than recomput-ing attention from scratch, preserving the latency savings from speculation. 
+
+5.3 Ablation Study 
+
+We quantify the contribution of each design com-ponent to the overall latency reduction by progres-sively enabling three features: 1. Reuse the top-K blocks in the last step: Spec-ulatively compute attention by using the block selections from the previous decoding step. 2. Incremental attention repair: Replace Flash-Infer’s BlockSparseAttention with our cus-tomized CUDA kernel, which performs incre-mental attention repair on missed blocks. 3. EMA predictor: Apply our EMA-based pre-dictor to anticipate the upcoming block selec-tions and speculate over the predicted set. These features are enabled incrementally from S1 to S3, where S3 represents the standard PRR con-figuration. We use GLM-4-9B paired with InfLLM-v2 as the running example. The consistent trend is observed across other LLMs under both Quest and InfLLM-v2 (A.8). Results in Table 2 reveal the following. Naively enabling speculative attention through S1 yields negligible improvement over standard DSA execu-tion. Although the block selections reused from the previous decoding step overlap with the cur-rent true top-K set by roughly 68% on average, a single missed block triggers a full attention re-computation over the true top-K selections, which offsets the latency savings from speculation. S2 7Table 2: Decoding speedup of ablation stages across benchmarks for GLM-4-9B and InfLLM-v2 relative to Serial execution ( 1.00 ×). Higher is better.                      
+
+> Benchmark S1 S2 S3 ( PRR )
+> LongBench 1.02 ×1.34 ×1.64 ×
+> InfiniteBench 1.00 ×1.19 ×1.38 ×
+> RULER 1.01 ×1.34 ×1.58 ×
+> AIME 1.02 ×1.34 ×1.62 ×
+> MATH500 1.01 ×1.31 ×1.59 ×
+> Avg. Speedup 1.01 ×1.30 ×1.56 ×
+
+Table 3: Speedup of PRR ’s sparse kernel over FlashIn-fer’s BlockSparseAttention under various block sizes and token budgets. Higher indicates greater speedup.                                     
+
+> Block Size 1024 2048 4096 6144 8192 Avg. 16 1.17 ×1.28 ×2.00 ×2.83 ×3.68 ×2.19 ×
+> 32 1.17 ×1.38 ×2.09 ×2.78 ×3.69 ×2.22 ×
+> 64 1.17 ×1.38 ×2.26 ×2.91 ×3.64 ×2.27 ×
+> 128 1.17 ×1.41 ×2.23 ×3.00 ×3.71 ×2.31 ×
+> 256 1.03 ×1.11 ×2.00 ×2.75 ×3.64 ×2.11 ×
+
+introduces our customized sparse attention kernel, which allows the run-time to repair the missing 
+
+32% blocks, raising the average speedup to 1.30 ×.S3 ( PRR ) attains 98% overlap rate between the predicted top-K set and the true top-K set, leading to 1.55 × speedup on average. 
+
+5.4 Kernel Speed Comparison 
+
+We compare our customized sparse attention kernel against FlashInfer’s BlockSparseAttention (Ye et al., 2025) on H100 under a GQA configuration with 32 query heads, 8 KV heads, head dimension 128, and a 128K-token context. We sweep the token budget from 1K to 8K and the KV-cache block size from 16 to 256 to reflect realistic sparse attention workloads during decoding. As shown in Table 3, our kernel outperforms 
+
+BlockSparseAttention across every configura-tion, with an average speedup of 2.22 × and a peak of 3.71 × at an 8K budget. At 1K tokens, the speedup is modest ( 1.03 −1.17 ×) because absolute latencies are small and fixed overheads dominate, whereas at 8K the bandwidth-saturation advantages compound, yielding 3.64 −3.71 ×. Across block sizes, performance is stable; block size 128 yields the highest average speedup ( 2.31 ×) and 256 the lowest ( 2.11 ×), since the largest tiles approach the dense regime where block-table indirection be-comes pure overhead for BlockSparseAttention .Beyond raw speedup, our kernel exposes an in-terface for incremental attention repair that patches 
+
+Table 4: The overlap rate(%) between EMA’s prediction and the true top-K set of GLM-4-9B.             
+
+> Model Long Bench Infinite Bench RULER AIME MATH 500 Avg.
+> Quest 98.65 96.86 98.36 98.15 98.25 98.05
+> InfLLM-v2 97.86 97.14 96.46 98.15 98.01 97.52
+
+missed blocks into an existing attention output rather than recomputing from scratch, which is the key capability underlying PRR ’s end-to-end gains. 
+
+5.5 EMA Hit Rate 
+
+Table 4 reports the overlap between EMA’s predic-tions and the true top-K set on GLM-4-9B. The predictor achieves 98.05% under Quest and 97.52% under InfLLM-v2 across benchmarks. A consistent trend is observed for other LLMs (A.7). 
+
+6 Related Work 
+
+KV Cache Retrieval for Dynamic Sparse Atten-tion. To avoid the information loss of KV-dropping methods (Zhang et al., 2023; Dong et al., 2024; Xiao et al., 2024b), KV retrieval approaches (Lee et al., 2024; Wu et al., 2025) keep the full KV cache in CPU memory and fetch only query-relevant to-kens to reduce transmission, which is orthogonal to PRR . LouisKV (Wu et al., 2025) and Async-Spade (Luo et al., 2025) predict the query state to prefetch relevant tokens, but approximate query-state estimation can drop important tokens and de-grade quality. PRR instead prefetches based on the temporal locality of historical importance scores and speculatively computes attention, with missed tokens reincorporated via attention repair for zero accuracy degradation. 
+
+Temporal Locality for KV Cache Management. 
+
+FlexiCache (Takbir et al., 2026) exploits temporal stability across heads : stable heads retain only their top-K KV pages on GPU, while unstable heads keep all pages. This is complementary to PRR ,which exploits temporal locality across decoding steps — the tendency for the same blocks to be reselected at consecutive steps. The two are com-posable: PRR ’s EMA predictor can guide which pages to retain within FlexiCache’s stable heads, while PRR ’s speculative attention separately im-proves decoding throughput. 
+
+7 Conclusion 
+
+We have introduced PRR , a novel speculative atten-tion runtime that breaks the selection-to-attention 8dependency in DSA. To achieve this, we propose a lightweight EMA-based predictor and implement a customized sparse attention CUDA kernel that enables incremental attention repair. Experiments on diverse LLMs and benchmarks show that PRR 
+
+achieves consistent speedups over serial DSAs. 
+
+Limitations 
+
+PRR leaves rooms for improvement. Firstly, we only evaluate over training-free dynamic sparse at-tention mechanisms (i.e., Quest and InfLLM-v2). We don’t include any trainable mechanisms like NSA in this paper, which requires huge computing resources to train from scratch. Secondly, we only optimize the kernel performance for a specific GPU architecture (i.e., NVIDIA Hopper) and under half precision. Future work can extend our kernel op-timization to other architectures (e.g., Blackwell) and other low-bit precisions (e.g., fp8). Thirdly, we mainly present the results of GLM-4-9B in the main content due to the page limit. We perform the same experiments for other LLMs and present the results in the Appendix A, where the same trend is observed on other LLMs as GLM-4-9B. Lastly, we only evaluate PRR of batch size 1. Future work can explore how to coordinate stages (e.g., block selection, speculation) across requests within the same batch to improve decoding throughput. 
+
+References 
+
+2024. Chatglm: A family of large language mod-els from glm-130b to glm-4 all tools. Preprint ,arXiv:2406.12793. AI@Meta. 2024. Llama 3 model card. Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, and 1 others. 2024. Long-bench: A bilingual, multitask benchmark for long context understanding. In Proceedings of the 62nd annual meeting of the association for computational linguistics (volume 1: Long papers) , pages 3119– 3137. Mislav Balunovi´ c, Jasper Dekoninck, Ivo Petrov, Nikola Jovanovi´ c, and Martin Vechev. 2025. Matharena: Evaluating llms on uncontaminated math competi-tions. Tri Dao. 2024. FlashAttention-2: Faster attention with better parallelism and work partitioning. In Inter-national Conference on Learning Representations (ICLR) .DeepSeek-AI. 2025. Deepseek-r1: Incentivizing rea-soning capability in llms via reinforcement learning. 
+
+Preprint , arXiv:2501.12948. Harry Dong, Xinyu Yang, Zhenyu Zhang, Zhangyang Wang, Yuejie Chi, and Beidi Chen. 2024. Get more with less: Synthesizing recurrence with kv cache compression for efficient llm inference. arXiv preprint arXiv:2402.09398 .Junda He, Christoph Treude, and David Lo. 2025. Llm-based multi-agent systems for software engineering: Literature review, vision, and the road ahead. ACM Transactions on Software Engineering and Method-ology , 34(5):1–30. Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-tanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. Ruler: What’s the real context size of your long-context language models? 
+
+arXiv preprint arXiv:2404.06654 .Zhengding Hu, Vibha Murthy, Zaifeng Pan, Wanlu Li, Xiaoyi Fang, Yufei Ding, and Yuke Wang. 2025. Hedrarag: Co-optimizing generation and retrieval for heterogeneous rag workflows. In Proceedings of the ACM SIGOPS 31st symposium on operating systems principles , pages 623–638. Hugging Face H4. 2024. Aime 2024. https: //huggingface.co/datasets/HuggingFaceH4/ aime_2024 . Dataset of 30 problems from the 2024 AIME I and AIME II competitions. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Effi-cient memory management for large language model serving with pagedattention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024. {InfiniGen }: Efficient generative infer-ence of large language models with dynamic {KV }
+
+cache management. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) , pages 155–172. Noam Levy. 2026. Dynamic sparse attention: Ac-cess patterns and architecture. arXiv preprint arXiv:2603.13430 .Xiaoxi Li, Jiajie Jin, Guanting Dong, Hongjin Qian, Yongkang Wu, Ji-Rong Wen, Yutao Zhu, and Zhicheng Dou. 2026. Webthinker: Empowering large reasoning models with deep research capability. 
+
+Advances in Neural Information Processing Systems ,38:120091–120131. Hunter Lightman, Vineet Kosaraju, Yura Burda, Harri Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. 2023. Let’s verify step by step. arXiv preprint arXiv:2305.20050 .
+
+9Shuqing Luo, Yilin Guan, Pingzhi Li, Hanrui Wang, and Tianlong Chen. 2025. Asyncspade: Efficient test-time scaling with asynchronous sparse decoding. 
+
+arXiv preprint arXiv:2510.07486 .Jovan Stojkovic, Chaojie Zhang, Íñigo Goiri, Josep Tor-rellas, and Esha Choukse. 2025. Dynamollm: De-signing llm inference clusters for performance and energy efficiency. In 2025 IEEE International Sym-posium on High Performance Computer Architecture (HPCA) , pages 1348–1362. IEEE. Nazmul Takbir, Hamidreza Alikhani, Nikil Dutt, and Sangeetha Abdu Jyothi. 2026. Flexicache: Leverag-ing temporal stability of attention heads for efficient kv cache management. In Proceedings of Machine Learning and Systems , MLSys. Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. Quest: query-aware sparsity for efficient long-context llm inference. In Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org. Qwen Team. 2025. Qwen3 technical report. Preprint ,arXiv:2505.09388. Qineng Wang, Zihao Wang, Ying Su, Hanghang Tong, and Yangqiu Song. 2024. Rethinking the bounds of llm reasoning: Are multi-agent discussions the key? In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 6106–6131. Zibo Wang, Yijia Zhang, Fuchun Wei, Bingqiang Wang, Yanlin Liu, Zhiheng Hu, Jingyi Zhang, Xiaoxin Xu, Jian He, Xiaoliang Wang, Wanchun Dou, Guihai Chen, and Chen Tian. 2025. Using analytical perfor-mance/power model and fine-grained dvfs to enhance ai accelerator energy efficiency. In Proceedings of the 30th ACM International Conference on Archi-tectural Support for Programming Languages and Operating Systems, Volume 1 , ASPLOS ’25, page 1118–1132, New York, NY, USA. Association for Computing Machinery. Wenbo Wu, Qingyi Si, Xiurui Pan, Ye Wang, and Jie Zhang. 2025. Louiskv: Efficient kv cache retrieval for long input-output sequences. arXiv preprint arXiv:2510.11292 .Chaojun Xiao, Pengle Zhang, Xu Han, Guangxuan Xiao, Yankai Lin, Zhengyan Zhang, Zhiyuan Liu, and Maosong Sun. 2024a. Infllm: Training-free long-context extrapolation for llms with an efficient context memory. Advances in neural information processing systems , 37:119638–119661. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024b. Efficient streaming language models with attention sinks. In Interna-tional Conference on Learning Representations , vol-ume 2024, pages 21875–21895. Yingxuan Yang, Huacan Chai, Shuai Shao, Yuanyi Song, Siyuan Qi, Renting Rui, and Weinan Zhang. 2026. Agentnet: Decentralized evolutionary coordination for llm-based multi-agent systems. Advances in Neural Information Processing Systems , 38:107309– 107336. Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yi-neng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. 2025. Flashinfer: Efficient and customiz-able attention engine for llm inference serving. arXiv preprint arXiv:2501.01005 .Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Yux-ing Wei, Lean Wang, Zhiping Xiao, and 1 others. 2025a. Native sparse attention: Hardware-aligned and natively trainable sparse attention. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Pa-pers) , pages 23078–23097. Lifan Yuan, Ganqu Cui, Hanbin Wang, Ning Ding, Xingyao Wang, Boji Shan, Zeyuan Liu, Jia Deng, Huimin Chen, Ruobing Xie, and 1 others. 2025b. Advancing llm reasoning generalists with preference trees. In International Conference on Learning Rep-resentations , volume 2025, pages 24897–24919. Aohan Zeng, Zhengxiao Du, Mingdao Liu, Kedong Wang, Shengmin Jiang, Lei Zhao, Yuxiao Dong, and Jie Tang. 2024. Glm-4-voice: Towards intelligent and human-like end-to-end spoken chatbot. arXiv preprint arXiv:2412.02612 .Xinrong Zhang, Yingfa Chen, Shengding Hu, Zihang Xu, Junhao Chen, Moo Hao, Xu Han, Zhen Thai, Shuo Wang, Zhiyuan Liu, and Maosong Sun. 2024. 
+
+∞Bench: Extending long context evaluation beyond 100K tokens. In Proceedings of the 62nd Annual Meeting of the Association for Computational Lin-guistics (Volume 1: Long Papers) , pages 15262– 15277, Bangkok, Thailand. Association for Compu-tational Linguistics. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, and 1 oth-ers. 2023. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Ad-vances in Neural Information Processing Systems ,36:34661–34710. Weilin Zhao, Zihan Zhou, Zhou Su, Chaojun Xiao, Yuxuan Li, Yanghao Li, Yudi Zhang, Weilun Zhao, Zhen Li, Yuxiang Huang, and 1 others. 2025. Infllm-v2: Dense-sparse switchable attention for seamless short-to-long adaptation. arXiv preprint arXiv:2509.24663 .Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. Sglang: efficient 
+
+10 execution of structured language model programs. In 
+
+Proceedings of the 38th International Conference on Neural Information Processing Systems , NIPS ’24, Red Hook, NY, USA. Curran Associates Inc. Yuxiang Zheng, Dayuan Fu, Xiangkun Hu, Xiaojie Cai, Lyumanshan Ye, Pengrui Lu, and Pengfei Liu. 2025. Deepresearcher: Scaling deep research via reinforce-ment learning in real-world environments. In Pro-ceedings of the 2025 Conference on Empirical Meth-ods in Natural Language Processing , pages 414–431. 
+
+A Appendix 
+
+A.1 Extend Quest to GQA 
+
+The original Quest formulation targets Multi-Head Attention, where each query head has a dedi-cated KV head and independently selects its top-K
+
+pages. Under Grouped-Query Attention (GQA), G
+
+query heads share one KV head, making per-query-head selection both wasteful—selected pages are loaded once per KV head—and ill-defined when heads in a group disagree. We extend Quest to GQA by operating at KV-head granularity: page metadata (channel-wise min/max keys mp, M p)is stored per KV head as before, and for each KV head we form a representative query ¯Q =
+
+> 1
+> G
+
+PGg=1 Qg. Criticality estimation then proceeds as sp = P 
+
+> i
+
+max( ¯Qimp,i , ¯QiMp,i ), yielding one score per (KV-head, page) from which top-K pages are selected and shared across the group during sparse attention. 
+
+A.2 Setup for Quest and InfLLM-v2 
+
+We use the same setting (e.g., block size, token budget) as Quest (Tang et al., 2024) and InfLLM-v2 (Zhao et al., 2025) for experiments in Section 5. 
+
+A.3 Temporal Locality across LLMs and Benchmarks 
+
+We measure how many blocks are repeat-edly selected in consecutive decoding steps on five representative long-context bench-marks, including LongBench (Bai et al., 2024), InfiniteBench (Zhang et al., 2024), AIME (Hugging Face H4, 2024; Balunovi´ c et al., 2025), MATH500 (Lightman et al., 2023), and RULER (Hsieh et al., 2024) for GLM-Z1-9B (glm, 2024), Deepseek-R1-8B (DeepSeek-AI, 2025), Llama3-8B-1M (AI@Meta, 2024), Qwen3-14B (Team, 2025), and Qwen3-32B (Team, 2025). Table 5 reports the profiled overlap rates. Across all LLMs and benchmarks, the overlap stays below 
+
+Table 5: Average overlap rate of blocks in consecutive block selections of LLMs under various benchmarks.                                                                        
+
+> Model Long Bench Infinite Bench RULER AIME MATH 500 Avg. Quest
+> GLM-4 0.669 0.694 0.658 0.674 0.664 0.672
+> GLM-Z1 0.689 0.693 0.700 0.695 0.707 0.697
+> DeepSeek-R1 0.629 0.639 0.638 0.633 0.639 0.636
+> Llama3 0.666 0.649 0.665 0.671 0.689 0.668
+> Qwen3-14B 0.640 0.655 0.662 0.652 0.657 0.653
+> Qwen3-32B 0.637 0.657 0.640 0.655 0.633 0.644 InfLLM-v2
+> GLM-4 0.689 0.701 0.679 0.718 0.702 0.698
+> GLM-Z1 0.692 0.708 0.701 0.698 0.694 0.698
+> DeepSeek-R1 0.669 0.657 0.681 0.670 0.677 0.671
+> Llama3 0.679 0.639 0.672 0.695 0.699 0.677
+> Qwen3-14B 0.651 0.656 0.675 0.668 0.682 0.666
+> Qwen3-32B 0.646 0.642 0.663 0.644 0.680 0.655
+
+Table 6: Utilization (%) of SM, L2 bandwidth, and DRAM bandwidth under varying batch sizes for GLM-4-9B under Quest and InfLLM-v2.                              
+
+> DSA Metric BS=2 BS=4 BS=8 BS=16 Quest
+> SM 6.73 7.22 7.90 8.66 L2 BW 43.46 44.33 44.32 45.57 DRAM BW 36.55 37.26 37.24 38.02
+> InfLLM-v2
+> SM 6.55 7.31 7.93 9.27 L2 BW 42.53 43.90 45.84 47.36 DRAM BW 35.73 36.71 38.40 39.50
+
+0.7. This suggests that naively reusing the previous step’s block selection offers little room for specula-tive speedup, due to frequently triggered fallback attention recomputation. 
+
+A.4 Low Utilization of DSA 
+
+We profile the utilization of streaming multipro-cessors (SMs), L2 bandwidth, and DRAM band-width for GLM-4-9B at larger batch sizes (i.e., 2, 4, 8, 16) under Quest and InfLLM-v2. The total context length is fixed at 128K, so batch size 16 corresponds to a per-prompt length of 8K tokens — well above the token budgets used by both Quest and InfLLM-v2. As shown in Table 6, GPU re-sources remain underutilized even at these larger batch sizes, leaving ample headroom for specu-lative attention to execute in parallel with block selection. 11 A.5 Search and Prediction Cost 
+
+Each grid evaluation runs the predictor over the prefill score matrix at a cost of O(Tp · Np log K)
+
+arithmetic operations. Crucially, the search is scheduled to overlap with the prefill phase: by the time the last prefill token is processed and IS 
+
+is complete, most grid evaluations have already executed concurrently on the CPU. The critical-path cost of calibration is therefore the tail of the grid that cannot be overlapped. End-to-end, the full search—covering both overlapped and non-overlapped portions—takes approximately 2.4 ms and 11.2 ms for 16K- and 64K-token prefills, re-spectively, on GLM-4-9B. The non-overlapped por-tion (i.e., the fit for the final layer) accounts for only 0.06 ms and 0.28 ms for the two prefills. The prediction process takes only 0.01 ms. 
+
+A.6 Profiling Overheads 
+
+Profiling the execution time of block selection and speculative attention computation across context lengths (4K, 8K, 16K, 32K, and 64K) takes under 5 minutes on a single H100 GPU for GLM-4-9B. For context lengths outside this grid, we estimate execution time via polynomial regression, a stan-dard technique for continuous resource modeling in LLM serving (Wang et al., 2025; Stojkovic et al., 2025; Hu et al., 2025). 
+
+A.7 EMA Hit Rate 
+
+Table 7 reports the overlap rate between EMA’s predicted block set and the true top-K set of LLMs across benchmarks. PRR ’s EMA predictor consis-tently achieves a high overlap rate (>97%). 
+
+A.8 Ablation Study 
+
+Table 8 decomposes PRR ’s end-to-end speedup into three cumulative stages (S1, S2, S3), evaluated across all six LLMs and five benchmarks under both Quest and InfLLM-v2, where S3 represents the standard PRR configuration. We make three observations. First, naively en-abling speculative attention through Stage-1 yields negligible improvement over serial DSA execution (1.00 –1.04 × across all configurations). Although the block selections reused from the previous de-coding step overlap with the current true top-K
+
+set by roughly 70% on average, Stage-1 requires 
+
+exact coverage to be useful: a single missed block triggers a full attention recomputation over the true top-K selection. Since complete overlap is 
+
+Table 7: The overlap rate(%) between EMA’s prediction and the true top-K set of LLMs across benchmarks.                                                                        
+
+> Model Long Bench Infinite Bench RULER AIME MATH 500 Avg. Quest
+> GLM-4 98.65 96.86 98.36 98.15 98.25 98.05
+> GLM-Z1 98.55 97.33 97.95 97.93 98.09 97.97
+> DeepSeek-R1 98.56 97.60 96.99 97.71 97.88 97.75
+> Llama3 98.63 97.62 97.49 98.01 98.28 98.01
+> Qwen3-14B 97.49 98.91 98.17 97.93 98.10 98.12
+> Qwen3-32B 98.52 98.56 98.12 97.94 98.06 98.24 InfLLM-v2
+> GLM-4 97.86 97.14 96.46 98.15 98.01 97.52
+> GLM-Z1 99.12 98.89 98.56 98.42 98.49 98.70
+> DeepSeek-R1 99.03 99.01 98.27 99.40 98.57 98.86
+> Llama3 97.67 97.50 97.85 98.75 98.95 98.14
+> Qwen3-14B 98.37 98.63 98.66 98.56 98.62 98.57
+> Qwen3-32B 98.87 98.80 98.93 98.82 98.87 98.86
+
+rarely achieved in practice, the fallback recomputa-tion negates the latency savings from speculation. Second, Stage-2 introduces our customized sparse attention kernel, raising the average speedup to roughly 1.20 × under Quest and 1.20 –1.32 × un-der InfLLM-v2. Beyond simply accelerating at-tention over non-contiguous blocks, the kernel en-ables incremental attention repair, so missed blocks can be patched in directly rather than triggering a costly full recomputation. The gain is larger un-der InfLLM-v2 because its sparse-attention stage carries more latency, leaving more headroom for the repair path to exploit. Third, Stage-3 addi-tionally activates the EMA-based predictor, which attains a 98% overlap rate between the predicted and true top-K sets (Table 7). This near-exact pre-diction sharply reduces the fraction of blocks that fall back to repair, lifting the average speedup to 
+
+1.28 –1.42 × under Quest and 1.32 –1.56 × under InfLLM-v2. The consistency of this stage-wise pattern across all six LLMs and five benchmarks indicates that PRR ’s design generalizes rather than being tuned to any single configuration. 12 Table 8: Ablation of decoding speedup across stages, models, and benchmarks. S1, S2, and S3 ( PRR ) are reported relative to serial DSA execution ( 1.00 ×). Higher is better. 
+
+LongBench InfiniteBench RULER AIME MATH500 Avg. Model S1 S2 S3 S1 S2 S3 S1 S2 S3 S1 S2 S3 S1 S2 S3 S1 S2 S3 
+
+Quest 
+
+GLM-4 1.00 1.27 1.50 1.01 1.21 1.40 1.00 1.24 1.45 1.00 1.11 1.30 1.00 1.16 1.42 1.00 1.20 1.41 
+
+GLM-Z1 1.00 1.23 1.48 1.01 1.20 1.39 1.00 1.22 1.43 1.00 1.15 1.33 1.00 1.20 1.45 1.00 1.20 1.42 
+
+DeepSeek-R1 1.00 1.19 1.39 1.03 1.21 1.42 1.00 1.25 1.47 1.00 1.13 1.35 1.00 1.13 1.39 1.01 1.18 1.40 
+
+Llama3 1.00 1.17 1.36 1.01 1.20 1.40 1.00 1.20 1.41 1.00 1.15 1.39 1.00 1.11 1.34 1.00 1.17 1.38 
+
+Qwen3-14B 1.00 1.23 1.44 1.00 1.09 1.27 1.00 1.19 1.41 1.00 1.21 1.44 1.00 1.21 1.45 1.00 1.19 1.40 
+
+Qwen3-32B 1.00 1.06 1.26 1.00 1.15 1.34 1.00 1.10 1.27 1.00 1.08 1.27 1.00 1.05 1.26 1.00 1.09 1.28 InfLLM-v2 
+
+GLM-4 1.02 1.34 1.64 1.00 1.19 1.38 1.01 1.34 1.58 1.02 1.34 1.62 1.01 1.31 1.59 1.01 1.30 1.56 
+
+GLM-Z1 1.03 1.35 1.61 1.00 1.17 1.35 1.02 1.37 1.61 1.04 1.39 1.64 1.00 1.28 1.55 1.02 1.31 1.55 
+
+DeepSeek-R1 1.00 1.08 1.30 1.04 1.28 1.48 1.03 1.37 1.61 1.00 1.29 1.52 1.00 1.06 1.28 1.01 1.22 1.44 
+
+Llama3 1.00 1.12 1.32 1.04 1.26 1.45 1.00 1.31 1.55 1.00 1.30 1.55 1.00 1.07 1.30 1.01 1.21 1.43 
+
+Qwen3-14B 1.00 1.31 1.56 1.03 1.23 1.43 1.00 1.28 1.51 1.00 1.29 1.53 1.00 1.27 1.53 1.01 1.28 1.51 
+
+Qwen3-32B 1.00 1.11 1.35 1.00 1.11 1.27 1.00 1.09 1.29 1.00 1.12 1.32 1.00 1.13 1.35 1.00 1.11 1.32 
+
+13
