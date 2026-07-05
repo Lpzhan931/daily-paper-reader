@@ -1,0 +1,441 @@
+Title: Speculative Pre-Positioning: Decoding Stateful Sessions to the Next Decision Point Off the Critical Path
+
+URL Source: https://arxiv.org/pdf/2606.29565v1
+
+Published Time: Tue, 30 Jun 2026 01:25:16 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Speculative Pre-Positioning: Decoding Stateful Sessions to the Next Decision Point Off the Critical Path 
+
+Victor Norgren 
+
+LayerScale, Inc. 
+
+https://layerscale.ai victor@layerscale.ai 
+
+## Abstract 
+
+A stateless inference server (vLLM, SGLang, TensorRT-LLM) sits idle between requests, the accelerator doing nothing while it waits. A stateful session keeps its state alive across requests, turning that idle time into a resource: between a data update and the next query when streaming, or between a tool call and its result when agentic. Speculative pre-positioning fills those windows by decoding the session forward to its next decision point with the target model’s own forward pass and no draft model. The next request resumes from a pre-paid entry on only its delta, or, when a calibrated confidence gate fires, is answered from a cached output distribution in a single near-constant vocabulary scan with no decode at all. The cross-request prefill and entry-decode thus move off the critical path into amortized idle time, at a cost of energy and a rare, bounded false accept. The payoff is conditional on model capability. A larger target model that reads the domain task confidently fires the gate at near-full coverage and roughly 87% 
+
+precision, while a smaller model never clears it, so the fast path helps only when the model is confident. When it fires, the measured first token returns in about 
+
+1.0 ms (P50 over 128 fires): a prefix cache still pays the one decode step a pre-position removes (about 39 ms here), a nearly fortyfold reduction, and more than fiftyfold against the stateful cold path that also re-prefills the entry. We report end-to-end first-token latency with and without pre-positioning, the gate calibration, the cross-request hit rate, and the idle-time energy cost from a host run. 
+
+## 1 Introduction 
+
+Stateful inference keeps a session’s state alive across requests so each one advances by only its delta, as in continuous data streaming Norgren [2026a] and multi-agent tool calling Norgren [2026b]. The same persistence exposes an untapped resource, the idle window : between a data update and the next query, or between a tool call and its result, the session holds state while the accelerator idles on the critical path. These windows are set by an external clock, not the model: a streaming query arrives on its own cadence and a tool call blocks on an external round trip, each routinely far longer than a forward pass over a short entry. The longer the window relative to that work, the larger the fraction of pre-positioned work consumed before the next state change, the hit rate of Eq. (8) , which we measure rather than assume (Section 5.2). We use that window to do the next request’s entry work in advance, decoding the session forward to its next decision point , the position where generation resumes: the query prefix plus assistant header in a streaming session, or the post-tool-call envelope in an agentic one. One forward pass of the target model there, with no draft model, caches the output distribution, so the next request either resumes 
+
+> arXiv:2606.29565v1 [cs.LG] 28 Jun 2026
+
+delta-only from a pre-paid entry or returns a single cached token when a calibrated confidence gate fires. This is not draft-model speculative decoding Leviathan et al. [2023]: no draft network and no fast-path verification, only the target model’s own work moved off the critical path, gated by a confidence test rather than a draft-versus-target match. This paper makes the following contributions: 1. Cross-request idle-time pre-positioning, formalized. We define the decision point, the amortization model, and the condition under which the work is wall-clock-free, costing only energy and a rare false accept. 2. The ready-distribution cache. We cache the output distribution at the decision point , not merely the KV state, enabling a zero-decode answer for an eligible query class. 3. A confidence-gated single-token fast path. One cached token is served when the top-1 to top-2 logit gap clears a calibrated threshold and the token lies in a domain fast-answer set; otherwise it falls through to a normal path made cheaper by the pre-paid prefill. 4. Generalization across session types. One mechanism covers streaming sessions (query prefix plus assistant header) and agentic sessions (post-tool-call envelope, the next turn resuming delta-only). 5. Invalidation discipline. Any mutation of the persistent state invalidates the cached distribu-tion and pre-positioned entry, so a stale or low-confidence answer is never served. The remainder formalizes the model (Section 2), develops the mechanisms with two algorithms and supporting figures (Section 3), and reports the methodology and results, including systems measurements from a host run (Sections 4 and 5). Discussion, related work, and conclusions follow (Sections 6–8). 
+
+## 2 Problem Formulation 
+
+We consider a single stateful session whose persistent KV cache survives across requests and is advanced incrementally, as in the streaming Norgren [2026a] and multi-agent tool-calling Norgren [2026b] settings. The session holds an accumulated state of ns tokens: a frozen system region, the streamed data or conversation history, and any committed turns. The property we exploit is temporal: the next request does not arrive the instant the state is ready. Between the moment the state reaches version t (a data batch committed, or a tool call emitted) and the moment the next request arrives, the accelerator is idle. We formalize that window, the position the next request resumes from, and the latency and risk of answering it ahead of time. 
+
+2.1 The Decision Point and the Idle Window 
+
+When the next request arrives it does not start from scratch: it appends a short, structurally predictable 
+
+entry of Lentry tokens to the live end of the state. In a streaming session the entry is the query prefix together with the assistant header; in an agentic session it is the post-tool-call envelope that precedes the next turn. The decision point is the position at which generation resumes: 
+
+p = ns + Lentry (1) The model’s output distribution at position p, the logits produced by a forward pass whose last token is the final entry token, is the ready distribution : the model’s answer to the next request, formed before that request has been asked. For the streaming fast path the pre-position runs at the data decision point on the generic assistant header, before the specific query text is known, so the ready distribution is a function of the data state and the header but not of the query: the served fast-path token is question-independent . In Eq. (1) the fast path therefore takes Lentry as the header alone, with the query prefix folded into the fall-through delta ∆ of Eq. (5) . A query whose answer is a property of the data state, the trend of the streamed series, matches this token; one whose answer turns on the query wording need not, and that gap is the false-accept rate r(τ ) of Eq. (14) measured in Section 5. Let the state reach version t at time 0 and the next request arrive at time Iidle . We call Iidle the idle window . It is genuinely idle when no other admitted work occupies the accelerator over [0 , I idle ), the common case for a session between a data update and a sporadic query, or between a dispatched tool call and a returning result. 22.2 Critical-Path Latency: Baseline, Fast Path, and Fall-Through 
+
+We reuse the latency notation of the companions: Tprefill (k) is the time to process k tokens, Tdecode 
+
+the time for one generated token, Trestore a constant-time metadata restore of cached state, and m the number of output tokens. On the stateful-session baseline the accumulated state is already cached, but the entry is processed on the critical path when the request arrives, followed by the decode that produces the first answer token: 
+
+Lcold = Tprefill (Lentry ) + Tdecode (2) plus (m − 1) Tdecode of tail generation for multi-token answers, which pre-positioning does not change and we omit from the entry-latency comparison. Speculative pre-positioning runs the forward pass of Eq. (2) during the idle window instead, caches the ready distribution, and on an eligible request serves a single token by scanning that distribution for its argmax. The only critical-path cost is that scan over the vocabulary V:
+
+Lfast = Tscan (V) (3) which is near-constant and independent of Lentry , ns, and the accumulated context. The fast-path speedup is 
+
+S = Lcold 
+
+Lfast 
+
+= Tprefill (Lentry ) + Tdecode 
+
+Tscan (V) (4) and grows with the entry length, since Lfast does not. When the gate of Section 2.4 does not fire, the request falls through to the normal path, but does not re-process the whole entry: the entry prefill was already committed to the cache during the idle window, so the request restores it in constant time and processes only the delta ∆ it adds beyond the pre-positioned entry: 
+
+Lfall = Trestore + Tprefill (∆) + Tdecode , ∆ ≤ Lentry (5) Comparing with the baseline, Lfall − Lcold = Trestore − Tprefill (Lentry − ∆) : the fall-through trades re-prefilling the pre-paid portion of the entry for one state restore, and improves on the baseline once that saved prefill exceeds the restore cost. With ∆ = 0 it is Trestore + Tdecode , and at the upper bound 
+
+∆ = Lentry it is Lcold + Trestore , the restore overhead with no prefill saved. The fall-through is thus bounded within a restore of the baseline and is strictly cheaper for a pre-positioned entry longer than the restore cost, independent of whether the gate fires. 
+
+2.3 Idle-Window Amortization, Hit Rate, and Net Benefit 
+
+The pre-position cost is one forward pass over the entry tokens, whose final-position logits are the ready distribution: 
+
+Tpp = Tprefill (Lentry ) (6) This work is wall-clock-free precisely when it fits inside the idle window: 
+
+Tpp ≤ Iidle (7) Under Eq. (7) the forward pass occupies otherwise-idle accelerator time and adds nothing to query latency; the only real costs are energy and the rare false accept of Section 2.4. The cached ready distribution adds negligible state beyond the session’s MKV : a single vocabulary-sized logit vector, or, in the gated fast path, only the top token and the logit gap. Not every pre-position is consumed. If the session state mutates before the next request (a new data batch, a rollback), the cached distribution is invalidated (Section 3.6) and the pre-position was wasted. Let h be the hit rate , the fraction of pre-positions consumed by a request before invalidation; the 
+
+wasted-work fraction is then 
+
+w = 1 − h (8) Writing g for the probability the gate fires given a hit, the expected entry latency under pre-positioning is 
+
+E[Lpp ] = h g L fast + (1 − g) Lfall 
+
+ + (1 − h) Lcold (9) against a baseline of E[Lbase ] = Lcold . Pre-positioning lowers expected latency, E[Lpp ] < L cold ,exactly when 
+
+g L fast + (1 − g) Lfall < L cold (10) 3Whenever this served term falls below Lcold , expected latency drops for any hit rate h > 0. It does so at the measured operating point: the fast path Lfast of Eq. (3) is far below Lcold and dominates the term at an appreciable gate-fire rate g, and a typical fall-through of Eq. (5) is itself below the baseline. The wasted fraction w never appears as wall-clock cost under Eq. (7) ; it bears only on the energy budget, treated separately in Section 6. 
+
+2.4 The Confidence Gate and Its Risk-Coverage Tradeoff 
+
+The fast path of Eq. (3) serves a cached token with no verification pass, so its safety rests entirely on a calibrated confidence test. Let ℓ(1) and ℓ(2) be the largest and second-largest logits of the ready distribution, with gap 
+
+γ = ℓ(1) − ℓ(2) (11) and let A be a domain fast-answer set of admissible single-token answers. The gate fires, and a single cached token is served, iff 
+
+γ > τ and arg max( ℓ) ∈ A (12) for a threshold τ (the reference uses τ = 2 .0, inherited from the streaming companion’s ready-position exit Norgren [2026a]). Sweeping τ traces a selective-prediction tradeoff. Define the coverage as the fraction of requests the gate accepts, and the false-accept rate (the risk) as the fraction of served fast-path answers that disagree with the model’s own full-path output: 
+
+c(τ ) = Pr  γ > τ ∧ arg max( ℓ) ∈ A  (13) 
+
+r(τ ) = Pr  served token wrong | accepted  (14) Both are monotone non-increasing in τ : a higher threshold accepts fewer requests but errs less often. This is the selective-prediction formulation of El-Yaniv and Wiener El-Yaniv and Wiener [2010], in which an abstaining predictor trades coverage for bounded risk; here the model abstains from the fast path by falling through to the normal decode. Calibration, deferred to Section 4 as a measurement, selects the smallest τ such that r(τ ) ≤ rmax for a target risk budget rmax , maximizing coverage at bounded risk. 
+
+## 3 Architecture 
+
+The architecture realizes the thesis through a small set of cooperating mechanisms that share one goal: move the next request’s decode entry point off the critical path and into the idle window, without ever serving a stale answer. Figure 2 contrasts the baseline critical path with the pre-positioned one, where the entry work has moved into the idle window. Two mechanisms build the pre-positioned state, one for streaming sessions (Section 3.2) and one for agentic sessions (Section 3.5); a ready-distribution cache (Section 3.3) holds the result; a confidence-gated fast path (Section 3.4) consumes it; and an invalidation rule (Section 3.6) keeps it honest. Each rests on the persistent session state of the stateful-session foundation Norgren [2026a,b]: none is possible in a stateless request loop, where the cache is discarded between requests and there is no live position at which to pre-position anything. 
+
+3.1 Decision Points and Idle Windows 
+
+A session exposes a live end position that advances as it ingests data or completes turns. The decision point of Eq. (1) is the position from which the next request resumes generation, differing across session types only in what constitutes the entry. In a streaming session the entry is the query prefix plus the assistant header, so the decision point sits immediately after the header, where the model is about to answer the next query. In an agentic session the entry is the envelope that follows a tool call (the tool-result framing and the opening of the next assistant turn), so the decision point sits where that turn begins. The idle window opens when the session commits its state, as a data batch finishes ingesting or a tool call is dispatched to an external service, and closes when the next request arrives. In both workloads this interval is typically long relative to a single forward pass: streaming data arrives on a cadence of seconds while queries are sporadic, and a dispatched tool call returns only after a network round trip or an external computation. Pre-positioning runs at the lowest scheduling priority and yields immediately to any arriving request, occupying the window only while it would otherwise be idle. When the window is genuinely idle, the amortization condition of Eq. (7) holds and the pre-position work is wall-clock-free. 43.2 Pre-Positioning on Idle 
+
+The streaming mechanism produces the pre-positioned state after each update that advances the session. The engine appends the entry tokens at the live end position and runs a single forward pass (Algorithm 1); the logits at the final entry position are the ready distribution of Section 2, the model’s answer to the anticipated query, computed before the query is asked. It records three fields on the session: the decision-point position, the cached ready distribution, and a validity flag that marks the entry decoded and the distribution current. Two properties make this safe and cheap. First, the cost is a forward pass over the entry tokens alone, Tpp = Tprefill (Lentry ) of Eq. (6) , not over the accumulated context, which already resides in the session’s cache. Second, the work is best-effort: if admitting the entry tokens would breach the session’s share of the cell budget, for instance under memory pressure from concurrent tenants, the engine skips the pre-position rather than evicting live state, and the next request takes the baseline path of Eq. (2) . Pre-positioning therefore never reduces correctness or capacity; at worst it does nothing. 
+
+Algorithm 1 Pre-Position on Idle (Background, after a session update) 
+
+Require: Session at end position ns, entry tokens E of length Lentry , cell-budget headroom B 
+
+> 1:
+
+{Triggered after a data update or append; runs at lowest priority, yields to any request}  
+
+> 2:
+
+if Lentry > B then  
+
+> 3:
+
+valid ← false {Cell budget over-committed: skip without eviction; baseline path Lcold applies}  
+
+> 4:
+
+else  
+
+> 5:
+
+Append (E) at end position ns {Entry only; accumulated state already resident}  
+
+> 6:
+
+ℓready ← Forward (E) {One forward pass, cost Tpp } 
+
+> 7:
+
+p ← ns + Lentry {Decision point}  
+
+> 8: 9:
+
+{Record the ready distribution on the session}  
+
+> 10:
+
+position ← p 
+
+> 11:
+
+dist ← ℓready {Or only (arg max ℓready , γ ) under the gate}  
+
+> 12:
+
+decoded ← true ; valid ← true  
+
+> 13:
+
+end if 3.3 The Ready-Distribution Cache 
+
+The pre-positioned forward pass leaves two kinds of state behind, and the distinction is the crux of the contribution. The first is the set of KV cells for the entry tokens, which persist in the session’s cache as a prefix cache would retain them; a request that falls through resumes from them in constant time, the Trestore term of Eq. (5) . The second, which conventional caches do not keep, is the output distribution at the decision point: the ready logits, or in the common gated case only the top token and the top-1 to top-2 gap. A prefix or KV cache Kwon et al. [2023], Zheng et al. [2024] stores the first kind alone, which spares a request the entry prefill but still leaves it to run the entry decode to discover what the model would say. Caching the distribution lets an eligible request skip the decode as well and answer directly from the cached argmax, collapsing the critical path to the vocabulary scan Lfast of Eq. (3) . That distribution is shared with the registered-query path of the streaming companion Norgren [2026a], so a standing query and an ad-hoc query resolving to the same decision point draw the same pre-computed answer. It lives on the session beside the KV state and adds negligible memory: at most one vocabulary-sized vector against the session’s MKV .
+
+3.4 Confidence-Gated Fast-Path Serve 
+
+A request is eligible for the fast path iff the session holds a valid ready distribution and the request’s realized entry reproduces the pre-positioned entry token-for-token up to the decision point of Eq. (1) :only then is the cached argmax provably identical to a fresh forward pass on the live sequence (Section 3.6), so an exact-match request, such as an agentic delta-only resume or a registered query, takes on zero added risk. The streaming ad-hoc fast path relaxes the exact-match condition, serving the question-independent token formed at the header before the query arrives (Section 2) and accepting the bounded divergence r(τ ) of Eq. (14) in exchange for latency. An eligible request takes the fast 5path of Eq. (3) ; the serve procedure (Algorithm 2) reads the cached distribution, forms the gap γ of Eq. (11) from its two largest logits, and applies the gate of Eq. (12) : if γ exceeds the threshold τ
+
+and the predicted token lies in the fast-answer set A, it returns that single token and bypasses the scheduler, so the request never enters the decode loop and its whole critical path is the vocabulary scan Lfast , with no prefill and no decode. When the gate does not fire, because the gap is too small or the predicted token is not an admissible single-token answer, the request falls through to the normal path, still paying only Lfall of Eq. (5) rather than the baseline cost, since the entry prefill was already committed during the idle window. Running no verification is the structural difference from token-level speculation. Speculative decoding proposes tokens and checks each against the target’s logits within one generation Leviathan et al. [2023], and prompt-lookup decoding does the same without a draft model but still verifies every proposed token Saxena [2023]. Here the served token is the target model’s own output, already produced by the pre-position pass, so there is no draft to verify it against. There is, however, something it can disagree with: the streaming pre-position conditions on the data state and the generic header but not on the specific query, so the served token is question-independent, whereas the full path conditions on the query as well. When the answer is a property of the data state the two coincide; when it is not they diverge, at the measured false-accept rate r(τ ) of Eq. (14) . The fast path thus trades question-conditioning for latency. The gate is therefore a calibrated confidence test (Section 2.4) whose threshold holds the false-accept rate of Eq. (14) below a target budget, not a draft-versus-target match. The same cached distribution feeds the registered-query path of the streaming companion Norgren [2026a], so a standing query and an ad-hoc request arriving at the same decision point read one pre-computed confidence rather than each recomputing it. 
+
+Algorithm 2 Confidence-Gated Fast-Path Serve (on request) 
+
+Require: Request q on a session; cached (p, ℓ ready , valid ); threshold τ , fast-answer set A 
+
+> 1:
+
+if ¬ valid or q ineligible (realized entry ̸ = pre-positioned entry up to p) then  
+
+> 2:
+
+fall through to the scheduler {Normal path, cost Lfall ; entry prefill already paid}  
+
+> 3:
+
+else  
+
+> 4:
+
+(ℓ(1) , ℓ (2) ) ← Top2 (ℓready ) {Two largest logits of the cached distribution}  
+
+> 5:
+
+γ ← ℓ(1) − ℓ(2) ; ˆa ← arg max( ℓready ) {Logit gap and top token}  
+
+> 6:
+
+if γ > τ and ˆa ∈ A then  
+
+> 7:
+
+return ˆa {One cached token, bypass the scheduler; cost Lfast , no verification}  
+
+> 8:
+
+else  
+
+> 9:
+
+fall through to the scheduler {Gate not met; normal path, cost Lfall } 
+
+> 10:
+
+end if  
+
+> 11:
+
+end if 
+
+Figure 1 renders both algorithms as flowcharts, the idle-window pre-position of Algorithm 1 (panel a) beside the gated serve of Algorithm 2 (panel b), tracing each path to its cost: Tpp off the critical path, and Lfast or Lfall on it. 
+
+3.5 Generalization to Agentic Sessions 
+
+The same construction extends across the tool-call boundary, a second species of idle window. When a session emits a tool call it waits for the result, idle on the critical path for the duration of a network round trip or an external computation. During that wait the engine pre-decodes the post-tool-call envelope, the tokens that frame the returning result and open the next assistant turn, placing the decision point at the start of that turn. When the result arrives, the next request appends only its delta, the result payload, beyond the pre-positioned envelope and resumes delta-only, paying Lfall of Eq. (5) rather than re-processing the envelope on the critical path. The entry is an envelope rather than a query prefix, but the decision-point position, the ready distribution, and the validity flag are recorded exactly as in Section 3.2, so the ready-distribution cache of Section 3.3 and the fast path of Section 3.4 carry over unchanged; the dominant benefit here is the delta-only resume, with the single-token serve applying whenever a tool-mediated turn admits an eligible cached answer. The agentic pre-position is best-effort like the streaming one: if pre-decoding the envelope would over-commit the session’s share of the cell budget, as when many agents run concurrently, the engine skips it and the next turn takes the baseline path of Eq. (2) , disturbing no live state. One mechanism therefore serves both 6Session update  
+
+> Lentry
+> > B ?
+> skip;
+> Lcold
+> append; forward ( Tpp )
+> store p,dist; valid
+> pre-positioned + valid
+> yes
+> no
+
+(a) Pre-position on idle (Algorithm 1).   
+
+> request
+> valid ,eligible?
+> fall through
+> Lfall
+> γ>τ
+> ∧ˆa∈A ?
+> fall through
+> Lfall
+> serve ˆaLfast
+> no
+> yes
+> no
+> yes
+
+(b) Confidence-gated serve (Algorithm 2). 
+
+Figure 1: Control flow of the two pre-positioning algorithms. (a) The idle-window pre-position of Algorithm 1: after a session update, if admitting the entry would breach the cell-budget headroom B
+
+the engine skips and the next request takes the baseline Lcold ; otherwise it appends the entry, runs one forward pass at cost Tpp of Eq. (6) , records the decision point and ready distribution, and marks the session valid. (b) The confidence-gated serve of Algorithm 2: an ineligible or invalidated request falls through at cost Lfall of Eq. (5) ; otherwise the logit gap γ is tested against the gate of Eq. (12) ,serving one cached token at cost Lfast of Eq. (3) when it fires and falling through to Lfall when it does not. Diamonds are decisions, orange terminals are fall-back paths, and the blue terminal is the pre-positioned success state. the streaming analytical-query workload Norgren [2026a] and the multi-agent tool-calling workload Norgren [2026b]. 
+
+3.6 Invalidation Discipline 
+
+Pre-positioning is safe only if a cached distribution is never served after the state it summarizes has changed. Figure 3 traces the lifecycle: an idle-window pre-position carries the session from holding no ready distribution to holding a valid one, an arriving request consults the confidence gate and is either served a cached token or falls through, and any mutation of the persistent state returns the session to the no-ready-distribution state. One invariant enforces safety: the validity flag is true only while the token sequence up to the decision point of Eq. (1) is identical to the sequence from which the ready distribution was computed. Every operation that mutates that state, a sliding-window shift that relocates positions, a rollback that discards committed tokens, or a fresh update that advances past the pre-positioned entry, clears the decoded-entry and validity flags in the same step that performs the mutation, rather than deferring the test to serve time. Correctness follows directly. The ready distribution is a deterministic function of the token sequence up to the decision point, so while that sequence is unchanged the cached argmax equals what a fresh forward pass would produce, and serving it through Eq. (3) is indistinguishable from the baseline of Eq. (2) . This is the eligibility invariant : the fast path serves a request only when its realized entry reproduces the pre-positioned entry token-for-token up to the decision point, the exact-match condition under which the cached argmax provably equals a fresh forward pass, so an exact-match request takes on zero added risk while any request that extends the entry differently falls through. If the sequence changes, the flag is cleared atomically with it, so the fast path of Section 3.4 observes an invalid distribution and falls through to recompute on the live state; no interleaving lets a request read a distribution the current state would not reproduce. Because invalidation is coupled to the mutation rather than polled lazily, a stale or low-confidence answer is never served. An invalidation costs only a discarded pre-position, the wasted-work fraction w of Eq. (8) , which bears on the energy budget but never on correctness. 7(a) Baseline      
+
+> time
+> Query Prefill (entry)
+> Decode (entry)
+> First token
+> Lcold =Tprefill (Lentry ) + Tdecode on the critical path
+
+(b) Pre-positioned (ours)    
+
+> time
+> Update Pre-position (forward pass)
+> Ready distribution
+> idle window (amortized, off the critical path)
+> Query
+> Serve scan (Lfast )
+> Lfast on the critical path
+> idle-window work critical-path work
+
+Figure 2: Speculative pre-positioning moves entry work off the critical path. (a) On the baseline, the query pays the entry prefill and the entry decode when it arrives, a critical-path latency Lcold =
+
+Tprefill (Lentry ) + Tdecode . (b) With pre-positioning, a single forward pass after the update computes and caches the ready distribution during the idle window, off the critical path; the query then returns a single cached token after only a vocabulary scan of near-constant cost Lfast . Blue marks idle-window work, orange marks critical-path work.     
+
+> NO READY DIST
+> PRE-POSITIONED + VALID
+> γ > τ
+> ∧ˆa∈ A ?
+> SERVE one cached token ( Lfast )
+> FALL THROUGH (Lfall )
+> update / append: pre-position
+> state mutation: shift, rollback, fresh update (clears the flags) request
+> gate met gate not met
+
+Figure 3: The cached-distribution lifecycle as a session state machine. An idle-window pre-position (Algorithm 1) carries the session from NO READY DIST (its initial state, and the state after any invalidation) to PRE -POSITIONED + VALID , recording the decision-point position p of Eq. (1) , the cached distribution, and the validity flag. An arriving request consults the confidence gate of Eq. (12) :if the logit gap γ clears the threshold τ and the predicted token ˆa lies in the fast-answer set A, one cached token is served at cost Lfast ; otherwise the request falls through at cost Lfall , the entry prefill already paid. Any mutation of the persistent state (a sliding-window shift, a rollback, or a fresh update past the entry) clears the flags and returns the session to NO READY DIST : the invalidation invariant of Section 3.6 that ensures a stale distribution is never served. 84 Experimental Setup 
+
+We evaluate speculative pre-positioning with a layered methodology that separates what is measured from what is derived in closed form, so that no derived quantity is presented as measured. All measurements run on LayerScale, a proprietary inference engine with native support for the stateful sessions this work builds on, the persistent cross-request key-value cache and the live decision-point positions of Section 2; the streaming and tool-calling companions Norgren [2026a,b] describe that engine, and the mechanism of this paper is implemented in its serving path. The first layer is 
+
+measured constants , taken on a single H100 with a larger 70B-class target model at 4-bit precision (TP = 1 ). The prefill cost per token is τp ≈ 0.843 ms/token (HW-1), from the slope of response time against unique, cache-defeating prompt lengths (a repeated-filler prompt reads near zero, a caching artifact, so we defeat it). The fast path is subject to a model-capability condition that this run makes explicit: the confidence gate fires only when the model reads the domain task decisively, which the 70B-class model does and a smaller 8B model (BF16) does not (Section 5). The second layer is closed-form analysis on top of those constants: the critical-path latency, fast-path latency, and speedup of Figure 4 follow directly from Eqs. (2) , (3) , and (4) , and the idle-window amortization and net-benefit conditions of Eqs. (7) and (10) are algebraic consequences of the model of Section 2, not empirical fits. The third layer is measured behavior : the selective-prediction curve of Figure 7, Eqs. (13) and (14) , is drawn from the measured (logit-gap, correctness) pairs of the host run (HW-3), and the cross-request hit rate of Figure 6 overlays the measured per-pre-position hit rate (HW-4) on the closed-loop session-trace model of Eqs. (8) and (9) . The session-trace model itself remains a deterministic closed form, computed by our committed simulator with no accelerator dependence. The systems quantities that require an accelerator are measured on the host run and collected in Section 5.2: the single-step decode time, the cached-distribution vocabulary-scan cost, and the state-restore cost (HW-2); the confidence-gate calibration from real (logit-gap, correctness) pairs (HW-3); the pre-position hit rate and wasted-work fraction from a live trace (HW-4); and the headline end-to-end P50 and P99 first-token latency with and without pre-positioning (HW-5). Each curve in Section 5 is parameterized by these measured values, and the gate figure is drawn from the measured pairs. 
+
+## 5 Results 
+
+We report results in the layered structure of Section 4: closed-form analysis parameterized by measured constants here, the measured selective-prediction and hit-rate behavior next, and the end-to-end systems measurements of Section 5.2. Figure 4 plots the closed-form critical-path latency and the resulting fast-path speedup as the entry length grows, from Eqs. (2) , (3) , and (4) parameterized by the measured prefill, decode, and scan constants (HW-1, HW-2). The baseline Lcold rises with the entry length while Lfast stays near-constant at the marginal vocabulary scan, so the analytical speedup S grows with the entry length: because Lfast is independent of the accumulated context, the advantage is largest exactly where the baseline is most expensive. The curve uses the marginal scan cost ( ≈ 0.664 ms); the measured end-to-end fast path adds a fixed per-request handling floor common to all served paths, so the realized first token is 1.01 ms (P50 over 128 fires, HW-5) against a cold first token of 53 .1 ms, a measured end-to-end speedup of more than fiftyfold (Section 5.2). Figure 5 decomposes those latencies into their additive cost components at a representative entry length, from the same constants. The baseline Lcold of Eq. (2) is dominated by the entry prefill plus one decode; the fast path Lfast of Eq. (3) is the lone vocabulary scan, a small fraction of either term; and the fall-through Lfall of Eq. (5) lies between its two endpoints, the exact-match resume at ∆ = 0 
+
+(a constant-time restore plus one decode, well below the baseline) and the full-residual worst case at 
+
+∆ = Lentry (a residual prefill atop the restore), with typical resumes sitting near the ∆ = 0 bar. The decomposition makes the mechanism concrete: pre-positioning takes the prefill term off the served path, replacing it with nothing on the fast path and with a small restore on the typical fall-through, so the critical-path cost a request actually pays is the short bar rather than the tall one. Like the other curves here these bars are computed from the measured prefill, decode, scan, and restore constants (HW-1, HW-2). Figure 6 turns to the cross-request amortization of Section 2, plotting the closed-form session-trace model as the query-to-update ratio ρ = λq /λ u varies. The per-pre-position hit rate h = ρ/ (1 + ρ)
+
+of Eq. (8) and the complementary wasted-work fraction w = 1 − h quantify how often an idle pre-90 100 200 300 
+
+> 0
+> 100
+> 200
+> 300
+
+Entry length Lentry (tokens)    
+
+> Critical-path latency (ms)
+> Lcold (baseline)
+> Lfast (fast path)
+> Lcold measured
+
+(a) Critical-path latency.    
+
+> 0100 200 300
+> 0
+> 200
+> 400
+
+Entry length Lentry (tokens) Fast-path speedup  S
+
+(b) Fast-path speedup S.
+
+Figure 4: Closed-form critical-path latency and fast-path speedup versus entry length, from the model of Section 2. (a) The baseline latency Lcold = Tprefill (Lentry ) + Tdecode of Eq. (2) grows linearly with the entry length, while the fast-path latency Lfast = Tscan (V) of Eq. (3) is near-constant. (b) The fast-path speedup S = Lcold /L fast of Eq. (4) therefore increases with the entry length. Curves are computed from the measured prefill cost τp ≈ 0.843 ms/token (HW-1) with the measured decode time and the derived marginal vocabulary-scan cost (HW-2); the fast-path latency plotted here is the marginal scan, so the realized end-to-end speedup is the measured figure of Section 5.2. The black markers in (a) are the measured cold first token at genuine uncached entry lengths (HW-5); they track the closed-form line across the measured span, at a slightly steeper measured slope ( ≈ 0.90 ms/token) consistent with a small per-token overhead. The dashed vertical marks the representative measured entry of ≈ 18 tokens, so the curve to its right is closed-form extrapolation beyond the measured operating point. Coordinates are emitted by our committed simulator.         
+
+> Lcold Lfall (∆=0) Lfall (∆= Lentry )Lfast
+> 0
+> 20
+> 40
+> 60
+> Critical-path latency (ms)
+> prefill decode restore scan
+
+Figure 5: Cost anatomy of the three served paths at the measured representative entry length of 18 
+
+tokens, each decomposed into additive components from the model of Section 2. The baseline Lcold 
+
+of Eq. (2) is the entry prefill plus one decode; the fall-through Lfall of Eq. (5) is a constant-time restore plus one decode at the exact-match endpoint ∆ = 0 and adds a full residual prefill at the upper-bound endpoint ∆ = Lentry ; the fast path Lfast of Eq. (3) is the lone vocabulary scan. At this short measured entry the single decode step dominates every served path and the entry prefill is small, so Lfall (∆=0) nearly coincides with Lcold , the restore it pays roughly offsetting the prefill it saves; the decisive win is the fast path, which removes the decode entirely. The bars are computed from the measured prefill cost τp ≈ 0.843 ms/token (HW-1) with the measured decode and the derived scan and restore constants (HW-2). Coordinates are emitted by our committed simulator. 10 position is consumed before the next state mutation invalidates it: update-heavy sessions waste most pre-positions, whereas query-heavy sessions consume nearly all of them. The effective first-token latency E[Lpp ] of Eq. (9) falls monotonically toward the served latency as ρ grows and stays below the baseline Lcold for every positive hit rate, in agreement with the net-benefit condition of Eq. (10) :because the entry prefill is pre-paid in the idle window, even a fall-through is cheaper than a cold entry, so the wasted work bears only on energy and never on the latency of a served query. The measured per-pre-position hit rate from a live session trace (HW-4) is overlaid on panel (a) and tracks the i.i.d. closed form, running modestly below it across the range, each point resting on 128 
+
+pre-positions with a Wilson 95% interval. The session-trace model is computed by our committed simulator from the measured latency constants (HW-1, HW-2) under a gate-fire probability anchored to the measured gate coverage at τ = 2 .0 (HW-3).                    
+
+> 10 −110 010 1
+> 0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1
+> Query-to-update ratio ρ=λq/λ u
+> Fraction
+> h(hit rate)
+> w= 1 −h(wasted)
+> hmeasured
+> (a) Hit rate and wasted-work fraction.
+> 10 −110 010 1
+> 0
+> 20
+> 40
+> 60
+> Query-to-update ratio ρ=λq/λ u
+> Effective first-token latency (ms)
+> E[Lpp ]
+> Lcold (baseline)
+> (b) Effective first-token latency.
+
+Figure 6: Amortized effect of idle-window pre-positioning as the query-to-update ratio ρ = λq /λ u
+
+varies, from the closed-form session-trace model of Section 2. (a) The per-pre-position hit rate 
+
+h = ρ/ (1 + ρ) of Eq. (8) rises with ρ while the wasted-work fraction w = 1 − h falls: update-heavy sessions (small ρ) waste most pre-positions and query-heavy sessions (large ρ) consume nearly all of them. (b) The effective first-token latency E[Lpp ] of Eq. (9) stays below the baseline Lcold 
+
+for every ρ > 0, consistent with the net-benefit condition of Eq. (10) , and approaches the served latency as ρ grows. The points in panel (a) are the measured per-pre-position hit rate from a live session trace (HW-4), each over 128 pre-positions, which track the closed form and run modestly below it. Curves use a gate-fire probability g = 0 .9453 , the measured gate coverage at τ = 2 .0,the measured representative entry length of 18 tokens, and the measured latency constants (HW-1, HW-2). Coordinates are emitted by our committed simulator. Figure 7 characterizes the confidence gate of Section 2.4 as a selective-prediction tradeoff, from the measured (logit-gap, correctness) pairs of the host run (HW-3): 128 independent decision points, one canonical query per non-overlapping data window, with 121 served at τ = 2 .0 and a fast-answer set of |A| = 31 tokens. As the threshold τ of the gate of Eq. (12) sweeps, the coverage c(τ ) of Eq. (13) is monotone non-increasing by construction; the false-accept rate r(τ ) of Eq. (14) tends to fall as the threshold rises but is not monotone, since raising τ removes borderline accepts that may have been correct or incorrect, and most false accepts here stem from genuine model uncertainty rather than a small gap (below). The measured curve runs from coverage 1.0 at a 0.17 false-accept rate (low τ ) down to coverage 0.86 at a 0.12 false-accept rate (high τ ), staying within a narrow 
+
+0.12 to 0.17 false-accept band throughout. At the coded threshold τ = 2 .0 the gate covers 0.945 of decision points (Wilson 95% interval [0 .89 , 0.97] ) at a 0.132 false-accept rate ( [0 .083 , 0.204] ), so it agrees with the model’s own full-path output about 87% of the time when it fires. The divergence decomposes cleanly: of the 16 false accepts among the 121 served, 12 fall on windows where the model’s own full path is itself unsure (a genuinely ambiguous regime) and only 4 are pre-commitment divergence, where the question-independent token disagrees with a full path that was right. The pre-positioning trade of Section 3.4, then, accounts for a small minority of the cost; the rest is the model’s own uncertainty, which a full decode would also incur. That the gate fires at all is the model-capability observation of Section 5.1: with the 70B-class model the gaps separate correct from incorrect predictions, whereas the 8B model never clears the threshold. 11 0.85 0.9 0.95 1            
+
+> 0.1
+> 0.12
+> 0.14
+> 0.16
+> 0.18
+> Coverage c(τ)
+> False-accept rate  r(τ )
+> (a) Risk-coverage curve.
+> 0246
+> 0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1
+> Gate threshold τ
+> Probability
+> c(τ)(coverage)
+> r(τ)(false-accept)
+> (b) Coverage and false-accept versus τ.
+
+Figure 7: Selective-prediction behavior of the confidence gate as the threshold τ sweeps, from the measured (logit-gap, correctness) pairs of the host run ( 128 independent decision points, 121 served at τ = 2 .0, fast-answer set |A| = 31 ). (a) The risk-coverage curve traces the false-accept rate 
+
+r(τ ) of Eq. (14) against the coverage c(τ ) of Eq. (13) as τ varies: serving more requests (higher coverage) generally admits more false accepts, and the gate of Eq. (12) picks an operating point on this curve. (b) Coverage is monotone non-increasing in τ by construction; the false-accept rate tends to fall but is not monotone, staying within a narrow 0.12 to 0.17 band. At the coded threshold 
+
+τ = 2 .0 the gate covers 0.945 of decision points at a 0.132 false-accept rate (Wilson 95% intervals 
+
+[0 .89 , 0.97] and [0 .083 , 0.204] ), agreeing with the full path about 87% of the time when it fires. These curves are measured: the gate fires with the 70B-class model (the gaps separate correct from incorrect predictions) and never fires with the 8B model (Section 5.1). Coordinates are emitted by our committed simulator. 
+
+5.1 Model Capability and Single-GPU Operation 
+
+Two measured findings frame when speculative pre-positioning applies, on the single binary market-trend task and the two models we measure. The first is a model-capability observation. On this task the confidence gate fires only for a model that reads it decisively. The 70B-class target model does: its decision-point logit gaps span a wide range, from below 2 to about 20 , it answers the trend correctly, and coverage is 1.0 at the low end of the threshold sweep (Figure 7). The 8B model (BF16) does not: its decision-point gap is about 0.65 and direction-insensitive (it reports a downward trend on clean upward data), so it never clears the threshold and coverage is zero. The fast path is therefore a no-op for the 8B model, and we anchor the headline evaluation to the 70B-class model, keeping the 8B as the contrast that motivates the observation: on this task pre-positioning pays only when the model is confident, exactly the regime in which a cached single-token answer is trustworthy. Whether the transition is a sharp threshold or graded across model scales and tasks is left to future work, since two models on one task cannot settle it. The second finding concerns deployment. The 70B-class model at 4-bit precision fits one H100, so distributing it across two accelerators is a small regression rather than a gain: the single decode step and the cold first token both rise modestly with no change in gate behavior, the extra accelerator adding cross-device communication without relieving a memory bottleneck that does not exist at this size. We therefore report the single-accelerator configuration, anchored at a single decode step of 39 .12 ms and a cold first token of 53 .1 ms (HW-2, HW-5). 
+
+5.2 Measured Systems Quantities 
+
+Table 1 collects the measured systems quantities behind the evaluation, all from the host run (single H100, a 70B-class target model at 4-bit precision, TP = 1 ). The end-to-end first-token latency arms (HW-5) are the headline: a cold first token of 53 .1 ms (P50) and 66 .9 ms (P99) over 144 observations, a fall-through of 53 .0 ms (P50), and a fast-path first token of 1.01 ms (P50), 1.35 ms (P99), mean 
+
+1.04 ± 0.52 ms over 128 independent gate-fires. The fall-through and the cold path nearly coincide here because the measured entry is short, so the entry prefill it saves is comparable to the state restore it pays; the decisive win is the fast path. That speedup, more than fiftyfold, is against the stateful cold path, which already caches the accumulated context and pays only the entry prefill and one decode. The contribution is sharper against the relevant prior art, a prefix or key-value cache: it removes the 12 entry prefill but still runs one decode step, the measured Tdecode = 39 .12 ms (HW-2), to produce the first token, because cached tensors expose the state but not the next token. The ready-distribution cache instead moves that decode into the idle window and caches its output, so the served path runs no decode at all and returns the first token in 1.01 ms, a nearly fortyfold reduction; the rest of the margin to the cold figure is the pre-paid entry prefill, and the decode, at 74% of the cold path, is the dominant term either comparison removes. The marginal vocabulary scan is the derived 0.664 ms and the state restore the derived 14 .47 ms (HW-2); the gate calibration (HW-3) and the hit rate (HW-4) are plotted in Figures 7 and 6. Each pre-position draws about 63 .8 J of marginal board energy (HW-6), the only cost it adds under the amortization condition (Section 6). Table 1: Measured systems quantities (single H100, a 70B-class target model at 4-bit precision, TP = 1 , 2026-06-28). Each quantity is measured or a labeled residual of measured quantities: the prefill and decode constants from a microbenchmark, the gate calibration from measured (logit-gap, correctness) pairs over 128 decision points, the hit rate from a live session trace, the end-to-end first-token latency with and without pre-positioning, and the idle-time board energy. The fast-path scan and the state restore are algebraic residuals, not standalone microbenchmarks: scan = Lp50 fast 
+
+minus the net per-request floor, and Trestore = Lp50 fall − Tdecode . The fast-path arm is the headline, more than fiftyfold below the cold first token.                                            
+
+> Quantity Symbol Measured value Source Prefill cost per token τp0.843 ms/tok microbench (HW-1) Single-step decode time Tdecode 39 .12 ms microbench (HW-2) Fast-path scan Lfast 1.01 ms (scan 0.664 )derived (HW-2) State-restore cost Trestore 14 .47 ms derived (HW-2) Gate at τ= 2 .0c, r cover. 0.945 , f.a. 0.132 measured pairs (HW-3) Hit rate h(ρ)0.13 to 0.78 live trace (HW-4) First-token latency P50/P99 cold 53 .1/66 .9; fast 1.01 /1.35 live session (HW-5) Energy per pre-position Epp 63 .8J ( 191 W wasted at ρ=1 )measured (HW-6)
+
+## 6 Discussion 
+
+Under the amortization condition of Eq. (7) the pre-position pass runs in otherwise-idle time, adding nothing to wall-clock latency; it costs two things instead. The first is energy: a pre-position invalidated before use is wasted work, the fraction w = 1 − h of Eq. (8) , drawing power, not latency. We measure one pre-position at about 63 .8 J of marginal board energy (HW-6, board power rising from 117 .6 Widle to 500 .1 W under a back-to-back pre-position loop); at the balanced ratio ρ = 1 , where half of all pre-positions go unused, the wasted share averages about 191 W of board power, the energy paid to keep the next token waiting. The second is the rare false accept: the fast path serves a cached token unverified, so a miscalibrated gate can serve one the full path would not, at the rate r(τ ) of Eq. (14) .Both are bounded and tunable, by τ and the query-to-update ratio. Pre-positioning pays in the query-heavy regime: at large ρ (Figure 6) nearly every pre-position is consumed, whereas an update-heavy session wastes most for idle energy. Best-effort at the lowest priority, it bounds that worst case: every miss takes the baseline path of Eq. (2) or the fall-through of Eq. (5) . It thus composes with, not replaces, what a stateful system runs, yielding to any arriving request and adding only a vocabulary-sized vector beside the key-value cache; a missed request still benefits from the pre-paid entry prefill, under the invalidation discipline of Section 3.6. 
+
+6.1 Limitations 
+
+Several conditions bound the mechanism. First, the fast path’s safety rests entirely on gate calibration: with no verification on the served token, a miscalibrated threshold raises the false-accept rate of Eq. (14) directly, so the calibration (HW-3) is load-bearing, and the measured false-accept rate of about 0.13 at the coded threshold is a real cost the fast-answer set must keep bounded. Second, the benefit needs a genuinely idle window: if Eq. (7) fails because it is saturated, the lowest-priority guard caps the downside to wasted energy, not a speedup. Third, the single-token fast path serves only a domain-scoped class, the fast-answer set A of Eq. (12) ; queries outside it fall through to the still-cheaper normal path. Fourth, the fast path requires a model confident on the domain task: 13 the gate fires for the 70B-class model and never for the 8B model (Section 5.1), so on a task the model reads indecisively the mechanism is a no-op, not a regression. Fifth, the 70B-class model we measure runs at 4-bit precision, which is what fits a single accelerator and exercises the gate, whereas the 8B reference is BF16; the headline therefore departs from a strict same-precision comparison, and a BF16 70B-class re-run (which needs two accelerators) is future work. Finally, it depends on persistent session state with no analogue in a stateless request loop, an optimization for the companions’ stateful-session setting Norgren [2026a,b], not a general-purpose decoding technique. 
+
+## 7 Related Work 
+
+Speculative decoding speculates tokens within a generation with a draft model and verification Leviathan et al. [2023], Chen et al. [2023a], and prompt-lookup decoding does so draft-free but still verified Saxena [2023]; we instead speculate the decode entry point across the request boundary and the output distribution , with no fast-path verification, the gate a calibrated confidence test rather than a draft-versus-target match. Prefix and key-value caches Kwon et al. [2023], Zheng et al. [2024], attention-state reuse Gim et al. [2024], and continuous batching Yu et al. [2022] reuse stored state across requests but keep the key-value tensors alone, never the output distribution computed ahead of the request; our ready-distribution cache caches the answer at the decision point, collapsing the critical path to one vocabulary scan. Early exit Schuster et al. [2022] and model cascades Chen et al. [2023b] spend confidence-gated compute live on the critical path; ours, framed by selective prediction El-Yaniv and Wiener [2010], consumes a pre-positioned distribution and abstains by falling through. All of it builds on our streaming Norgren [2026a] and tool-calling Norgren [2026b] companions. 
+
+## 8 Conclusion 
+
+A stateful session spends part of its life idle: between a data update and the next query, or between a tool call and its result. We have argued that this idle time, not the next request’s critical path, is where the cost of the next decode entry point belongs. Speculative pre-positioning decodes the session forward to its next decision point during those windows with the target model’s own forward pass and no draft model, so the next request either resumes delta-only or is answered directly from a cached output distribution. We formalized the decision point, the amortization condition, and the net-benefit condition (Section 2); introduced the ready-distribution cache, which retains the output distribution at the decision point and not only the key-value state (Section 3.3); built a confidence-gated single-token fast path that serves one cached token when the top-two-logit gap clears a calibrated threshold and otherwise falls through to a still-cheaper path (Section 3.4); and showed one mechanism covers both streaming and agentic sessions (Section 3.5), under an invalidation discipline that never serves a stale prediction (Section 3.6). The analytical model gives a fast-path speedup S (Eq. (4) ) that grows with the pre-positioned entry length (Figure 4), bounded in risk by the gate threshold along the measured selective-prediction curve of Figure 7. On a host run the mechanism delivers a measured end-to-end first token of 1.01 ms, removing from the critical path the one decode step a prefix cache must still run (about 39 ms), a nearly fortyfold reduction and more than fiftyfold against the stateful cold path (HW-5, Table 1); but this holds only for a model confident on the domain task: the gate fires for a 70B-class target model and never for an 8B model, so on the task and models we measure speculative pre-positioning is an optimization for a capable model on a decisive task, not a universal one. The construction extends the stateful-session foundation of our streaming Norgren [2026a] and tool-calling Norgren [2026b] companions, putting the session’s persistent state to a new use: turning the idle time between requests into the place where the next request’s first token is already waiting. 
+
+## References 
+
+Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C.H., Gonzalez, J., Zhang, H., and Stoica, I. Efficient Memory Management for Large Language Model Serving with PagedAttention. 
+
+Proceedings of the 29th Symposium on Operating Systems Principles , 2023. 14 Zheng, L., Yin, L., Xie, Z., Huang, J., Sun, C., Yu, C.H., Cao, S., Kober, C., Sheng, Y., et al. SGLang: Efficient Execution of Structured Language Model Programs. arXiv preprint arXiv:2312.07104 ,2024. Yu, G.I., Jeong, J.S., Kim, G.W., Kim, S., and Chun, B.G. Orca: A Distributed Serving System for Transformer-Based Generative Models. OSDI , 2022. Leviathan, Y., Kalman, M., and Matias, Y. Fast Inference from Transformers via Speculative Decoding. ICML , 2023. Saxena, A. Prompt Lookup Decoding. https://github.com/apoorvumang/ prompt-lookup-decoding , 2023. Chen, C., et al. Accelerating Large Language Model Decoding with Speculative Sampling. arXiv preprint arXiv:2302.01318 , 2023. Gim, I., et al. Prompt Cache: Modular Attention Reuse for Low-Latency Inference. Proceedings of Machine Learning and Systems (MLSys) , 2024. Schuster, T., et al. Confident Adaptive Language Modeling. Advances in Neural Information Processing Systems (NeurIPS) , 2022. Chen, L., Zaharia, M., and Zou, J. FrugalGPT: How to Use Large Language Models While Reducing Cost and Improving Performance. arXiv preprint arXiv:2305.05176 , 2023. El-Yaniv, R. and Wiener, Y. On the Foundations of Noise-free Selective Classification. Journal of Machine Learning Research , 11:1605–1641, 2010. Norgren, V. Attention Once Is All You Need: Efficient Streaming Inference with Stateful Transform-ers. arXiv preprint arXiv:2605.13784 , 2026. https://arxiv.org/abs/2605.13784 .Norgren, V. Stateful Inference for Low-Latency Multi-Agent Tool Calling. arXiv preprint arXiv:2605.26289 , 2026. https://arxiv.org/abs/2605.26289 .15
