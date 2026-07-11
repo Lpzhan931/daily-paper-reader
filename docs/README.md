@@ -6,37 +6,44 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-10
-- 运行时间：2026-07-10 21:37:59 UTC
+- 最新运行日期：2026-07-11
+- 运行时间：2026-07-11 21:16:15 UTC
 - 运行状态：成功
-- 本次总论文数：5
+- 本次总论文数：8
 - 精读区：4
-- 速读区：1
+- 速读区：4
 
 ### 今日简报（AI）
-今天精读两篇大模型高效推理论文，速读一篇小视觉模型量化部署研究。
-最值得关注无训练松弛推测解码（9.0分）与自推测分叉加速智能体推理（8.0分）两个方向。
-建议优先精读无训练推测解码方法，它无需额外训练即可直接降低推理延迟。
-- 详情：[/202607/10/README](/202607/10/README)
+今日聚焦推测解码的免训练优化与KV缓存压缩技术，精读两篇高分论文均围绕增强推测解码效率展开。精读中《A Practical Investigation of Training-free Relaxed Speculative Decoding》（9.0分）提供免训练松弛方案，《DSpark: Confidence-Scheduled Speculative Decoding》（8.0分）引入置信度调度，是当前最值得关注的方向。建议普通读者后续可对比这两篇方法的实际部署成本，并留意它们与KV缓存压缩技术的结合潜力。
+- 详情：[/202607/11/README](/202607/11/README)
 
 ### 精读区论文标签
-1. [A Practical Investigation of Training-free Relaxed Speculative Decoding](/202607/10/2607.08690v1-a-practical-investigation-of-training-free-relaxed-speculative-decoding)  
+1. [A Practical Investigation of Training-free Relaxed Speculative Decoding](/202607/11/2607.08690v1-a-practical-investigation-of-training-free-relaxed-speculative-decoding)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：针对LLM的训练无关宽松投机解码实践研究
-2. [SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference](/202607/10/2607.03333v1-spork-self-speculative-forking-to-accelerate-agentic-llm-inference)  
+   evidence：对LLM无训练宽松投机解码的实践研究
+2. [DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation](/202607/11/2607.05147v1-dspark-confidence-scheduled-speculative-decoding-with-semi-autoregressive-generation)  
+   标签：评分：8.0/10、query:llm-sd
+   evidence：基于置信度调度的半自回归推测解码方法
+3. [TriRoute: Unified Learned Routing for Joint Adaptive Attention, Experts, and KV-Cache Allocation](/202607/11/2607.06601v1-triroute-unified-learned-routing-for-joint-adaptive-attention-experts-and-kv-cache-allocation)  
    标签：评分：8.0/10、query:llm
-   evidence：自投机分支加速LLM推理，属于投机解码方法
-3. [AdaptiveSD A Stability-Aware, Runtime-Adaptive Speculative Decoding Framework with Multi-Policy Orchestration for CPU-Constrained LLM Inference](/202607/10/2607.03876v1-adaptivesd-a-stability-aware-runtime-adaptive-speculative-decoding-framework-with-multi-policy-orchestration-for-cpu-constrained-llm-inference)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向LLM推理的自适应投机解码框架
-4. [DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation](/202607/10/2607.05147v1-dspark-confidence-scheduled-speculative-decoding-with-semi-autoregressive-generation)  
-   标签：评分：8.0/10、query:llm
-   evidence：带置信度调度的半自回归投机解码用于LLM推理加速
+   evidence：联合自适应注意力、专家和KV缓存分配以加速LLM推理
+4. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/11/2607.06763v1-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
+   标签：评分：8.0/10、query:llm-sd
+   evidence：基于因子化先验的自回归草稿投机解码
 
 ### 速读区论文标签
-1. [Rethinking Small VLM Quantization: From Component-Wise Analysis to Hardware-Aware Edge Deployment](/202607/10/2607.08029v1-rethinking-small-vlm-quantization-from-component-wise-analysis-to-hardware-aware-edge-deployment)  
+1. [DepthWeave-KV: Token-Adaptive Cross-Layer Residual Factorization for Long-Context KV Cache Compression](/202607/11/2607.06523v1-depthweave-kv-token-adaptive-cross-layer-residual-factorization-for-long-context-kv-cache-compression)  
+   标签：评分：7.0/10、query:llm
+   evidence：面向长上下文LLM推理加速的KV缓存压缩
+2. [NativeMEM: Native Memory Compression for Long-Horizon Robotic Manipulation](/202607/11/2607.06678v1-nativemem-native-memory-compression-for-long-horizon-robotic-manipulation)  
    标签：评分：7.0/10、query:vlm-spec
-   evidence：通过组件级量化和硬件感知部署加速VLM推理
+   evidence：原生内存压缩减少VLA模型推理延迟
+3. [Uncertainty-gated selection for block-sparse attention](/202607/11/2607.07724v1-uncertainty-gated-selection-for-block-sparse-attention)  
+   标签：评分：7.0/10、query:llm
+   evidence：基于信息价值路由器的块稀疏注意力加速LLM推理
+4. [FabriVLA: A Lightweight Vision-Language-Action Model for Precise Multi-Task Manipulation](/202607/11/2607.08575v1-fabrivla-a-lightweight-vision-language-action-model-for-precise-multi-task-manipulation)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：轻量级VLA模型用于高效操作，间接加速推理
 
 
 <div class="dpr-home-promo-card">
