@@ -1,0 +1,1002 @@
+Title: TIGER: Text-Conditioned Visual Gated Routing with Acceptance Alignment for Multimodal Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2607.11131v1
+
+Published Time: Tue, 14 Jul 2026 03:17:29 GMT
+
+Number of Pages: 31
+
+Markdown Content:
+# TIGER: Text-conditioned Visual Gated Routing with Acceptance Alignment for Multimodal Speculative Decoding 
+
+Quynh Vo Cong-Duy Nguyen Ponhvoan Srey Luu Anh Tuan Thong Nguyen *
+
+National University of Singapore Nanyang Technological University Center of AI Research, VinUniversity thong.nguyen@u.nus.edu 
+
+Abstract 
+
+Speculative decoding accelerates autoregres-sive generation by letting a lightweight drafter propose multiple tokens that are verified by a larger target model. Although effective for text-only LLMs, speculative decoding yields limited gains in VLMs because drafters often diverge on vision-critical content, while exist-ing multimodal acceleration methods do not directly address irrelevant visual evidence or optimize the verifier-accepted prefix length that governs speedup. We propose TIGER, a Text-conditioned vIsual GatEd Routing framework for multimodal speculative decoding. TIGER dynamically selects a sparse set of context-relevant visual tokens based on the drafter’s current textual state, rather than expose the full visual token set or a fixed compressed inter-face. To better align training with inference-time efficiency, we optimize the drafter with acceptance-aligned group-based policy train-ing using verifier-derived rewards based on ac-cepted prefix length, built on top of distillation warm start with KL anchoring. This encourages the drafter not only to imitate the target model, but also to produce speculative continuations that survive verification for longer prefixes. Ex-periments show that TIGER yields consistent gains in accepted prefix length and speculative speedup under exact verifier-side speculative decoding, while achieving favorable quality-latency trade-offs with comparable downstream accuracy in visual-routing analyses. 
+
+1 Introduction 
+
+Vision-language models (VLMs) have rapidly be-come the backbone of multimodal assistants (Liu et al., 2023; Li et al., 2023a), enabling instruc-tion following over images and videos for tasks such as visual question answering, document un-derstanding, chart reasoning, and grounded dia-logue (Laurençon et al., 2024). Despite steady 
+
+> *Corresponding author
+
+progress in model quality, real-world deployment remains constrained by autoregressive decoding 
+
+cost: generating outputs token-by-token requires repeated passes through large decoders and exten-sive key–value (KV) caching (Sadhukhan et al., 2025). As VLMs scale to higher resolutions and richer visual contexts, decoding latency and serving cost increasingly dominate practical deployment. 
+
+Speculative decoding offers a principled, loss-less route to accelerate generation. A lightweight drafter proposes multiple tokens, and a large ver-ifier checks and accepts a prefix of these pro-posals, thereby reducing the number of expen-sive verifier decoding steps while preserving the target distribution through a modified rejection-sampling test (Wang et al., 2025b). In text-only LLMs, speculative decoding can provide substan-tial speedups when the drafter closely matches the target model, and recent work further improves efficiency through better drafting structures such as dynamic draft trees (Li et al., 2024). However, directly transferring this paradigm to VLMs often yields limited gains. The main challenge is that multimodal specula-tive decoding is highly sensitive to vision-critical tokens—for example, OCR strings in TextVQA-style queries (Singh et al., 2019), numerical an-swers in chart or science reasoning (Lu et al., 2022), compositional relations in GQA (Hudson and Manning, 2019), and grounded object descrip-tions where hallucination must be avoided (Li et al., 2023b). On such tokens, a small drafter often di-verges early from the verifier, causing short ac-cepted prefixes and sharply reducing speculative speedup. We argue that this failure stems from two coupled mismatches. First, the drafter is of-ten exposed to either the full visual token set or a fixed compressed visual interface, which may still contain irrelevant or noisy visual evidence for the current decoding context. Second, most exist-ing training strategies optimize imitation quality 1arXiv:2607.11131v1 [cs.CL] 13 Jul 2026 rather than the runtime quantity that actually gov-erns speculative efficiency: the verifier-accepted prefix length. These observations motivate a different perspec-tive on multimodal speculative decoding. Instead of only asking how to compress visual inputs for a small drafter, we ask: what visual evidence does the drafter actually need for the next speculative block, and how should it be trained so that the verifier accepts that block for as long as possible? Based on this view, we propose TIGER (Text-conditioned v Isual Gat Ed Routing), a framework for multimodal speculative decoding built on two key ideas. First, rather than exposing the drafter to the full image token set or a fixed compressed adaptor, TIGER dynamically selects a sparse sub-set of context-relevant visual evidence conditioned on the drafter’s current textual state. This yields a lightweight, adaptive visual interface tailored to the next speculative block. Second, rather than training the drafter only to imitate the target model, TIGER directly aligns the drafter with the verifier’s acceptance mechanism. Concretely, we first warm-start the drafter with knowledge distillation to provide a stable behav-ioral initialization. We then formulate drafter learning as an acceptance alignment problem: for each input, we sample multiple draft continuations, run verifier-based acceptance tests, and assign rewards based on verifier-accepted prefix length. This enables group-based policy optimization us-ing verifier-derived supervision, without human preference annotations or learned reward models. In effect, the drafter is encouraged not merely to match the target distribution in aggregate, but to generate speculative blocks that the verifier can ac-cept for longer prefixes. To ensure stable training, we employ KL anchoring to prevent policy drift, and we design the routing and verification pipeline to remain compatible with efficient speculative de-coding at inference time. We evaluate TIGER on a diverse suite of multi-modal benchmarks spanning OCR-heavy, counting-intensive, and visually grounded reasoning tasks. Experiments show that TIGER consistently length-ens verifier-accepted prefixes, reduces target-model decoding work, and improves end-to-end specula-tive decoding speedup over strong multimodal spec-ulative baselines, while preserving downstream task accuracy. Our contributions are summarized as follows: • We propose TIGER, a text-conditioned visual gated routing mechanism that dynamically se-lects context-relevant visual evidence for the drafter in each speculative block. • We introduce an acceptance-aligned training objective based on verifier-accepted prefix length, directly targeting the runtime quantity that governs speculative decoding speedup. • We conduct experiments that explicitly dis-tinguish exact verifier-side speculative decod-ing from auxiliary visual-routing analyses, showing improved accepted prefix length and speedup in the former and favorable quality– latency trade-offs in the latter. 
+
+2 Related Works 
+
+2.1 Inference-Time Acceleration via Visual Token Pruning 
+
+A major efficiency bottleneck in VLMs is the large number of visual tokens, which increases prefill computation and KV-cache traffic. Prior work therefore accelerates VLM inference by pruning or compressing visual tokens. Xing et al. (2024) progressively removes image tokens across layers, while S PARSE VLM performs text-guided token sparsification with adaptive sparsity (Zhang et al., 2025b). V IS PRUNER instead selects salient and diverse visual tokens using visual cues, avoiding reliance on potentially unstable text–visual atten-tion signals (Zhang et al., 2025a). Related pruning ideas have also been extended to specialized multi-modal tasks such as reasoning segmentation (Chen et al., 2025). These methods primarily reduce the amount of visual computation processed by the model. TIGER is complementary: rather than globally pruning or compressing visual tokens, it performs 
+
+text-conditioned visual routing for speculative de-coding, exposing the drafter to a sparse subset of context-relevant visual evidence for each draft block. This targets drafter–verifier mismatch on vision-critical continuations, a bottleneck not di-rectly addressed by standard visual-token pruning methods. 
+
+2.2 Speculative Decoding for Multimodal Models 
+
+Speculative decoding accelerates generation by us-ing a lightweight drafter to propose multiple tokens 2that are verified by a larger target model, yield-ing lossless sampling under the verifier distribu-tion (Wang et al., 2025b). Prior work improves drafting and verification through token trees, dy-namic draft structures, direct token prediction, and serving-oriented optimizations, including S PEC IN-
+
+> FER
+
+, EAGLE-2, EAGLE-3, RACER, T OKEN -RECYCLING , and VLLM (Miao et al., 2024; Li et al., 2024, 2026; Zhang et al., 2026; Luo et al., 2025; Kwon et al., 2023). However, these methods are mostly developed for text-only or general LLM serving and do not directly address multimodal draft–verifier divergence on vision-critical tokens. In VLMs, draft tokens can be rejected early when the drafter diverges on OCR strings, counts, chart values, or visually grounded entities, leading to short accepted prefixes and limited speedup. Re-cent multimodal methods such as S PEC FLASH and V ISPEC improve draft–verifier coherence through latent-aware drafting or vision-aware adap-tation (Wang et al., 2026; Kang et al., 2025). TIGER differs by dynamically routing context-relevant visual evidence to the drafter and by opti-mizing a verifier-derived accepted-prefix objective, aligning both visual access and training with veri-fier acceptance rather than token imitation alone. 
+
+3 Method 
+
+Figure 1 provides an overview of TIGER. At each speculative decoding round, TIGER first routes a sparse subset of context-relevant visual tokens for the drafter, then optimizes the drafter with an acceptance-aligned objective so that the verifier accepts longer prefixes. 
+
+3.1 Problem Setup 
+
+We consider multimodal speculative decoding with a lightweight drafter qθ and a large verifier pϕ.Given an input image I and a textual prefix T1: j , a vision encoder produces a visual token bank 
+
+V = Ev(I) = [ v1, . . . , v r] ∈ Rr×d, (1) where r is the number of visual tokens and d is the hidden dimension. Let Et(T1: j ) denote the embedded textual pre-fix, and let V dra  
+
+> j
+
+⊆ V denote the visual interface exposed to the drafter at speculative round j. For a full-context drafter, V dra  
+
+> j
+
+= V ; in TIGER, this interface will be instantiated as the routed visual context V route  
+
+> j
+
+in Section 3.2. The drafter input is 
+
+Xj = [ Et(T1: j ); V dra  
+
+> j
+
+], (2) and the drafter proposes a block of γ future tokens, 
+
+ˆTj+1: j+γ ∼ qθ(· | Xj ). (3) The proposed block is then evaluated by the ver-ifier under the standard speculative decoding ac-ceptance test using the full visual token bank V .Let au ∈ { 0, 1} indicate whether the u-th drafted token is accepted. Since speculative decoding ac-cepts only a prefix of the proposed block, we define the verifier-accepted prefix length as 
+
+A(x; θ) = 
+
+> γ
+
+X
+
+> u=1
+> u
+
+Y
+
+> m=1
+
+am, x = ( I, T 1: j ). (4) This quantity measures how many drafted tokens survive verification in one speculative round. Our goal is to train the drafter to maximize ex-pected verifier-accepted prefix length while main-taining a lightweight visual interface. TIGER achieves this through text-conditioned visual gated routing and acceptance-aligned optimization. 
+
+3.2 TIGER: Text-conditioned Visual Gated Routing 
+
+Figure 2 illustrates the central idea of TIGER: dy-namically routing visual evidence according to the current decoding context. At each step, a query computed from the hidden state of the textual pre-fix scores the visual token bank, and the top-k most relevant tokens are selected as routed visual context for the next speculative block. This mechanism is motivated by the observation that, in multimodal speculative decoding, the useful visual evidence is highly context-dependent. Using all visual to-kens can be costly and may introduce redundant evidence, while a fixed compressed representation may miss cues needed for the current prediction. TIGER therefore performs adaptive visual token selection to provide the drafter with compact yet contextually relevant visual information. Starting from the visual bank in Eq. (1) , we op-tionally append a pooled global token vg, yielding 
+
+¯V = [ v1, . . . , v r, v g] ∈ R(r+1) ×d. (5) Let hj ∈ Rd denote the drafter hidden state at the end of the current textual prefix. TIGER projects this state into a routing query 
+
+qj = Wqhj , (6) where Wq ∈ Rd×d is a learnable projection. For each visual token ¯vi ∈ ¯V , we compute a relevance 3Target Model                                            
+
+> v1v2v3v0v3
+> vg
+> Draft Model
+> t1t2t0
+> v1v2v3v0v3t1t2t0
+> v0
+> hv1
+> ht2
+> sad by wilted rose
+> v1v2v3v0v3t1t2t0sad by wilted rose
+> sad at wilted roses
+> Pooling
+> hv0hv2
+> LLM Head
+> ht0hv3ht1ht2
+> Vision Encoder
+> We can feel
+> Embedding
+> LLM Decoder
+> Visual Gated Routing
+> v1v2v3
+> hv2hv1hv3ht1ht0h1hv1hv0hv2ht0hv3ht1ht' 0ht2ht' 1ht' 3ht' 2
+> LLM Decoder
+> Embedding
+> t' 1t' 2t' 0t' 3
+> LLM Decoder
+> LLM Head
+> Resampling
+> Accept Prefix
+
+Figure 1: Overview of TIGER for multimodal speculative decoding. Given an image and a textual prefix, TIGER first performs text-conditioned visual routing to select a sparse subset of relevant visual tokens for the drafter. Conditioned on this routed visual context, the drafter proposes a speculative block of γ tokens. The verifier, which always operates on the full visual context, then accepts a prefix of the proposed block under the standard speculative decoding test. TIGER improves efficiency by increasing verifier-accepted prefix length while keeping the drafter-side visual interface lightweight. 
+
+score 
+
+si = q⊤ 
+
+> j
+
+Wv ¯vi
+
+√d , (7) where Wv ∈ Rd×d is another learnable projection. Intuitively, this score measures how well each vi-sual token matches the current decoding state: to-kens with larger scores are expected to provide more useful visual evidence for predicting the next speculative block. TIGER then performs sparse routing by selecting the top-k visual tokens: 
+
+Sj = TopK( s1, . . . , s r+1 ; k), (8) and forms the routed visual context 
+
+V route  
+
+> j
+
+= {¯vi | i ∈ S j }. (9) The routed context is recomputed once per specu-lative round and reused for the entire draft block. In TIGER, the drafter-side visual interface in Eq. (2) is instantiated as V dra  
+
+> j
+
+= V route  
+
+> j
+
+. Thus, instead of conditioning on the full visual token set, the drafter generates the next speculative block from the routed multimodal context 
+
+Xj = [ Et(T1: j ); V route  
+
+> j
+
+], ˆTj+1: j+γ ∼ qθ(· | Xj ),
+
+(10) where Et(·) is the text embedding function. In this way, TIGER provides a lightweight and context-adaptive visual interface for drafting. 
+
+3.3 Acceptance-Aligned Training 
+
+We train TIGER in two stages. We first warm-start the drafter with knowledge distillation (KD), ob-taining a stable reference policy qref . This warm start improves optimization stability, but it is not our final objective. Our main training stage instead aligns the drafter with the verifier’s acceptance out-come. Given a training example x = ( I, T 1: j ), TIGER first constructs the routed multimodal context Xj as in Eq. (10) . Conditioned on Xj , the drafter samples 
+
+K candidate speculative blocks, 
+
+ˆY (1) , . . . , ˆY (K) ∼ qθ(· | Xj ), (11) where ˆY (k) denotes the k-th sampled block of length γ. Each candidate is then evaluated by the verifier under the standard speculative decoding acceptance test. Let a(k) 
+
+> u
+
+∈ { 0, 1} indicate whether the u-th token in ˆY (k) is accepted. The accepted prefix length of the k-th candidate is 
+
+A(k) =
+
+> γ
+
+X
+
+> u=1
+> u
+
+Y
+
+> m=1
+
+a(k) 
+
+> m
+
+. (12) We directly use this verifier-accepted prefix length as reward, 
+
+R(k) = A(k). (13) 4v1 v2 v3      
+
+> vgv1v2v3v0v3h2
+> q2
+> Linear
+> projection
+> sgs1s2v3s0s3
+> Token Relevance Scoring
+> Top-k Selection
+
+Figure 2: TIGER visual gated routing. A routing query derived from the current prefix hidden state scores each token in the visual token bank, and the top-k most relevant tokens are selected as the routed visual context for the next speculative block. 
+
+so that drafts that survive verification for longer prefixes receive larger rewards. To optimize the drafter, we adopt a group-based relative policy update over the K sampled candi-dates. Rewards are normalized within the current group: 
+
+ˆg(k) = R(k) − μR
+
+σR + ϵ , (14) where μR and σR are the mean and standard devi-ation of {R(1) , . . . , R (K)}. We refer to this stage as acceptance-aligned optimization , because the policy update is driven by verifier-accepted pre-fix length rather than token-level imitation alone. The drafter is then optimized with the following GRPO-style objective: 
+
+Laccept = −
+
+> K
+
+X
+
+> k=1
+
+ˆg(k) log qθ
+
+ ˆY (k) | Xj
+
+
+
++ β KL( qθ ∥ qref ),
+
+(15) where β controls the strength of the KL anchor. Intuitively, this acceptance-aligned objective shifts the drafter toward speculative blocks that the verifier can accept for longer prefixes. Unlike one-to-one imitation, the group-based formulation learns relative preferences among multiple candi-date continuations under the verifier’s acceptance mechanism. The full training pipeline is summa-rized in Algorithm 1. 
+
+Algorithm 1 Acceptance-aligned training for TIGER 
+
+Require: Drafter qθ, verifier pϕ, training set D,group size K 
+
+> 1:
+
+Warm-start qθ with KD to obtain qref  
+
+> 2:
+
+for each x = ( I, T 1: j ) ∈ D do  
+
+> 3:
+
+Build V route  
+
+> j
+
+via TIGER routing and set 
+
+Xj = [ Et(T1: j ); V route  
+
+> j
+
+] 
+
+> 4:
+
+Sample K speculative blocks 
+
+ˆY (1) , . . . , ˆY (K) ∼ qθ(· | Xj ) 
+
+> 5:
+
+Evaluate each block with the verifier and obtain rewards R(k) = A(k) 
+
+> 6:
+
+Normalize rewards to ˆg(k) 
+
+> 7:
+
+Update qθ with the GRPO objective in Eq. (15)  
+
+> 8:
+
+end for 3.4 Efficiency Rationale 
+
+TIGER addresses two coupled bottlenecks in mul-timodal speculative decoding. The first is visual mismatch : a small drafter may condition on ex-cessive or irrelevant visual evidence, causing early divergence on vision-critical tokens. The second is objective mismatch : distillation improves aver-age imitation quality, whereas speculative decod-ing speed is governed more directly by verifier-accepted prefix length. Let Ai denote the accepted prefix length at spec-ulative round i, and let ¯A = E[Ai]. To generate a response of N tokens, the expected number of verification rounds is approximately 
+
+E[M ] ≈ N
+
+¯A . (16) Hence, increasing ¯A directly reduces the num-ber of expensive verifier decoding steps. TIGER improves this quantity from both sides: text-conditioned routing increases the likelihood that the drafter accesses the right visual evidence for the next block, while acceptance-aligned optimization explicitly favors continuations that survive verifier checking longer. As a result, TIGER targets the runtime quantity that most directly governs specula-tive decoding efficiency in VLMs, namely verifier-accepted prefix length. 
+
+Routing overhead and cache reuse. TIGER does not re-encode the image at every speculative round. The visual token bank and projected visual rep-resentations are computed once and cached. At each round, TIGER computes only the current text-conditioned query, scores the cached visual tokens, 5and performs Top-k selection. The routed visual context is reused for the entire draft block. Impor-tantly, routing affects only the drafter-side visual interface: the verifier remains unchanged, uses the full visual context, and follows the standard specu-lative decoding acceptance protocol. Thus, verifier-side KV-cache reuse is the same as in standard speculative decoding, while the reported end-to-end latency includes routing overhead. 
+
+4 Experiments & Discussion 
+
+4.1 Experimental Setup Hardware. All experiments are conducted on a server equipped with 8 NVIDIA A40 GPUs (48GB each). Training is performed in mixed precision (bfloat16), with gradient accumulation to support large multimodal models. 
+
+Models. We evaluate TIGER on several open-source VLMs spanning the LLaVA and Qwen-VL families: LLaVA-v1.6-Vicuna-7B, LLaVA-v1.6-Vicuna-13B, Qwen3-VL-4B-Instruct, and Qwen3-VL-8B-Instruct. 
+
+Baselines. We compare TIGER with spec-ulative decoding and visual token efficiency baselines. Speculative baselines include V IS- 
+
+> PEC
+
+(Kang et al., 2025), S PEC FLASH (Wang et al., 2026), M EDUSA (Cai et al., 2024), EAGLE-2 (Li et al., 2024), EAGLE-3 (Li et al., 2026), RACER (Zhang et al., 2026), and T OKEN RECY - 
+
+> CLING
+
+(Luo et al., 2025). For training-free or plug-and-play methods such as RACER and T O-
+
+> KEN
+
+RECYCLING , we instrument their draft candi-dates under the adapted multimodal verifier-side acceptance protocol when reporting AccLen; im-plementation details are provided in Appendix B.4. We also compare with visual token pruning base-lines, S PARSE VLM (Zhang et al., 2025b) and V IS -PRUNER (Zhang et al., 2025a), for which we re-port task performance and latency-based efficiency rather than accepted prefix length. Detailed adapta-tion procedures are provided in Appendix B.4. 
+
+Datasets. We evaluate TIGER on a diverse set of multimodal benchmarks covering visual question answering, reasoning, OCR understanding, and captioning, including MMBench (Liu et al., 2024), ScienceQA (Lu et al., 2022), TextVQA (Singh et al., 2019), MM-Vet (Yu et al., 2024), and COCO Captions (Chen et al., 2015). These benchmarks assess perception, knowledge grounding, diagram-based reasoning, text understanding in natural im-ages, and open-ended generation. To further ex-amine context-heavy settings, we include addi-tional evaluations on Video-MME (Fu et al., 2025), NLVR2 (Suhr et al., 2019), and MuirBench (Wang et al., 2025a), covering video understanding and multi-image reasoning. Detailed dataset splits, sam-pling protocols, and evaluation details are provided in Appendix C. 
+
+Evaluation Metrics. We evaluate both task per-formance and decoding efficiency. For specula-tive decoding, we report Accepted Prefix Length 
+
+(AccLen ), Verifier Rounds (VerRds ), End-to-End Latency (Lat. ), and Speedup (Spd. ). AccLen measures the average number of drafted tokens ac-cepted per round and is the key efficiency metric, since longer accepted prefixes reduce verifier de-coding rounds. Lat. includes routing overhead, and Spd. is measured relative to autoregressive verifier-only decoding. For non-speculative visual-token efficiency baselines, AccLen and VerRds are not defined, so we report task performance and latency-based efficiency instead. 
+
+4.2 Main Results 
+
+We separate exact speculative decoding from aux-iliary visual-interface analyses. Table 1 keeps the verifier unchanged with full visual context, so Ac-cLen and speedup are the main metrics. Tables 2 and 4 instead analyze quality–latency trade-offs under different drafter-side visual interfaces. Table 1 reports exact verifier-side speculative de-coding results across five multimodal benchmarks and four VLM settings. TIGER achieves the tied-best accepted prefix length and speedup in most settings, suggesting that text-conditioned visual routing and acceptance-aligned training improve drafter-verifier agreement across both LLaVA and Qwen-VL model families. The gains are consistent but generally modest over strong speculative decod-ing baselines such as ViSpec, EAGLE-3, RACER, and TokenRecycling, which is expected because these methods already provide competitive draft quality. Nevertheless, even small improvements in accepted prefix length are meaningful, since they reduce the number of expensive verifier decoding rounds and translate into end-to-end speedup. Ad-ditional context-heavy evaluations are reported in Appendix E.3, where TIGER shows moderate gains on short/medium video and multi-image settings while long-video cases remain challenging. 6VLM setting Method MMBench ScienceQA TextVQA MM-Vet COCO Caption AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑
+
+LLaVA-v1.6-7B Medusa 0.73 1.02x 0.69 1.39x 0.77 1.47x 0.70 1.43x 0.76 1.63x EAGLE-2 2.04 2.11x 2.43 2.15x 0.62 1.26x 0.64 1.45x 1.34 1.87x ViSpec 2.55 2.45x 2.87 2.35x 2.96 2.89x 2.82 2.55x 3.34 3.20x SpecFLASH 2.34 2.21x 2.76 2.22x 2.27 2.34x 2.59 2.38x 3.12 3.02x EAGLE-3 2.43 2.34x 2.71 2.24x 2.97 2.78x 2.85 2.65x 3.30 3.18x RACER 2.44 2.35x 2.45 2.30x 2.90 2.80x 2.87 2.49x 3.29 3.20x TokenRecycling 2.54 2.43x 2.67 2.31x 2.87 2.68x 2.77 2.54x 3.31 3.21x TIGER 2.67 2.57x 2.88 2.37x 2.98 2.91x 2.88 2.65x 3.37 3.24x 
+
+LLaVA-v1.6-13B Medusa 1.23 1.18x 0.86 1.62x 0.87 1.52x 0.81 1.45x 0.79 1.23x EAGLE-2 1.98 1.93x 1.98 2.10x 1.67 1.78x 1.65 1.58x 1.87 1.67x ViSpec 2.56 2.34x 2.74 2.55x 2.75 2.50x 2.76 2.33x 3.19 2.16x SpecFLASH 2.49 2.14x 2.54 2.32x 2.46 2.23x 2.62 2.27x 2.97 2.01x EAGLE-3 2.55 2.33x 2.70 2.52x 2.79 2.65x 2.74 2.39x 3.24 2.15x RACER 2.52 2.26x 2.68 2.49x 2.77 2.60x 2.67 2.33x 3.20 2.09x TokenRecycling 2.54 2.19x 2.65 2.53x 2.80 2.45x 2.89 2.40x 3.18 2.00x TIGER 2.59 2.46x 2.71 2.56x 2.86 2.67x 2.75 2.45x 3.25 2.19x 
+
+Qwen3-VL-4B Medusa 1.34 1.09x 0.65 1.12x 0.69 1.09x 0.67 1.44x 0.66 1.17x EAGLE-2 2.12 1.76x 1.16 1.32x 1.01 1.25x 1.34 1.45x 1.45 1.68x ViSpec 2.56 2.16x 2.03 1.79x 2.18 1.74x 2.54 2.21x 2.34 2.11x SpecFLASH 2.55 2.32x 1.95 1.77x 2.17 1.34x 2.46 2.11x 2.21 2.02x EAGLE-3 2.57 2.40x 2.08 1.70x 2.20 1.75x 2.56 2.28x 2.37 2.00x RACER 2.58 2.36x 2.02 1.74x 2.19 1.78x 2.54 2.29x 2.33 2.09x TokenRecycling 2.59 2.38x 2.01 1.76x 2.21 1.80x 2.58 2.30x 2.41 2.01x TIGER 2.63 2.41x 2.10 1.87x 2.29 1.85x 2.67 2.33x 2.47 2.15x 
+
+Qwen3-VL-8B Medusa 1.23 1.16x 0.67 1.05x 0.55 0.97x 0.63 1.03x 0.67 1.02x EAGLE-2 1.14 1.67x 1.54 1.23x 1.17 1.02x 1.34 1.23x 1.47 1.34x ViSpec 2.13 1.99x 2.34 1.76x 2.02 1.12x 2.35 1.65x 2.36 1.78x SpecFLASH 2.06 2.02x 2.27 1.65x 1.97 1.04x 2.28 1.43x 2.21 1.45x EAGLE-3 2.11 2.07x 2.28 1.77x 2.03 1.12x 2.36 1.67x 2.44 1.79x 
+
+RACER 2.15 2.03x 2.25 1.70x 1.99 1.13x 2.37 1.56x 2.45 1.67x TokenRecycling 2.13 2.00x 2.30 1.69x 2.00 1.15x 2.40 1.58x 2.32 1.66x TIGER 2.23 2.12x 2.37 1.77x 2.11 1.18x 2.45 1.70x 2.54 1.79x 
+
+Table 1: Main exact verifier-side speculative decoding results across multimodal benchmarks. We report accepted prefix length (AccLen) and speedup (Spd.). Each model block denotes the VLM setting used in the adapted speculative decoding protocol. The verifier is kept unchanged and uses the full visual context. 
+
+Model Visual interface Caption Acc. ↑ Norm. Lat. ↓
+
+LLaVA-v1.6-7B Full visual tokens 0.45 1.00 SparseVLM 0.56 0.82 VisPruner 0.69 0.76 TIGER routing 0.75 0.62 
+
+Qwen3-VL-4B Full visual tokens 0.67 1.00 SparseVLM 0.68 0.86 VisPruner 0.75 0.79 TIGER routing 0.78 0.65 
+
+Table 2: Auxiliary visual-token efficiency analysis on COCO Caption. We compare different drafter-side vi-sual interfaces using caption accuracy and normalized decoding latency. 
+
+4.3 Drafter-Side Visual Interface Analysis 
+
+Table 2 compares TIGER with visual token effi-ciency baselines on COCO Caption. Unlike spec-ulative decoding methods, SparseVLM and Vis-Pruner reduce inference cost by pruning visual to-kens, so AccLen is not directly defined for them. We therefore report caption accuracy and normal-ized latency to analyze the quality-latency trade-off of different drafter-side visual interfaces. TIGER achieves a favorable quality–latency trade-off com-                                         
+
+> Model Variant AccLen ↑Spd. ↑VerRds. ↓Lat. ↓
+> LLaVA-v1.6-7B TIGER 2.67 2.57x 0.375 0.389
+> w/o Visual Gated Routing 2.13 2.12x 0.469 0.472 w/o Acceptance Alignment 2.07 2.03x 0.483 0.493 w/o KD 2.32 1.99x 0.431 0.503 Qwen3-VL-4B TIGER 2.63 2.41x 0.380 0.415
+> w/o Visual Gated Routing 1.98 1.87x 0.505 0.535 w/o Acceptance Alignment 1.67 1.56x 0.599 0.641 w/o KD 1.54 1.03x 0.649 0.971
+
+Table 3: Ablation study on COCO Caption. All three components, visual gated routing, accepted-prefix align-ment, and KD warm-start, contribute to higher accepted prefix length and lower decoding cost. 
+
+pared with both full-token decoding and pruning-based baselines. This suggests that routing visual evidence according to the current textual context is more effective than static visual-token reduction alone in this setting. Additional adapter-style com-parisons, where SparseVLM/VisPruner-style selec-tors are inserted into the same speculative decoding pipeline, are reported in Appendix E.6. 
+
+4.4 Ablation Study 
+
+We conduct ablation experiments on COCO Cap-tion to analyze the contribution of TIGER’s main 7Visual interface AccLen ↑ Spd. ↑ Caption Acc. ↑                   
+
+> k= 4 3.12 2.87x 0.68
+> k= 8 3.37 3.24x 0.75
+> k= 16 2.76 2.01x 0.56
+> k= 32 2.54 1.78x 0.53 Full visual tokens 2.23 1.23x 0.45
+> Table 4: Routing-sparsity analysis on COCO Caption using LLaVA-v1.6-Vicuna-7B. This table studies the quality–efficiency trade-off of the drafter-side visual interface.
+
+components: text-conditioned visual gated routing, acceptance-aligned training, and KD warm-start initialization. Table 3 reports results on LLaVA-v1.6-7B and Qwen3-VL-4B. On LLaVA-v1.6-7B, removing visual gated routing reduces AccLen and speedup, while removing accepted alignment gives a similar drop to 2.07 AccLen and 2.03x speedup. On Qwen3-VL-4B, the degradation is more pronounced: removing accepted alignment reduces AccLen, and removing KD warm-start gives the lowest speedup, only 1.03x, with much higher normalized latency. These results indicate that visual routing improves drafter–verifier agree-ment, accepted-prefix optimization provides gains beyond KD-only imitation, and KD warm-start is important for stable policy optimization. Addi-tional analyses are provided in the appendix: Ap-pendix E.8 gives finer-grained routing ablations, and Appendix E.7 compares the accepted-prefix reward against KD-only, binary acceptance reward, and token-agreement reward. 
+
+4.5 Routing Sparsity Analysis 
+
+We analyze the effect of routing sparsity k, the num-ber of visual tokens routed to the drafter. Unless otherwise stated, TIGER uses k = 8 for both train-ing and inference in all main experiments. Table 4 reports a compact sensitivity analysis on COCO Caption with LLaVA-v1.6-Vicuna-7B. The results show that moderate sparsity gives the best quality– efficiency trade-off. When k = 4 , the drafter may miss useful visual evidence, reducing caption ac-curacy and acceptance. When k ≥ 16 , the drafter receives more redundant visual context, which low-ers accepted prefix length and speedup. The default setting k = 8 achieves the best trade-off among AccLen, speedup, and caption accuracy. Extended sensitivity results across OCR, VQA, captioning, and counting, including matched and mismatched 
+
+ktrain / kinfer settings, are reported in Appendix E.5. OCR VQA Caption Counting 
+
+0.5
+
+0.6
+
+0.7
+
+0.8
+
+> 0.62
+> 0.68
+> 0.72
+> 0.55
+> 0.71
+> 0.75
+> 0.78
+> 0.64
+> Accuracy
+
+Baseline TIGER 
+
+> Figure 3: Capability analysis on LLaVA-v1.6-7B across different multimodal tasks.
+
+4.6 Capability Analysis. 
+
+We further analyze TIGER across different mul-timodal capability categories, including OCR un-derstanding, visual question answering, caption generation, and counting. This analysis is intended as a capability-preservation sanity check: the main speculative decoding metrics remain AccLen, veri-fier rounds, latency, and speedup, while task accu-racy is used here to verify that efficiency gains do not come from degrading downstream capability. Details of the evaluation datasets and sampling pro-tocol are provided in Appendix C. Figure 3 shows that TIGER improves task-level accuracy across the evaluated capability categories while improv-ing decoding efficiency. The gains are more visible in OCR and counting, where accurate generation depends on selecting precise visual evidence. This supports the role of text-conditioned visual rout-ing in helping the drafter focus on evidence that is relevant to the current decoding context. 
+
+5 Conclusion 
+
+We study speculative decoding for vision-language models and show that draft quality alone is not suf-ficient; decoding efficiency depends directly on ver-ifier acceptance. We propose TIGER , which com-bines text-conditioned visual gated routing with acceptance-aligned training. TIGER routes context-relevant visual tokens to the drafter and optimizes continuations that yield longer verifier-accepted prefixes. Experiments show improved accepted-prefix efficiency and decoding speed while main-taining competitive task performance, highlighting verifier-acceptance alignment as an effective direc-tion for efficient multimodal generation. 8Limitations 
+
+Despite the promising results, our work has sev-eral limitations. First, TIGER focuses primarily on improving speculative decoding efficiency rather than fundamentally modifying the architecture of vision-language models. As a result, the overall performance of the system still depends on the ca-pabilities of the underlying drafter and verifier mod-els. If the base models exhibit strong hallucination or reasoning errors, TIGER may not fully resolve these issues. Second, the proposed acceptance-aligned training requires sampling multiple specu-lative blocks and evaluating them with the verifier during training. Although we employ block-level verification to reduce computational overhead, this training procedure can still be more expensive than standard distillation-based approaches. Third, our routing mechanism selects a sparse subset of visual tokens based on the current textual prefix. While this design improves efficiency in practice, it may occasionally omit useful visual evidence, especially in complex scenes requiring global visual reason-ing. Finally, our experiments focus on widely used multimodal benchmarks and model families such as LLaVA and Qwen-VL. Future work could ex-plore the generality of TIGER across a broader range of architectures, larger-scale models, and more diverse multimodal tasks. 
+
+References 
+
+Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple llm inference acceleration frame-work with multiple decoding heads. In Proceed-ings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org. Hanning Chen, Yang Ni, Wenjun Huang, Hyunwoo Oh, Yezi Liu, Tamoghno Das, and Mohsen Imani. 2025. Lvlm_csp: Accelerating large vision language mod-els via clustering, scattering, and pruning for reason-ing segmentation. In Proceedings of the 33rd ACM International Conference on Multimedia , MM ’25, page 3932–3941, New York, NY, USA. Association for Computing Machinery. Xinlei Chen, Hao Fang, Tsung-Yi Lin, Ramakr-ishna Vedantam, Saurabh Gupta, Piotr Dollar, and C. Lawrence Zitnick. 2015. Microsoft coco cap-tions: Data collection and evaluation server. Preprint ,arXiv:1504.00325. Chaoyou Fu, Yuhan Dai, Yongdong Luo, Lei Li, Shuhuai Ren, Renrui Zhang, Zihan Wang, Chenyu Zhou, Yunhang Shen, Mengdan Zhang, Peixian Chen, Yanwei Li, Shaohui Lin, Sirui Zhao, Ke Li, Tong Xu, Xiawu Zheng, Enhong Chen, Caifeng Shan, and 2 others. 2025. Video-mme: The first-ever comprehen-sive evaluation benchmark of multi-modal llms in video analysis. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) ,pages 24108–24118. Drew A. Hudson and Christopher D. Manning. 2019. Gqa: A new dataset for real-world visual reason-ing and compositional question answering. In 2019 IEEE/CVF Conference on Computer Vision and Pat-tern Recognition (CVPR) , pages 6693–6702. Jialiang Kang, Han Shu, Wenshuo Li, Yingjie Zhai, and Xinghao Chen. 2025. Vispec: Accelerating vision-language models with vision-aware speculative de-coding. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles , SOSP ’23, page 611–626, New York, NY, USA. Association for Computing Machinery. Hugo Laurençon, Léo Tronchon, Matthieu Cord, and Victor Sanh. 2024. What matters when building vision-language models? In Proceedings of the 38th International Conference on Neural Information Pro-cessing Systems , NIPS ’24, Red Hook, NY, USA. Curran Associates Inc. Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi. 2023a. Blip-2: bootstrapping language-image pre-training with frozen image encoders and large lan-guage models. In Proceedings of the 40th Interna-tional Conference on Machine Learning , ICML’23. JMLR.org. Yifan Li, Yifan Du, Kun Zhou, Jinpeng Wang, Xin Zhao, and Ji-Rong Wen. 2023b. Evaluating object halluci-nation in large vision-language models. In Proceed-ings of the 2023 Conference on Empirical Methods in Natural Language Processing , pages 292–305, Sin-gapore. Association for Computational Linguistics. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024. EAGLE-2: Faster inference of lan-guage models with dynamic draft trees. In Proceed-ings of the 2024 Conference on Empirical Methods in Natural Language Processing , pages 7421–7432, Miami, Florida, USA. Association for Computational Linguistics. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2026. EAGLE-3: Scaling up inference ac-celeration of large language models via training-time test. In The Thirty-ninth Annual Conference on Neu-ral Information Processing Systems .Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. 2023. Visual instruction tuning. In Proceedings 
+
+9of the 37th International Conference on Neural In-formation Processing Systems , NIPS ’23, Red Hook, NY, USA. Curran Associates Inc. Yuan Liu, Haodong Duan, Yuanhan Zhang, Bo Li, Songyang Zhang, Wangbo Zhao, Yike Yuan, Jiaqi Wang, Conghui He, Ziwei Liu, Kai Chen, and Dahua Lin. 2024. Mmbench: Is your multi-modal model an all-around player? In Computer Vision – ECCV 2024: 18th European Conference, Milan, Italy, September 29–October 4, 2024, Proceedings, Part VI , page 216–233, Berlin, Heidelberg. Springer-Verlag. Pan Lu, Swaroop Mishra, Tony Xia, Liang Qiu, Kai-Wei Chang, Song-Chun Zhu, Oyvind Tafjord, Peter Clark, and Ashwin Kalyan. 2022. Learn to explain: multimodal reasoning via thought chains for science question answering. In Proceedings of the 36th Inter-national Conference on Neural Information Process-ing Systems , NIPS ’22, Red Hook, NY, USA. Curran Associates Inc. Xianzhen Luo, Yixuan Wang, Qingfu Zhu, Zhiming Zhang, Xuanyu Zhang, Qing Yang, and Dongliang Xu. 2025. Turning trash into treasure: Accelerat-ing inference of large language models with token recycling. In Proceedings of the 63rd Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 6816–6831, Vienna, Austria. Association for Computational Linguistics. Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, Chunan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna Abhyankar, and Zhi-hao Jia. 2024. SpecInfer: Accelerating generative large language model serving with tree-based spec-ulative inference and verification. In Proceedings of the 29th ACM International Conference on Archi-tectural Support for Programming Languages and Operating Systems , pages 932–949. ACM. Ranajoy Sadhukhan, Jian Chen, Zhuoming Chen, Vashisth Tiwari, Ruihang Lai, Jinyuan Shi, Ian En-Hsu Yen, Avner May, Tianqi Chen, and Beidi Chen. 2025. Magicdec: Breaking the latency-throughput tradeoff for long context generation with speculative decoding. In The Thirteenth International Confer-ence on Learning Representations, ICLR 2025, Sin-gapore, April 24-28, 2025 . OpenReview.net. Amanpreet Singh, Vivek Natarajan, Meet Shah, Yu Jiang, Xinlei Chen, Dhruv Batra, Devi Parikh, and Marcus Rohrbach. 2019. Towards vqa models that can read. In 2019 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) ,pages 8309–8318. Alane Suhr, Stephanie Zhou, Ally Zhang, Iris Zhang, Huajun Bai, and Yoav Artzi. 2019. A corpus for reasoning about natural language grounded in pho-tographs. In Proceedings of the 57th Annual Meet-ing of the Association for Computational Linguistics ,pages 6418–6428, Florence, Italy. Association for Computational Linguistics. Fei Wang, Xingyu Fu, James Y. Huang, Zekun Li, Qin Liu, Xiaogeng Liu, Mingyu Derek Ma, Nan Xu, Wenxuan Zhou, Kai Zhang, Tianyi Lorena Yan, Wen-jie Jacky Mo, Hsiang-Hui Liu, Pan Lu, Chunyuan Li, Chaowei Xiao, Kai-Wei Chang, Dan Roth, Sheng Zhang, and 2 others. 2025a. Muirbench: A com-prehensive benchmark for robust multi-image under-standing. In The Thirteenth International Conference on Learning Representations .Zhihai Wang, Jie Wang, Jilai Pan, Xilin Xia, Huiling Zhen, Mingxuan Yuan, Jianye HAO, and Feng Wu. 2025b. Accelerating large language model reasoning via speculative search. In Forty-second International Conference on Machine Learning .Zihua Wang, Ruibo Li, Haozhe Du, Joey Tianyi Zhou, Yu Zhang, and Xu Yang. 2026. FLASH: Latent-aware semi-autoregressive speculative decoding for multimodal tasks. Long Xing, Qidong Huang, Xiaoyi Dong, Jiajie Lu, Pan Zhang, Yuhang Zang, Yuhang Cao, Conghui He, Jiaqi Wang, Feng Wu, and Dahua Lin. 2024. Pyramiddrop: Accelerating your large vision-language models via pyramid visual redundancy reduction. arXiv preprint arXiv:2410.17247 .Weihao Yu, Zhengyuan Yang, Linjie Li, Jianfeng Wang, Kevin Lin, Zicheng Liu, Xinchao Wang, and Lijuan Wang. 2024. Mm-vet: evaluating large multimodal models for integrated capabilities. In Proceedings of the 41st International Conference on Machine Learn-ing , ICML’24. JMLR.org. Qizhe Zhang and 1 others. 2025a. Beyond text-visual attention: Exploiting visual cues for effective token pruning in vision-language models. In Proceedings of the IEEE/CVF International Conference on Com-puter Vision (ICCV) .Yuan Zhang, Chun-Kai Fan, Junpeng Ma, Wenzhao Zheng, Tao Huang, Kuan Cheng, Denis A Gudovskiy, Tomoyuki Okuno, Yohei Nakata, Kurt Keutzer, and Shanghang Zhang. 2025b. SparseVLM: Visual token sparsification for efficient vision-language model in-ference. In Forty-second International Conference on Machine Learning .Zihong Zhang, Zuchao Li, Lefei Zhang, Ping Wang, and Hai Zhao. 2026. Racer: Retrieval-augmented contextual rapid speculative decoding. Preprint ,arXiv:2604.14885. 
+
+A Method Details 
+
+A.1 Cost and Complexity Analysis 
+
+We provide a simple cost decomposition to clarify why TIGER can improve speculative decoding ef-ficiency despite introducing an additional routing step. 10 Expected number of verification rounds. For completeness, we briefly restate the relationship between accepted prefix length and verifier cost in-troduced in Section 3.4. Let Ai denote the verifier-accepted prefix length at speculative round i, and let ¯A = E[Ai]. (17) Assuming that the accepted lengths are sufficiently stable across rounds, the total number of verifier rounds required to generate a response of N tokens can be approximated by the total token budget di-vided by the average accepted progress per round: 
+
+E[M ] ≈ N
+
+¯A . (18) This makes explicit why accepted prefix length is the central efficiency quantity in speculative decod-ing: larger ¯A implies fewer verifier invocations, and thus lower overall decoding cost. 
+
+Per-round speculative decoding cost. Let Cdraft 
+
+and Cverify denote the average drafting and verifica-tion costs per speculative round, respectively. The expected end-to-end speculative decoding cost can then be approximated as 
+
+E[TSD ] ≈ N
+
+¯A
+
+ Cdraft + Cverify 
+
+. (19) This expression makes explicit the central role of 
+
+¯A: even when Cdraft remains fixed, larger verifier-accepted prefixes reduce the total number of rounds and therefore reduce overall decoding cost. 
+
+Full-visual versus routed drafting. In a conven-tional multimodal drafter, each speculative round conditions on the full visual token bank of size 
+
+r. Abstracting away model-specific constants, we write its drafting cost as 
+
+Cfull draft = Ctext + Cvis (r), (20) where Ctext denotes the text-side decoding cost and Cvis (r) denotes the cost of interacting with the full visual context. In TIGER, the drafter-side cost is factorized into two parts: a routing stage over the visual bank and a reduced drafting stage over only the selected subset of size k, where k ≪ r:
+
+CTIGER draft = Ctext + Croute (r) + Cvis (k). (21) Here Croute (r) is the cost of scoring the visual bank and selecting the top-k tokens, while Cvis (k) is the visual interaction cost after routing. Substituting Eq. (21) into Eq. (19) gives the ex-pected cost of TIGER: 
+
+E[TTIGER ] ≈ N
+
+¯ATIGER 
+
+
+
+Ctext + Croute (r)+ Cvis (k) + Cverify 
+
+
+
+.
+
+(22) Compared with a full-visual drafter, TIGER is ben-eficial whenever the improvement in ¯A outweighs the additional routing overhead. 
+
+Routing complexity. For a visual bank of size 
+
+r with hidden dimension d, the routing score in Eq. (7) is computed once per visual token. The score computation therefore scales as 
+
+O(rd ). (23) Selecting the top-k tokens from the resulting scores can be implemented in O(r log k) time using a stan-dard partial sort, or O(r) using specialized selec-tion routines. Hence, the routing overhead is linear (or near-linear) in the visual bank size and is in-curred only once per speculative block. By contrast, the subsequent visual conditioning cost of the drafter depends only on the selected sub-set size k, rather than the full bank size r. This is the main computational advantage of TIGER: rout-ing introduces a small per-block overhead, but it reduces the amount of visual computation required during drafting. 
+
+Discussion. Eq. (22) highlights the central trade-off in TIGER. On one hand, routing adds an extra cost term Croute (r). On the other hand, it can both reduce the drafter-side visual interaction cost from 
+
+Cvis (r) to Cvis (k) and, more importantly, increase 
+
+¯A by exposing more relevant visual evidence to the drafter. In practice, TIGER improves efficiency when the acceptance gain and reduced visual load together dominate the routing overhead. This is precisely the regime targeted by our design: sparse, text-conditioned routing for the drafter, combined with direct optimization of verifier-accepted prefix length. 
+
+B Implementation Details 
+
+B.1 Model Configurations 
+
+We evaluate TIGER on four open-source vision– language backbones: LLaVA-v1.6-Vicuna-7B, LLaVA-v1.6-Vicuna-13B, Qwen3-VL-4B-Instruct, and Qwen3-VL-8B-Instruct. Detailed technical specifications are reported in Table 5. 11 In speculative decoding, the target model pϕ
+
+also serves as the verifier, while the drafter qθ pro-poses candidate tokens before verification. De-pending on the method, draft candidates may be produced by a smaller VLM, a lightweight method-specific draft module, or a training-free candidate-construction mechanism. For the two-model TIGER setting, we use LLaVA-v1.6-Vicuna-7B as the drafter with LLaVA-v1.6-Vicuna-13B as the verifier, and Qwen3-VL-4B-Instruct as the drafter with Qwen3-VL-8B-Instruct as the verifier. Unless otherwise stated, we use the official pre-trained models for all experiments. The verifier architecture is kept unchanged throughout training and evaluation and always uses the full visual con-text. TIGER is applied only to the drafter side, where we introduce text-conditioned visual gated routing and acceptance-aligned training. The orig-inal pretrained vision encoder is preserved, and routing is performed over the drafter-side visual token bank produced by the corresponding drafter backbone. 
+
+B.2 Training Hyperparameters 
+
+We summarize the training configuration of TIGER in Table 6. TIGER is trained in two stages: a KD warm-start stage that provides a stable refer-ence policy, followed by an acceptance-aligned optimization stage using verifier-derived accepted-prefix rewards. The verifier is frozen throughout both stages. For the compared baselines, we distinguish methods with trainable acceleration modules from plug-and-play inference-time methods. Medusa, EAGLE-style methods, ViSpec, and SpecFLASH require training or retraining of method-specific drafting modules when adapted to our VLM back-bones. RACER and TokenRecycling are training-free speculative decoding methods, while Vis-Pruner and SparseVLM are inference-time visual-token reduction methods and do not require ad-ditional training under the standard acceleration pipeline. Detailed baseline adaptation procedures are provided in Appendix B.4. ViSpec. ViSpec adopts a two-stage training pipeline (Kang et al., 2025). In the first stage, the model is initialized through the standard vision-aware training proce-dure; in the second stage, it is further optimized with a speculative decoding head. According to the released implementation, the representative run configuration uses BF16 training, batch size = 1 ,and maximum sequence length = 4096 in both stages, with learning rate 3 × 10 −5 for Stage 1 and 3 × 10 −6 for the speculative stage. The spec-ulative configuration further introduces num_q =2. In addition, the default parser settings specify 
+
+num_epochs =20, gradient accumulation = 1 , and configurable data-loading workers. 
+
+SpecFLASH. SpecFLASH requires additional training for its acceleration modules and provides multiple training branches in the released code-base, including multimodal speculative decoding, vision token compression, and flash-style specu-lative acceleration (Wang et al., 2026). Across these branches, the typical setup uses batch size 
+
+= 2 and gradient accumulation = 1 . The default number of epochs is 20 for the main speculative branches, including train_llava , train_qwenvl ,and train_sar , while the compression branch 
+
+train_compress uses 3 epochs. The learning rate is typically set to 3 × 10 −5 for train_llava and 
+
+train_sar , and 2 × 10 −5 for train_qwenvl and 
+
+train_compress . The maximum sequence length is usually 2048 , except for train_sar , which uses 
+
+4096 . Mixed precision is BF16 for the main spec-ulative branches and FP16 for the compression branch. 
+
+VisPruner and SparseVLM. VisPruner(Zhang et al., 2025a) and SparseVLM (Zhang et al., 2025b) are plug-and-play inference-time acceler-ation methods. Their standard usage focuses on evaluation-time control of visual token reduction rather than additional training of the acceleration module itself. For VisPruner, inference behavior is governed by token-retention settings such as the retained token ratio and important-token selec-tion. For SparseVLM, sparsity is controlled by the retained-token budget through the RETAIN_TOKN 
+
+setting. Although both repositories still include pretraining or finetuning scripts inherited from the original LLaVA codebase, these are used for repro-ducing or rebuilding the backbone rather than for the default acceleration pipeline. 
+
+B.3 Decoding Configuration 
+
+For a fair comparison, we follow the official or default decoding configurations provided in each method’s released evaluation scripts whenever pos-sible, rather than enforcing a unified decoding setup across all baselines. This choice is important be-cause several compared methods are sensitive to method-specific decoding hyperparameters, espe-cially in the speculative setting. For visual-token reduction baselines such as Vis-
+
+12 Model Text / LLM configuration Vision configuration Context LLaVA-v1.6-Vicuna-7B hidden size 4096, 32 layers, 32 attention heads, vocabulary size 32,000, BF16 CLIP ViT-L/14-336 vision tower, anyres +          
+
+> spatial_unpad , projector mlp2x_gelu
+> max position 4096 LLaVA-v1.6-Vicuna-13B hidden size 5120, 40 layers, 40 attention heads, vocabulary size 32,000, BF16 CLIP ViT-L/14-336 vision tower, anyres +
+> spatial_unpad , projector mlp2x_gelu
+> max position 4096 Qwen3-VL-4B-Instruct hidden size 2560, 36 layers, 32 atten-tion heads (8 KV heads), vocabulary size 151,936, BF16 ViT depth 24, hidden size 1024, patch size 16, temporal patch size 2, DeepStack max position 262,144 Qwen3-VL-8B-Instruct hidden size 4096, 36 layers, 32 atten-tion heads (8 KV heads), vocabulary size 151,936, BF16 ViT depth 27, hidden size 1152, patch size 16, temporal patch size 2, DeepStack max position 262,144
+
+Table 5: Technical specifications of the backbone models used in our experiments. For two-model TIGER experiments, the smaller backbone in each family is used as the drafter and the larger backbone is used as the verifier.                                     
+
+> Hyperparameter KD warm-start Acceptance alignment Training examples 92.5K 80K Epochs 11Learning rate 5×10 −61×10 −5
+> Per-device batch size 11Gradient accumulation 48Effective batch size 48Max sequence length 2048 2048 Routing sparsity k88Draft length γ–32 Candidate group size K–4KL coefficient β–0.02 Verifier frozen frozen Precision BF16 BF16
+
+Table 6: TIGER training configuration. The drafter is first warm-started with KD and then optimized with verifier-derived accepted-prefix rewards. The verifier is frozen in both stages. 
+
+Pruner and SparseVLM , evaluation is conducted under deterministic decoding with greedy gener-ation, i.e., single-beam decoding ( num_beams =1) and zero temperature in the benchmark scripts. For speculative decoding baselines such as ViSpec and 
+
+SpecFLASH , we retain their default speculative tree configurations and sampling hyperparameters as specified in the corresponding official implemen-tations. More concretely, VisPruner uses num_beams =1 and max_new_tokens =128, with benchmark eval-uation scripts setting the temperature to 0 for greedy decoding, although the model loader ex-poses a default temperature of 0.2. SparseVLM 
+
+follows the standard LLaVA-style greedy evalu-ation protocol with temperature 0, while the de-gree of visual sparsification is controlled by the retained-token budget. For ViSpec , the specula-tive decoding configuration uses the default tree-based setup with total-token = 30 , depth = 3 ,top-k = 8, num-q = 2, tree_choices set to 
+
+mc_sim_7b_63 , max_new_token =1024, and sam-pling temperature = 1 .0; its non-speculative base-line evaluation scripts also use temperature = 1 .0.For SpecFLASH , the speculative evaluation scripts likewise use max_new_token =1024, temperature 
+
+= 1 .0, and tree_choices =mc_sim_7b_63 , while the underlying speculative generator additionally exposes temperature, top-p, and top-k controls. Overall, our evaluation protocol is designed to respect the intended inference settings of each base-line while keeping the benchmark setup and back-bone pairing fixed. 
+
+B.4 Baseline Adaptation Details 
+
+We compare TIGER against representative base-lines from multimodal speculative decoding, recent speculative decoding, and visual-token efficiency, including Medusa, EAGLE-2, EAGLE-3, RACER, TokenRecycling, ViSpec, SpecFLASH, Sparse-VLM, and VisPruner. A key practical issue is that the officially released checkpoints of these meth-ods do not consistently match the exact backbone pairs used in our experiments, namely LLaVA-v1.6-Vicuna-7B/13B and Qwen3-VL-4B/8B-Instruct. Therefore, to ensure a fair comparison, we do not rely on mismatched off-the-shelf checkpoints. Instead, for each baseline, we preserve the orig-inal method design as closely as possible while re-instantiating and, when necessary, retraining the method-specific components on top of the corre-sponding backbone used in our study. For LLaVA-v1.6, we use the Vicuna/LLaMA-compatible tok-enizer, chat template, and hidden-state interface; for Qwen3-VL, we use the Qwen-style tokenizer, chat template, and model configuration. This pro-tocol ensures that performance differences are at-tributable to the method itself rather than to differ-ences in backbone family or released checkpoint quality. 13 Medusa. Medusa was originally introduced for language-only models and does not natively sup-port multimodal inputs. To adapt it to our set-ting, we attach Medusa-style multi-token predic-tion heads to the multimodal drafter and condi-tion these heads on the same multimodal hidden states produced by the backbone VLM, including the original visual embeddings and textual prefix. The verifier model is kept unchanged and verifies proposed tokens using the full visual context. Since no official multimodal checkpoints are available for our exact drafter backbones, we train the Medusa heads directly on top of LLaVA-v1.6-Vicuna-7B and Qwen3-VL-4B-Instruct using the correspond-ing multimodal training data. This adaptation pre-serves the original Medusa drafting principle while making it applicable to vision–language specula-tive decoding. 
+
+EAGLE-2. EAGLE-2 is adapted from the language-only setting by attaching an EAGLE-style drafting module to the multimodal hidden states of each VLM drafter. For LLaVA-v1.6, we use the Vicuna/LLaMA-compatible EAGLE path; for Qwen3-VL, we use the Qwen-style tok-enizer, chat template, and model configuration. In both cases, the drafter receives the same image-conditioned prefix representation as the base VLM, while the larger verifier is kept unchanged and verifies proposed tokens with the full visual con-text. Because the official checkpoints do not match our exact VLM backbone pairs, we retrain the EAGLE-2 drafting module on top of LLaVA-v1.6-Vicuna-7B and Qwen3-VL-4B-Instruct, with model-dependent hidden size, vocabulary size, at-tention heads, and RoPE settings matched to each backbone. We follow the official EAGLE-2 train-ing configuration, including learning rate 3 × 10 −5,batch size 4, 20 epochs, maximum length 2048, uni-form noise with standard deviation 0.2, bf16 mixed precision, and loss weights pw = 0 .1, vw = 1 .0,and head w = 0 .1. At inference, we use the offi-cial tree-based decoding configuration with total draft tokens 60, depth 5, top-k = 10 , and the cor-responding EAGLE tree structure, while matching TIGER’s verifier, prompt format, visual preprocess-ing, and decoding budget. 
+
+EAGLE-3. EAGLE-3 extends EAGLE-style speculative decoding with direct token predic-tion, multi-layer feature fusion, and a compact draft vocabulary. We adapt EAGLE-3 to both LLaVA/Vicuna-style and Qwen-style VLMs by constructing its draft module on top of the mul-timodal hidden states from the corresponding drafter backbone. For LLaVA-v1.6, we use the Vicuna/LLaMA-compatible tokenizer and configu-ration; for Qwen3-VL, we use the Qwen-specific tokenizer, chat template, and model configuration. The verifier is kept unchanged and always uses the full visual context for verification. Following the official EAGLE-3 setup, the draft module is a lightweight one-layer transformer-style head, with hidden size, attention configuration, vocabulary size, RoPE settings, and tokenizer-dependent IDs matched to each backbone rather than hard-coded from a single LLM family. When supported by the backbone tokenizer, we retain the compact draft-vocabulary design with draft_vocab_size =32000 . We train the EAGLE-3 draft module using the official training recipe: learning rate 5 × 10 −5,batch size 1 per GPU with gradient accumulation 2, 40 epochs, maximum length 2048, gradient check-pointing, fp16 mixed precision, and DeepSpeed ZeRO-2. At inference, we enable EAGLE-3 mode and use the same EAGLE-style tree-decoding pa-rameters, including total draft tokens 60, depth 5, and top-k = 10 . All evaluation settings, including verifier model, prompt format, visual preprocess-ing, maximum generation length, and acceptance protocol, are matched with TIGER. 
+
+RACER. RACER is a training-free speculative decoding method that constructs draft candidates using retrieval-augmented future-token prediction. It does not train a separate drafter; instead, it builds an automaton over recent token histories and com-bines retrieved exact patterns with logit-driven can-didate expansion. In our VLM adaptation, the multimodal input is processed by the target VLM with the original visual context, and RACER op-erates over the generated-token stream while pre-serving the same verifier and visual preprocess-ing as TIGER. For Qwen3-VL, we use the native Qwen-style chat template and supported KV-model path; for LLaVA/Vicuna, we use the corresponding Vicuna-style prompt template and KV-compatible model wrapper. We use the official default decod-ing configuration, including max_num_draft = 64 ,
+
+max_breadth = 8 , ngram = 10 , max_nodes =10000 , greedy decoding with temperature 0, and the same maximum generation budget as the other baselines. Since RACER is training-free and sup-ports batch-size-1 decoding in its native imple-mentation, we evaluate it under the same latency-14 oriented setting and report results with the adapted multimodal protocol. 
+
+TokenRecycling. TokenRecycling is a plug-and-play speculative decoding method that accelerates inference without training an external draft model or using a datastore. It reuses candidate tokens pro-duced during decoding and organizes them into a fixed draft tree for verification by the target model. To adapt it to VLMs, we keep the target VLM and visual encoder unchanged, process each mul-timodal input with the full visual context, and ap-ply token recycling only to the language decoding stream. We follow the official static-tree configura-tion, using matrix_top_k = 8 and the hardcoded draft tree of depth 6. No additional multimodal drafter is trained for this baseline. All candidate tokens are verified by the same target VLM under the matched prompt format, visual preprocessing, decoding budget, and latency measurement proto-col. 
+
+ViSpec. ViSpec is a multimodal speculative de-coding method whose drafter explicitly incorpo-rates visual information through a lightweight vision-aware adaptor. Its main design compresses visual tokens and injects a global image feature into the drafting process before verification by the target model. We follow this design as closely as possible and use the official implementation when compatible. However, because released weights are not uniformly available for all backbones con-sidered in our experiments, we reproduce ViSpec on our evaluation backbones by retaining its vision-adaptor-based architecture and retraining the adap-tor and speculative drafting components on the cor-responding LLaVA-v1.6 and Qwen3-VL drafters. The verifier remains unchanged and uses the full visual context. 
+
+SpecFLASH. SpecFLASH is reproduced using its early-exit speculative design, where an auxiliary draft head is attached to an intermediate layer of the base VLM to predict speculative tokens more cheaply before full verification. We follow the orig-inal training pipeline as closely as possible, includ-ing the construction of hidden-state supervision for the early-exit head. Because the released setup does not directly cover every model pair in our eval-uation, we train the method-specific early-exit head on top of the exact LLaVA-v1.6 and Qwen3-VL drafters used in our experiments, while keeping the verifier unchanged. 
+
+SparseVLM. SparseVLM is not a speculative de-coding method but a prompt-conditioned visual to-ken sparsification baseline. Its key idea is to retain only a subset of visual tokens based on text–vision interactions, thereby reducing visual computation during generation. The official implementation is primarily centered on LLaVA-style backbones, so for LLaVA-v1.6 we follow the original sparsifica-tion design directly. For Qwen3-VL, we adapt the same retention principle to the corresponding vi-sual token interface of the backbone and tune the retained-token budget under matched evaluation settings. Because SparseVLM does not include a verifier-based drafting stage, accepted-prefix met-rics are not applicable. 
+
+VisPruner. VisPruner is another non-speculative efficiency baseline that accelerates VLM inference through visual token pruning. Its pruning proce-dure first identifies important visual tokens using visual attention signals and then removes redun-dant tokens based on token similarity so that the retained subset remains both informative and di-verse. The original method is primarily developed for LLaVA-style backbones, and thus we reproduce its two-stage important-and-diverse pruning mecha-nism on the model families used in our experiments rather than comparing against unmatched released checkpoints. As with SparseVLM, this baseline is evaluated as a visual-token reduction method rather than as a speculative decoder, so accepted-prefix-based metrics are not reported. Across all baselines, we use the same evalua-tion benchmarks, prompt format, decoding bud-get, and verifier backbone corresponding to each model family whenever applicable. For specula-tive decoding methods with a matched draft–verify protocol, we report accepted prefix length, veri-fier rounds, end-to-end speedup, latency, and task performance. For training-free or plug-and-play speculative decoding methods, we use the adapted multimodal protocol above and report accepted-prefix metrics when their draft–verify interface is matched; otherwise, we additionally report task per-formance and latency-oriented metrics. For visual-token efficiency methods without speculative ver-ification, we report task accuracy together with latency-oriented efficiency metrics only. 15 C Dataset Details 
+
+C.1 Training Data KD Training Data. As the first stage of training, we warm-start the drafter using knowledge distil-lation on a mixed multimodal corpus constructed from six public vision–language datasets: LLaVA-1.5 COCO, TextVQA, ScienceQA, DocVQA, Tal-lyQA, and ChartQA. The resulting mixture covers a broad range of multimodal capabilities, includ-ing general VQA, OCR, document understanding, chart reasoning, counting, and science-oriented vi-sual QA. The goal of this stage is to provide the drafter with a strong and diverse multimodal initialization before acceptance-aligned optimization. Rather than optimizing for a single benchmark, we expose the model to heterogeneous image–text interaction patterns so that it can learn to mimic the target model across different visual contexts and response formats. This diversity improves the drafter’s gen-erality and makes it a more reliable starting point for the later speculative decoding objective. Each example in the KD pool consists of an im-age I, a textual instruction or question X, and a reference target response Y . The drafter is trained to imitate the target model on this mixed corpus using standard distillation-based supervision. Un-less otherwise stated, all datasets are merged into a single pool and uniformly sampled during KD train-ing. The final KD mixture contains approximately 
+
+92 .5K multimodal examples; detailed dataset statis-tics are reported in Table 7. 
+
+Acceptance-Aligned Training Data For the acceptance-aligned stage, we construct a dedi-cated multimodal training pool of approximately 
+
+80 K examples from six vision–language data sources: TextVQA, DocVQA, ChartQA, TallyQA, ScienceQA, and LLaVA-1.5 COCO. Compared with the KD warm-start corpus, this pool is de-signed specifically for reward-based optimization, where the goal is not merely to imitate the target model, but to expose the drafter to prompts that can induce meaningful variation in verifier acceptance outcomes. To support stable preference- or reward-based training, we apply a lightweight heuristic filter to retain medium-difficulty prompts. In particu-lar, we remove trivially short prompts (fewer than five words), excessively long prompts (more than sixty words), and short pure yes/no questions, since these cases often lead to degenerate or low-variance reward signals. The remaining prompts are as-signed coarse capability tags, including count , ocr ,
+
+reasoning , description , and visual_qa , which provide a simple characterization of the training mixture. This filtering strategy is intended to en-courage speculative samples with diverse accep-tance lengths, which is important for effective GRPO-style optimization. Each example in the GRPO pool consists of an image I, a prompt X, and an optional reference an-swer Y stored as ground_truth . During training, the drafter generates multiple speculative continua-tions conditioned on the routed multimodal context, and the verifier evaluates these continuations to pro-duce acceptance-based rewards. Thus, supervision is derived directly from verifier feedback rather than from manually curated preference annotations or external reward models. We build the accepted-alignment pool by merg-ing all retained examples into a single training set and sampling uniformly from the resulting mixture. Because the publicly available Hugging Face versions of ChartQA and DocVQA provide only limited test/validation splits, their contribution is capped by actual availability, and the LLaVA-COCO portion is correspondingly increased to pre-serve the target pool size. The final GRPO training pool contains approximately 80 K multimodal ex-amples; detailed dataset statistics are reported in Table 8. 
+
+C.2 Capability Analysis Data 
+
+To analyze which multimodal abilities benefit most from TIGER, we construct a capability-oriented evaluation suite. As shown in Table 9, we sample 1,000 test examples for each capability from a rep-resentative benchmark dataset. This setup enables a controlled comparison of TIGER across OCR, VQA, captioning, and reasoning-oriented tasks. 
+
+C.3 Evaluation Benchmarks 
+
+We evaluate TIGER on five widely used multi-modal benchmarks that cover complementary ca-pability types, including general multimodal rea-soning, science-oriented question answering, scene-text understanding, integrated visual reasoning, and open-ended caption generation. 
+
+MMBench. MMBench is a comprehensive mul-timodal benchmark designed to evaluate broad vi-sual understanding and reasoning abilities under a 16 Dataset Split / Source Main capability #Samples LLaVA-1.5 COCO COCO-train2017 subset General VQA / caption-style grounding 40,000 TextVQA train OCR-centric VQA 34,000 ScienceQA train Science visual reasoning 6,000 DocVQA validation Document understanding / OCR 5,000 TallyQA COCO-5k subset Counting 5,000 ChartQA test Chart understanding 2,500 Total – Mixed multimodal KD corpus 92,500 
+
+Table 7: Composition of the multimodal training mixture used for KD warm-start of the drafter. The corpus combines six vision–language datasets covering complementary capability types, including general VQA, OCR, document understanding, counting, chart reasoning, and science-oriented multimodal QA.                         
+
+> Dataset Split / Source Main capability #Samples TextVQA train OCR-centric VQA 20,000 DocVQA validation + test Document understanding / OCR 10,000 ChartQA test Chart understanding / reasoning 2,500 TallyQA COCO-5k subset Counting 5,000 ScienceQA train Science visual reasoning 5,000 LLaVA-1.5 COCO COCO-train2017 subset General visual QA / grounding 37,500 Total –Accepted-alignment training pool 80,000
+
+Table 8: Composition of the multimodal training pool used for acceptance-aligned optimization. The pool is filtered to retain medium-difficulty prompts that are more likely to induce diverse verifier acceptance outcomes during GRPO training. Because the public Hugging Face releases of ChartQA and DocVQA provide limited split availability, LLaVA-COCO is expanded to preserve the overall pool size.            
+
+> Capability Dataset # Test Samples OCR TextVQA 1,000 VQA MMBench 1,000 Captioning COCO Caption 1,000 Counting TallyQA 1,000 Total 4,000
+
+Table 9: Capability-oriented evaluation subsets used in our analysis. Each capability is represented by 1,000 test examples from a corresponding benchmark. 
+
+unified multiple-choice format. It covers diverse capability categories such as object recognition, at-tribute understanding, spatial reasoning, common-sense inference, and cross-modal grounding. Be-cause it includes a wide range of visual question types, MMBench provides a useful testbed for mea-suring whether a speculative decoding method can preserve general-purpose multimodal performance while improving inference efficiency. 
+
+ScienceQA. ScienceQA is a multimodal ques-tion answering benchmark built from science prob-lems spanning multiple grade levels and subject areas. Many examples are accompanied by dia-grams, figures, or natural images, requiring models to integrate visual evidence with textual reasoning and domain knowledge. This benchmark is partic-ularly useful for assessing whether efficient decod-ing methods remain robust on reasoning-intensive multimodal tasks rather than only on surface-level perception. 
+
+TextVQA. TextVQA focuses on visual question answering in images that contain scene text. To answer correctly, a model must not only recog-nize objects and scenes, but also read and interpret textual content embedded in the image, such as signs, labels, numbers, and printed words. This makes TextVQA a strong benchmark for evaluat-ing visual grounding accuracy in OCR-intensive settings, where speculative errors can easily arise if the drafter conditions on incomplete or irrelevant visual evidence. 
+
+MM-Vet. MM-Vet is a challenging open-ended benchmark designed to probe advanced multimodal capabilities that often require the combination of several skills at once, such as recognition, ground-ing, OCR, knowledge-based reasoning, and de-tailed comparison. Compared with standard single-skill benchmarks, MM-Vet places greater emphasis on compositional and fine-grained understanding. It therefore provides a more demanding evaluation setting for testing whether TIGER can maintain performance under complex multimodal reasoning 17 requirements. 
+
+COCO Caption. COCO Caption is a standard image captioning benchmark based on natural im-ages from the MS COCO dataset. The task requires the model to generate fluent and semantically grounded descriptions that reflect salient objects, attributes, interactions, and overall scene composi-tion. We include this benchmark to evaluate TIGER in an open-ended generation setting, complement-ing question answering benchmarks and testing whether improved speculative efficiency transfers to caption generation quality. Beyond the five main benchmarks above, we fur-ther evaluate TIGER on three context-heavy bench-marks to assess whether the method extends be-yond standard single-image VQA and captioning settings. These additional evaluations cover video understanding, two-image reasoning, and broader multi-image reasoning. 
+
+Video-MME. Video-MME is a comprehensive video understanding benchmark designed to eval-uate multimodal models on videos of different du-rations, including short, medium, and long videos. Compared with single-image tasks, Video-MME requires models to process temporally distributed visual evidence and maintain consistency across multiple sampled frames. We include this bench-mark to test whether TIGER remains effective when the visual context is larger and more tempo-rally extended. In our additional evaluation, short and medium videos are sampled at 1 fps, while long videos are sampled at 0.5 fps under a fixed maximum-frame budget. 
+
+NLVR2. NLVR2 is a two-image visual reason-ing benchmark where each example contains a pair of images and a natural-language statement. The task is to determine whether the statement is true or false with respect to the paired visual input. This benchmark is useful for testing cross-image ground-ing and compositional reasoning, since the model must compare visual evidence across two images rather than answer from a single image alone. We use NLVR2 to evaluate whether TIGER’s routed visual interface can support multi-image evidence selection in a controlled reasoning setting. 
+
+MuirBench. MuirBench is a robust multi-image understanding benchmark containing diverse multiple-choice questions across multiple multi-image reasoning tasks. Unlike NLVR2, which fo-cuses on paired-image true/false reasoning, Muir-Bench covers broader multi-image relations and requires models to integrate information across several images. We include MuirBench to eval-uate TIGER under a more general multi-image set-ting, where the relevant visual evidence may be distributed across multiple inputs and the drafter must preserve verifier agreement under a richer visual context. 
+
+D Evaluation Metrics Details 
+
+We evaluate both task performance and decoding efficiency. 
+
+Task performance metrics. For benchmark per-formance, we follow the standard evaluation pro-tocol of each dataset. For multiple-choice bench-marks such as MMBench and ScienceQA, we re-port Accuracy (Acc. ). For captioning tasks such as COCO Caption, we report the standard caption-ing score used in the corresponding evaluation set-ting. For capability-oriented analysis, we use the task-specific evaluation metric associated with each benchmark subset. 
+
+Decoding efficiency metrics. For speculative de-coding methods, we report four efficiency metrics. 
+
+Accepted Prefix Length (AccLen ) is the average number of drafted tokens accepted by the verifier in each speculative decoding round. Formally, if 
+
+Ai denotes the accepted prefix length at speculative round i, then AccLen = ¯A = E[Ai]. (24) 
+
+Verifier Rounds (VerRds ) measures the aver-age number of verifier decoding rounds required to generate a complete response. Let N denote the total number of generated tokens. Following Eq. (16) , the expected number of verifier rounds is approximately VerRds = E[M ] ≈ N
+
+¯A . (25) 
+
+End-to-End Latency (Lat. ) denotes the aver-age wall-clock decoding time per sample. Because latency may be reported under different normaliza-tions in different tables, we distinguish two variants when needed: (i) AR-normalized latency , where latency is normalized by standard autoregressive decoding with the verifier model; and (ii) full-token-normalized latency , where latency is normalized by the full-token decoding baseline within the same 18 model family. We explicitly state the normalization used in each table caption. 
+
+Speedup (Spd. ) is defined as the ratio between baseline autoregressive decoding time and specula-tive decoding time: Spd. = TAR 
+
+TSD 
+
+. (26) When Lat. is reported as AR-normalized latency, it satisfies Lat. = TSD 
+
+TAR 
+
+= 1
+
+Spd. . (27) Among these metrics, AccLen is the key quantity governing speculative decoding efficiency, since longer accepted prefixes reduce the number of ex-pensive verifier decoding steps. Together, AccLen, VerRds, Lat., and Spd. characterize how improve-ments in verifier acceptance translate into end-to-end inference acceleration. 
+
+Applicability of metrics. AccLen and VerRds are defined only for speculative decoding meth-ods, since they rely on the draft–verify process and the verifier acceptance test. For non-speculative visual token efficiency baselines such as Sparse-VLM and VisPruner, we report task performance together with latency-based efficiency metrics, but not AccLen or VerRds. 
+
+E Additional Experiments 
+
+E.1 Accepted Prefix Distribution Analysis 
+
+We further analyze the distribution of verifier-accepted prefix lengths on the COCO Caption benchmark using LLaVA-v1.6-7B as the drafter. Although the average accepted prefix length (Ac-cLen) is a useful summary metric, it does not fully reveal how often a method achieves long accepted continuations, which are the main source of prac-tical speculative decoding gains. A method may obtain a similar mean accepted length while ex-hibiting very different behavior in the tail of the distribution, especially in the frequency of long accepted prefixes. Table 10 reports both the average accepted pre-fix length and the probability that the verifier ac-cepts at least 2, 4, or 8 tokens in a speculative round. Compared with baseline speculative decod-ing methods, TIGER not only achieves the highest mean accepted prefix length, but also consistently shifts the distribution toward longer accepted pre-fixes. In particular, TIGER yields the highest prob-abilities at all reported thresholds, indicating that it produces verifier-compatible continuations more reliably across speculative rounds. This distributional improvement is important be-cause speculative decoding speedup is driven dis-proportionately by long accepted prefixes: when the verifier accepts a larger block, more tokens are generated per expensive verification step, thereby reducing the overall number of verifier rounds. The results therefore support our central claim that TIGER improves efficiency not only on average, but also by increasing the frequency of high-value speculative rounds that contribute most to end-to-end acceleration. 
+
+E.2 Temperature Sensitivity 
+
+We analyze the sensitivity of TIGER to decoding temperature on the COCO Caption benchmark us-ing LLaVA-v1.6-7B. Speculative decoding relies on agreement between the drafter and the verifier, and this agreement typically becomes weaker under higher-temperature sampling. As the temperature increases, the drafter produces more diverse con-tinuations, but these continuations are also more likely to deviate from the verifier, leading to shorter accepted prefixes and reduced speculative gains. Table 11 reports the effect of temperature on ac-cepted prefix length, speedup, verifier rounds, and latency. We observe a clear monotonic degradation in speculative decoding efficiency as temperature increases. Specifically, the average accepted prefix length drops from 3.37 at temperature 0 to 2.02 at temperature 1.0, while the corresponding speedup decreases from 3.24 × to 1.96 ×. At the same time, verifier rounds increase from 0.37 to 0.494 , and latency rises from 0.389 to 0.432 , indicating that weaker drafter–verifier alignment causes the ver-ifier to intervene more frequently. Overall, these results confirm that TIGER is most effective in lower-temperature settings, where speculative con-tinuations remain better aligned with verifier pref-erences. 
+
+E.3 Additional Context-Heavy Evaluation 
+
+We further evaluate TIGER on context-heavy multi-modal settings beyond standard single-image VQA and captioning. This evaluation tests whether text-conditioned routing and acceptance-aligned train-ing remain effective when relevant visual evidence is distributed across multiple frames or multiple 19 Method AccLen ↑ P (A ≥ 2) (%) ↑ P (A ≥ 4) (%) ↑ P (A ≥ 8) (%) ↑
+
+Medusa 0.76 12.4 5.1 1.2 EAGLE-2 1.34 35.2 15.8 4.5 ViSpec 3.34 68.5 32.1 12.4 SpecFLASH 3.12 65.4 29.8 10.9 
+
+TIGER 3.37 70.2 35.6 15.3                         
+
+> Table 10: Distribution of verifier-accepted prefix lengths on COCO Caption with LLaVA-v1.6-7B. Beyond improving the average accepted prefix length, TIGER consistently increases the probability of longer accepted prefixes, which are the primary driver of speculative decoding speedup.
+> Temperature AccLen ↑Spd. ↑VerRds. ↓Lat. ↓
+> 0.0 3.37 3.24x 0.37 0.389
+> 0.5 2.98 2.57x 0.39 0.399 0.7 2.67 2.43x 0.41 0.412 1.0 2.02 1.96x 0.494 0.432
+> Table 11: Temperature sensitivity of TIGER on COCO Caption with LLaVA-v1.6-7B. Higher temperature weakens drafter–verifier agreement, resulting in shorter accepted prefixes, more verifier rounds, higher latency, and lower speculative decoding speedup.
+
+images. Table 12 reports results on Video-MME, NLVR2, and MuirBench under both LLaVA-v1.6-13B and Qwen3-VL-8B settings. For Video-MME, we eval-uate the short-, medium-, and long-duration test splits separately, using 900 samples for each split. For NLVR2 and MuirBench, we evaluate 1,000 test samples from each benchmark. These settings cover video understanding, two-image reasoning, and broader multi-image reasoning. Overall, this context-heavy evaluation provides a stronger test of TIGER beyond single-image tasks. The short/medium video and multi-image settings evaluate whether the drafter can benefit from com-pact, context-relevant visual evidence, while the long-video setting is more challenging because the relevant evidence may be temporally sparse and distributed across many frames. 
+
+E.4 Batch-Size Scalability 
+
+To examine whether TIGER remains effective be-yond batch-size-1 inference, we evaluate batch sizes 1, 8, and 16 on the capability-oriented eval-uation suite. We report normalized per-sample la-tency, speedup over target-only decoding at the same batch size, peak GPU memory usage, and task accuracy. The results show that TIGER is most effective in latency-sensitive small-batch set-tings, while still providing positive speedups under moderate batching. 
+
+E.5 Extended Routing-Sparsity Sensitivity 
+
+We further analyze the effect of the routing sparsity 
+
+k, i.e., the number of visual tokens routed to the drafter. Unless otherwise stated, TIGER uses k = 8 
+
+for both training and inference in the main experi-ments. To verify this choice, we evaluate matched settings with ktrain = kinfer ∈ { 4, 8, 16 , 32 }, as well as mismatched settings where the model is trained with ktrain = 8 but inferred with kinfer ∈ { 4, 16 }.We use the same capability-oriented evaluation suite as in Section 4.6, covering OCR, VQA, cap-tioning, and counting. The results confirm the trend observed in the main routing-sparsity analysis. Smaller k values can omit useful visual evidence, while larger k
+
+values introduce more redundant visual context and reduce speculative acceptance. The matched default ktrain = kinfer = 8 consistently provides the strongest trade-off, supporting our use of the same routing sparsity during training and inference. 
+
+E.6 Comparison with SparseVLM/VisPruner-style Selectors 
+
+SparseVLM and VisPruner are relevant visual-token sparsification methods, but they are not spec-ulative decoding methods by themselves. Their primary goal is to reduce visual-token computa-tion while preserving downstream task quality. In contrast, TIGER’s visual routing is designed for multimodal speculative decoding: the selected vi-sual tokens should help the drafter better match the verifier’s accepted continuation, thereby increasing verifier-accepted prefix length. To make the comparison more direct, we conduct an adapter-style experiment where SparseVLM-style and VisPruner-style selectors re-place TIGER’s visual router inside the same drafter– verifier speculative decoding pipeline. All methods 20 Model Method Video-MME Short Video-MME Medium Video-MME Long NLVR2 MuirBench AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑ AccLen ↑ Spd. ↑                                                                                                                                                                
+
+> LLaVA-v1.6-13B Medusa 1.62 1.48x 1.41 1.32x 1.20 1.14x 1.39 1.28x 1.32 1.22x EAGLE-2 1.95 1.81x 1.72 1.63x 1.31 1.22x 1.64 1.51x 1.55 1.44x ViSpec 2.01 1.86x 1.78 1.69x 1.34 1.25x 1.70 1.58x 1.61 1.50x SpecFLASH 2.08 1.93x 1.83 1.72x 1.36 1.27x 1.74 1.62x 1.66 1.54x EAGLE-3 2.21 2.08x 1.96 1.84x 1.42 1.31x 1.82 1.76x 1.69 1.61x RACER 2.24 2.10x 1.99 1.86x 1.43 1.32x 1.85 1.79x 1.72 1.64x TokenRecycling 2.22 2.09x 2.01 1.88x 1.45 1.33x 1.83 1.77x 1.74 1.65x TIGER 2.35 2.19x 2.10 1.96x 1.45 1.34x 1.94 1.86x 1.80 1.72x
+> Qwen3-VL-8B Medusa 1.51 1.39x 1.32 1.24x 1.15 1.09x 1.31 1.21x 1.24 1.16x EAGLE-2 1.84 1.70x 1.63 1.52x 1.26 1.18x 1.55 1.43x 1.47 1.37x ViSpec 1.90 1.75x 1.69 1.58x 1.29 1.21x 1.61 1.49x 1.52 1.41x SpecFLASH 1.96 1.82x 1.74 1.63x 1.31 1.23x 1.66 1.54x 1.57 1.46x EAGLE-3 2.08 1.94x 1.85 1.73x 1.37 1.26x 1.73 1.64x 1.61 1.51x RACER 2.11 1.97x 1.88 1.76x 1.39 1.28x 1.76 1.68x 1.64 1.53x TokenRecycling 2.10 1.95x 1.89 1.77x 1.38 1.27x 1.75 1.66x 1.65 1.55x TIGER 2.22 2.06x 1.98 1.85x 1.39 1.29x 1.84 1.76x 1.71 1.62x
+
+Table 12: Additional context-heavy exact verifier-side speculative decoding results beyond single-image VQA and captioning. We evaluate Video-MME using 900 test samples for each duration split: short, medium, and long. We also evaluate 1,000 test samples each from NLVR2 and MuirBench. For Video-MME, short and medium videos are sampled at 1 fps, while long videos are sampled at 0.5 fps under a fixed maximum-frame budget. We report accepted prefix length (AccLen) and speedup (Spd.); best results in each model block and setting are boldfaced. 
+
+Capability Batch size Target Lat. ↓ TIGER Lat. ↓ Spd. ↑ Target Mem. (GB) TIGER Mem. (GB) Acc. ↑
+
+OCR 1 1.000 0.412 2.43x 18.7 20.4 0.71 OCR 8 0.684 0.372 1.84x 31.6 34.9 0.70 OCR 16 0.603 0.385 1.57x 45.8 50.7 0.70 VQA 1 1.000 0.438 2.28x 18.9 20.7 0.75 VQA 8 0.701 0.398 1.76x 32.1 35.4 0.74 VQA 16 0.622 0.411 1.51x 46.3 51.2 0.74 Caption 1 1.000 0.389 2.57x 19.2 21.1 0.78 Caption 8 0.672 0.358 1.88x 32.8 36.0 0.77 Caption 16 0.596 0.374 1.59x 47.1 52.0 0.77 
+
+Table 13: Batch-size scalability analysis on the capability-oriented evaluation suite. Latency is normalized per sample, and speedup is measured against target-only decoding at the same batch size. TIGER achieves the largest gains at batch size 1, but remains faster than target-only decoding at batch sizes 8 and 16 with moderate additional GPU memory usage. 
+
+use the same verifier, decoding budget, and evalua-tion subset. This isolates the effect of the drafter-side visual selector while keeping the speculative decoding protocol fixed. The results show that SparseVLM/VisPruner-style selectors provide useful visual-token reduc-tion baselines, but they underperform TIGER in accepted prefix length and speedup. This supports our hypothesis that the visual tokens most useful for speculative decoding are not necessarily the globally most salient tokens for task accuracy. In-stead, the selector should expose visual evidence that helps the drafter match the verifier under the current textual prefix. TIGER routing-only already improves over the adapted pruning selectors, and the full model further benefits from acceptance-aligned training. 
+
+E.7 Objective Comparison for Accepted-Prefix Reward 
+
+We further compare the proposed accepted-prefix reward with simpler training objectives. The goal is to test whether optimizing verifier-accepted prefix length provides benefits beyond standard imitation-based distillation or simpler verifier-derived re-wards. We compare five variants. The vanilla drafter 
+
+is trained without KD warm-start or acceptance-aligned optimization. The KD-only variant corre-sponds to the drafter after the distillation warm-start stage, without the second-stage accepted-prefix optimization. We also consider two sim-pler verifier-derived rewards: a binary acceptance reward , which gives reward 1 if at least one drafted token is accepted and 0 otherwise, and 21 Model ktrain kinfer OCR VQA Caption Counting AccLen ↑ Spd. ↑ Acc. ↑ AccLen ↑ Spd. ↑ Acc. ↑ AccLen ↑ Spd. ↑ Acc. ↑ AccLen ↑ Spd. ↑ Acc. ↑                                                                                                                                                            
+
+> LLaVA-v1.6-7B 443.10 2.88x 0.66 2.52 2.41x 0.70 3.12 2.87x 0.68 2.46 2.35x 0.59 883.36 3.21x 0.71 2.74 2.62x 0.75 3.37 3.24x 0.78 2.68 2.55x 0.64
+> 843.02 2.74x 0.65 2.43 2.28x 0.69 3.05 2.79x 0.67 2.39 2.21x 0.58 816 2.84 2.36x 0.64 2.31 2.08x 0.68 2.76 2.01x 0.56 2.25 2.02x 0.57 16 16 2.79 2.29x 0.63 2.26 2.03x 0.67 2.76 2.01x 0.56 2.20 1.97x 0.56 32 32 2.58 1.92x 0.60 2.10 1.81x 0.64 2.54 1.78x 0.53 2.04 1.76x 0.53 Qwen3-VL-4B 442.73 2.42x 0.63 2.26 2.12x 0.67 2.86 2.51x 0.66 2.18 2.06x 0.56 882.95 2.66x 0.68 2.47 2.32x 0.72 3.04 2.74x 0.73 2.39 2.25x 0.61
+> 842.65 2.32x 0.62 2.18 2.01x 0.66 2.76 2.39x 0.65 2.11 1.96x 0.55 816 2.48 2.04x 0.61 2.03 1.86x 0.65 2.53 2.05x 0.55 1.98 1.82x 0.54 16 16 2.43 1.98x 0.60 1.99 1.81x 0.64 2.47 1.99x 0.54 1.94 1.78x 0.53 32 32 2.21 1.71x 0.57 1.82 1.62x 0.61 2.26 1.69x 0.51 1.77 1.58x 0.50
+
+Table 14: Extended routing-sparsity sensitivity across capability subsets. TIGER uses k = 8 for both training and inference in the main experiments. The matched setting ktrain = kinfer = 8 gives the best overall trade-off across accepted prefix length, speedup, and task accuracy. Mismatched settings, such as ktrain = 8 , k infer = 4 and 
+
+ktrain = 8 , k infer = 16 , underperform the matched default.                         
+
+> Drafter visual selector AccLen ↑Spd. ↑Lat. ↓Acc. ↑
+> SparseVLM-style selector 2.86 2.48x 0.65 0.72 VisPruner-style selector 2.79 2.39x 0.66 0.71 TIGER routing-only 3.02 2.76x 0.63 0.73 TIGER full 3.37 3.24x 0.62 0.75
+
+Table 15: Adapter-style comparison with SparseVLM/VisPruner-style visual selectors on COCO Caption. All selectors are inserted into the same drafter-side speculative decoding pipeline. SparseVLM/VisPruner-style selectors improve visual-token efficiency, but TIGER routing better optimizes drafter–verifier agreement and achieves higher accepted prefix length. 
+
+a token-agreement reward , which rewards token-level agreement with the verifier without explicitly requiring a contiguous accepted prefix. TIGER uses the proposed accepted-prefix reward, where the reward equals the number of consecutively ac-cepted tokens from the beginning of the speculative block. The results show that KD-only provides a strong warm-start over the vanilla drafter, but it does not fully align the drafter with the verifier’s acceptance behavior. Binary acceptance provides only a coarse block-level signal, while token-agreement reward captures local token matches without explicitly op-timizing the contiguous accepted prefix that spec-ulative decoding can commit. In contrast, TIGER directly rewards longer verifier-accepted prefixes, yielding the best accepted prefix length, speedup, latency, and task accuracy across both model fami-lies. 
+
+E.8 Fine-Grained Visual Routing Ablations 
+
+We further ablate the internal design of TIGER’s visual gated routing module. The goal is to test whether the gains come merely from reducing the number of visual tokens, or from the proposed text-conditioned and visual-conditioned routing design. We compare TIGER with several routing variants: random Top-k selection, static image-only Top-k
+
+selection, a text-only query variant, TIGER routing without acceptance-aligned training, and the full TIGER model. The results show that token reduction alone is not sufficient: random Top-k and static image-only Top-k underperform text-conditioned vari-ants. The text-only query improves over non-conditioned selection, but still lags behind TIGER’s visual-conditioned query, suggesting that multi-modal query construction is useful for selecting evidence that supports drafter–verifier agreement. TIGER full performs best overall, indicating that visual-conditioned routing and acceptance-aligned training are complementary. 
+
+E.9 Qualitative Execution Traces 
+
+We provide qualitative execution traces to illustrate how TIGER’s routed visual context evolves across speculative decoding rounds. All examples are generated under the Qwen3-VL-8B setting and are drawn from a diverse set of benchmarks, includ-ing COCO Caption, ScienceQA, MuirBench, and Video-MME. Figures 5, 6, 7, 8, 9, and 10 cover im-age captioning, science-oriented visual reasoning, multi-image reasoning, snow-camouflage reason-ing, video temporal reasoning, and video spatial identification, respectively. We also include an ad-22 Model Method AccLen ↑ Spd. ↑ Lat. ↓ Acc. ↑
+
+LLaVA-v1.6-7B Vanilla drafter 1.06 1.04x 0.534 0.44 KD-only (w/o Accepted Alignment) 2.07 2.03x 0.493 0.60 KD + binary acceptance reward 2.17 2.19x 0.476 0.61 KD + token-agreement reward 2.28 2.33x 0.462 0.65 TIGER 2.67 2.57x 0.389 0.75 
+
+Qwen3-VL-4B Vanilla drafter 1.12 1.02x 0.768 0.46 KD-only (w/o Accepted Alignment) 1.67 1.56x 0.641 0.62 KD + binary acceptance reward 2.23 1.87x 0.601 0.65 KD + token-agreement reward 2.34 2.01x 0.557 0.69 TIGER 2.63 2.41x 0.415 0.78 
+
+Table 16: Objective comparison for accepted-prefix training. KD-only improves over the vanilla drafter, confirming the value of the distillation warm-start. However, simpler verifier-derived rewards still underperform TIGER. The accepted-prefix reward directly optimizes the contiguous verifier-accepted prefix, which is the runtime quantity governing speculative decoding efficiency.                                        
+
+> Variant Query / selector AccLen ↑Spd. ↑Lat. ↓Acc. ↑
+> Full visual context all visual tokens 2.24 1.38x 0.74 0.72 Random Top-krandom visual tokens 2.41 1.77x 0.69 0.66 Static image-only Top-kimage-only saliency 2.55 2.05x 0.66 0.69 Text-only query text-only hidden state 2.83 2.41x 0.64 0.72 TIGER routing-only visual-conditioned query 3.02 2.76x 0.63 0.73 TIGER full visual-conditioned query 3.37 3.24x 0.62 0.75
+
+Table 17: Fine-grained ablation of visual gated rout-ing on COCO Caption. Random and static selectors test whether reducing visual tokens alone is sufficient. The text-only query variant tests whether multimodal query construction is necessary. TIGER routing-only removes acceptance-aligned training, while TIGER full combines visual-conditioned routing with acceptance-aligned optimization. 
+
+ditional open-ended visual reasoning example in Figure 4, where the model answers a question about the emotions evoked by a bouquet of red roses. Across these examples, TIGER does not rely on a fixed visual subset throughout generation. In-stead, the routed visual tokens are recomputed at each speculative round according to the current tex-tual prefix. In the COCO Caption example, TIGER routes evidence around the main object and sur-rounding context to produce a visually grounded caption. In the ScienceQA examples, TIGER ac-cepts grounded answers such as Ardea herodias and 
+
+short-tailed weasel , while rejecting unnecessary explanatory continuation. In the MuirBench multi-image example, TIGER routes evidence across both images, accepts the answer Two dogs , and terminates after the verifier rejects redundant con-tinuation. In the Video-MME examples, TIGER handles both temporal and spatial visual reasoning: one trace routes evidence around the pulling-apart motion and related body cues, while another iden-tifies the person on the left whose leg is placed on the table. In the open-ended rose example, TIGER progressively shifts routing toward flower-related regions as the committed response becomes more visually grounded. These traces illustrate two recurring behaviors. First, text-conditioned routing adapts the drafter-side visual evidence to the current continuation, rather than relying on globally selected visual tokens. Second, verifier feedback filters unsup-ported or redundant draft suffixes, while visually grounded prefixes are committed. Although qual-itative, these examples are consistent with the quantitative results showing that TIGER improves verifier-accepted prefix length by strengthening drafter–verifier agreement on visually grounded continuations. 
+
+E.10 Routing Overhead, Caching, and KV-Cache Reuse 
+
+TIGER recomputes the routed visual context once per speculative round because the routing query depends on the current textual prefix. However, this does not require re-encoding the image at ev-ery round. The vision encoder is executed once per input to obtain the visual token bank V , and the visual-side projections used for routing can be cached because the image remains fixed throughout decoding. Concretely, for each input image, TIGER first computes and stores the visual token bank V and the projected visual tokens WvV . At speculative round j, TIGER only computes the current text-conditioned query qj = Wqhj , scores the cached 23 visual tokens, and performs Top-k selection: 
+
+si = q⊤ 
+
+> j
+
+Wv ¯vi
+
+√d , Sj = TopK( s1, . . . , s r+1 ; k).
+
+(28) The selected routed context V route  
+
+> j
+
+is then reused for the entire draft block of length γ. Thus, routing is performed once per speculative round, not once per drafted token. This design adds a lightweight routing cost while reducing the drafter-side visual interaction. If r is the number of full visual tokens and k ≪ r is the routing sparsity, TIGER introduces a routing term Croute (r), but replaces the drafter-side visual cost Cvis (r) with Cvis (k). The routing cost con-sists mainly of relevance scoring and Top-k selec-tion, which are much cheaper than re-encoding the image or attending to the full visual token bank throughout drafting. Importantly, dynamic routing does not change the verifier. The verifier still operates with the full visual token bank V and follows the standard spec-ulative decoding acceptance protocol. Therefore, verifier-side KV-cache reuse is unchanged from standard speculative decoding. Routing only af-fects the drafter-side visual interface. On the drafter side, the routed context is fixed within each spec-ulative block and can be reused while generating that block. The reported end-to-end latency includes the routing step. For longer decoding trajectories, rout-ing overhead scales with the number of speculative rounds rather than the number of generated tokens. Since TIGER increases the accepted prefix length, it reduces the expected number of verifier rounds, which helps amortize the additional routing cost. 
+
+Supplementary Materials Availability 
+
+To facilitate reproducibility, we have included the source code of TIGER in the submission. We have also included the two training datasets developed in this work, namely the KD training mixture and the GRPO training pool, together with data preparation scripts and documentation. 24 Question: What emotions might someone feel when seeing the flowers in this photo, and why? 
+
+Input image 
+
+The input image shows a bouquet of red roses. We visualize how TIGER’s routed visual tokens evolve across speculative decoding rounds and how verifier feedback shapes the committed output. 
+
+Round 1 routing Draft: Someone might feel sadness .
+
+Verifier: Accepts only a short prefix; the emotionally loaded interpretation diverges early from the visual evidence. 
+
+Committed output: Someone might feel . . . 
+
+Round 2 routing Draft: because the image shows 
+
+Verifier: Accepts the full drafted phrase, since it is grounded in the visible content of the image. 
+
+Committed output: Someone might feel . . . because the image shows 
+
+Round 3 routing Draft: a bouquet of red 
+
+Verifier: Accepts the full drafted phrase; routing remains concentrated on flower-related regions. 
+
+Committed output: Someone might feel . . . because the image shows a bouquet of red 
+
+Round 4 routing Draft: roses which may evoke 
+
+Verifier: Accepts a longer prefix than the baseline, preserving fluent and visually grounded continuation. 
+
+Final output: Someone might feel happiness or appreciation because the image shows a bouquet of red roses, which may evoke feelings of beauty or affection. 
+
+Figure 4: Execution trace of TIGER on a qualitative example. Each row shows the routed visual tokens selected at one speculative round together with the corresponding drafter output, verifier response, and committed text. The routed regions shift dynamically with the evolving textual prefix, leading to progressively better visual grounding and longer verifier-accepted prefixes. 
+
+25 Prompt: Please carefully observe the image and come up with a caption for the image. 
+
+Round 1 routing Prefix: Please carefully observe the image and come up with a caption for the image. 
+
+Draft block: Cinnamon roll with icing 
+
+Accepted prefix: Cinnamon roll with icing 
+
+Committed output: Please carefully observe the image and come up with a caption for the image. Cinnamon roll with icing 
+
+Round 2 routing Prefix: Please carefully observe the image and come up with a caption for the image. Cinnamon roll with icing 
+
+Draft block: on a red square 
+
+Accepted prefix: on a 
+
+Rejected suffix: red square 
+
+Verifier replacement: square 
+
+Committed output: Please carefully observe the image and come up with a caption for the image. Cinnamon roll with icing on a square 
+
+Round 3 routing Prefix: Please carefully observe the image and come up with a caption for the image. Cinnamon roll with icing on a square 
+
+Draft block: of wax paper. 
+
+Accepted prefix: of wax paper. 
+
+Committed output: Please carefully observe the image and come up with a caption for the image. Cinnamon roll with icing on a square of wax paper. 
+
+Figure 5: Execution trace of TIGER across speculative rounds on a captioning example. Each row shows the routed visual tokens selected at one round together with the current prefix, draft block, verifier decision, and committed output. The routed regions change with the evolving textual prefix, helping the drafter produce visually grounded continuations such as “cinnamon roll with icing” and “square of wax paper.” 
+
+26 Question: Select the organism in the same genus as the Goliath heron. 
+
+Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum 
+
+Round 1 routing Prefix: Select the organism in the same genus as the Goliath heron. Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum Answer: 
+
+Draft block: The answer is Ardea 
+
+Accepted prefix: The answer is Ardea 
+
+Committed output: Select the organism in the same genus as the Goliath heron. Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum Answer: The answer is Ardea 
+
+Round 2 routing Prefix: Select the organism in the same genus as the Goliath heron. Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum Answer: The answer is Ardea 
+
+Draft block: herodias, which shares 
+
+Accepted prefix: herodias 
+
+Rejected suffix: , which shares 
+
+Verifier replacement: .
+
+Committed output: Select the organism in the same genus as the Goliath heron. Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum Answer: The answer is Ardea herodias. 
+
+Round 3 routing Prefix: Select the organism in the same genus as the Goliath heron. Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum Answer: The answer is Ardea herodias. 
+
+Draft block: It belongs to genus 
+
+Accepted prefix: [none] 
+
+Rejected suffix: It belongs to genus 
+
+Verifier replacement: [EOS] 
+
+Committed output: Select the organism in the same genus as the Goliath heron. Options: 0) Falco sparverius 1) Ardea herodias 2) Tigrisoma mexicanum Answer: The answer is Ardea herodias. [EOS] 
+
+Figure 6: Execution trace of TIGER on a genus-classification example involving the Goliath heron. Each row shows the routed visual tokens selected at one speculative round together with the current prefix, draft block, verifier decision, and committed output. TIGER first accepts the visually and taxonomically grounded answer “Ardea herodias,” then rejects an unnecessary explanatory continuation and terminates generation. 
+
+27 Question: How many dogs are touching their muzzles together in one of the images? 
+
+Options: A) Three B) None of the choices provided C) Four D) Two E) One 
+
+Round 1 routing Prefix: How many dogs are touching their muzzles together in one of the images? Options: A) Three B) None of the choices provided C) Four D) Two E) One Answer: 
+
+Draft block: The answer is Two 
+
+Accepted prefix: The answer is Two 
+
+Committed output: How many dogs are touching their muzzles together in one of the images? Options: A) Three B) None of the choices provided C) Four D) Two E) One Answer: The answer is Two 
+
+Round 2 routing Prefix: How many dogs are touching their muzzles together in one of the images? Options: A) Three B) None of the choices provided C) Four D) Two E) One Answer: The answer is Two 
+
+Draft block: dogs are touching muzzles 
+
+Accepted prefix: dogs 
+
+Rejected suffix: are touching muzzles 
+
+Verifier replacement: .
+
+Committed output: How many dogs are touching their muzzles together in one of the images? Options: A) Three B) None of the choices provided C) Four D) Two E) One Answer: The answer is Two dogs. 
+
+Round 3 routing Prefix: How many dogs are touching their muzzles together in one of the images? Options: A) Three B) None of the choices provided C) Four D) Two E) One Answer: The answer is Two dogs. 
+
+Draft block: There are two dogs 
+
+Accepted prefix: [none] 
+
+Rejected suffix: There are two dogs 
+
+Verifier replacement: [EOS] 
+
+Committed output: How many dogs are touching their muzzles together in one of the images? Options: A) Three B) None of the choices provided C) Four D) Two E) One Answer: The answer is Two dogs. [EOS] 
+
+Figure 7: Execution trace of TIGER on a two-image visual reasoning example. Each row shows the routed visual tokens selected at one speculative round together with the current prefix, draft block, verifier decision, and committed output. TIGER routes evidence across both images, accepts the answer “Two dogs,” and rejects an unnecessary explanatory continuation before terminating generation. 
+
+28 Question: Which animal is also adapted to be camouflaged in the snow? 
+
+Options: 0) short-tailed weasel 1) common hawk-cuckoo 
+
+Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. 
+
+Round 1 routing Prefix: Which animal is also adapted to be camouflaged in the snow? Options: 0) short-tailed weasel 1) common hawk-cuckoo Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. Answer: 
+
+Draft block: The answer is short-tailed 
+
+Accepted prefix: The answer is short-tailed 
+
+Committed output: Which animal is also adapted to be camouflaged in the snow? Options: 0) short-tailed weasel 1) common hawk-cuckoo Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. Answer: The answer is short-tailed 
+
+Round 2 routing Prefix: Which animal is also adapted to be camouflaged in the snow? Options: 0) short-tailed weasel 1) common hawk-cuckoo Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. Answer: The answer is short-tailed 
+
+Draft block: weasel, which also 
+
+Accepted prefix: weasel 
+
+Rejected suffix: , which also 
+
+Verifier replacement: .
+
+Committed output: Which animal is also adapted to be camouflaged in the snow? Options: 0) short-tailed weasel 1) common hawk-cuckoo Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. Answer: The answer is short-tailed weasel. 
+
+Round 3 routing Prefix: Which animal is also adapted to be camouflaged in the snow? Options: 0) short-tailed weasel 1) common hawk-cuckoo Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. Answer: The answer is short-tailed weasel. 
+
+Draft block: Both turn white in 
+
+Accepted prefix: [none] 
+
+Rejected suffix: Both turn white in 
+
+Verifier replacement: [EOS] 
+
+Committed output: Which animal is also adapted to be camouflaged in the snow? Options: 0) short-tailed weasel 1) common hawk-cuckoo Context: Arctic wolves live in the Canadian Arctic and Greenland. The Arctic wolf is adapted to be camouflaged in the snow. Answer: The answer is short-tailed weasel. [EOS] 
+
+Figure 8: Execution trace of TIGER on a snow-camouflage reasoning example involving an Arctic wolf. Each row shows the routed visual tokens selected at one speculative round together with the current prefix, draft block, verifier decision, and committed output. TIGER accepts the answer “short-tailed weasel,” rejects an unnecessary explanatory continuation, and terminates generation after the verifier emits [EOS] .
+
+29 Question: When does the man take a long exhaled breath in this video? 
+
+Options: A) When he is running a marathon B) When he is solving a difficult math problem C) When he is releasing the tension D) When he is pulling apart 
+
+Round 1 routing Prefix: When does the man take a long exhaled breath in this video? Options: A) When he is running a marathon. B) When he is solving a difficult math problem. C) When he is releasing the tension. D) When he is pulling apart. Answer: 
+
+Draft block: The answer is D 
+
+Accepted prefix: The answer is D 
+
+Committed output: When does the man take a long exhaled breath in this video? Options: A) When he is running a marathon. B) When he is solving a difficult math problem. C) When he is releasing the tension. D) When he is pulling apart. Answer: The answer is D 
+
+Round 2 routing Prefix: When does the man take a long exhaled breath in this video? Options: A) When he is running a marathon. B) When he is solving a difficult math problem. C) When he is releasing the tension. D) When he is pulling apart. Answer: The answer is D 
+
+Draft block: When he is pulling 
+
+Accepted prefix: When 
+
+Rejected suffix: he is pulling 
+
+Verifier replacement: .
+
+Committed output: When does the man take a long exhaled breath in this video? Options: A) When he is running a marathon. B) When he is solving a difficult math problem. C) When he is releasing the tension. D) When he is pulling apart. Answer: The answer is D When. 
+
+Round 3 routing Prefix: When does the man take a long exhaled breath in this video? Options: A) When he is running a marathon. B) When he is solving a difficult math problem. C) When he is releasing the tension. D) When he is pulling apart. Answer: The answer is D When. 
+
+Draft block: apart and exhales deeply 
+
+Accepted prefix: [none] 
+
+Rejected suffix: apart and exhales deeply 
+
+Verifier replacement: [EOS] 
+
+Committed output: When does the man take a long exhaled breath in this video? Options: A) When he is running a marathon. B) When he is solving a difficult math problem. C) When he is releasing the tension. D) When he is pulling apart. Answer: The answer is D When he is pulling apart. [EOS] 
+
+Figure 9: Execution trace of TIGER on a video reasoning example about exhaled breath while pulling apart. Each row shows the routed visual tokens selected at one speculative round together with the current prefix, draft block, verifier decision, and committed output. TIGER initially accepts the answer option, then rejects redundant or unsupported continuation as the verifier enforces the final accepted response. 
+
+30 Question: Which person placed their leg on the table? 
+
+Options: A) The one on top B) The one on the right C) The one on the left D) The one below 
+
+Round 1 routing Prefix: Which person placed their leg on the table? Options: A) The one on top. B) The one on the right. C) The one on the left. D) The one below. Answer: 
+
+Draft block: The answer is C 
+
+Accepted prefix: The answer is C 
+
+Committed output: Answer: The answer is C 
+
+Round 2 routing Prefix: Answer: The answer is C 
+
+Draft block: The one on the left 
+
+Accepted prefix: The one on the left 
+
+Verifier replacement: .
+
+Committed output: Answer: The answer is C) The one on the left. 
+
+Round 3 routing Prefix: Answer: The answer is C) The one on the left. 
+
+Draft block: their leg resting on 
+
+Accepted prefix: [none] 
+
+Rejected suffix: their leg resting on 
+
+Verifier replacement: [EOS] 
+
+Committed output: Answer: The answer is C) The one on the left. [EOS] 
+
+Figure 10: Execution trace of TIGER on a visual reasoning example about identifying the person with a leg on the table. Each row shows the routed visual tokens selected at one speculative round together with the current prefix, draft block, verifier decision, and committed output. TIGER first accepts the answer option corresponding to the person on the left, then rejects an unnecessary explanatory continuation and terminates generation. 
+
+31
