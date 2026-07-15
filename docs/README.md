@@ -6,58 +6,47 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-14
-- 运行时间：2026-07-14 20:56:04 UTC
+- 最新运行日期：2026-07-15
+- 运行时间：2026-07-15 21:28:34 UTC
 - 运行状态：成功
-- 本次总论文数：12
+- 本次总论文数：9
 - 精读区：6
-- 速读区：6
+- 速读区：3
 
 ### 今日简报（AI）
-今日推荐12篇论文，精读聚焦多模态推测解码与低延迟推理。
-最值得关注TIGER（10.0）和DSpark（9.0）两项推测解码研究，前者实现文本引导视觉门控路由，后者引入置信度调度结合半自回归生成。
-普通读者可重点了解推测解码加速推断的原理，以及路由分配策略对推理效率的影响。
-- 详情：[/202607/14/README](/202607/14/README)
+今日精选6篇论文，聚焦自回归语言模型并行化加速与长视频理解；最推荐精读《Unlocking Parallelism...》与《Trees from Marginals》，前者通过渐进树草稿实现高效投机解码，后者用因子化先验改进自回归草稿生成；建议关注投机解码在混合专家模型中的成本感知优化。
+- 详情：[/202607/15/README](/202607/15/README)
 
 ### 精读区论文标签
-1. [TIGER: Text-Conditioned Visual Gated Routing with Acceptance Alignment for Multimodal Speculative Decoding](/202607/14/2607.11131v1-tiger-text-conditioned-visual-gated-routing-with-acceptance-alignment-for-multimodal-speculative-decoding)  
-   标签：评分：10.0/10、query:vlm-spec
-   evidence：专为多模态VLM设计的投机解码框架
-2. [DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation](/202607/14/2607.05147v1-dspark-confidence-scheduled-speculative-decoding-with-semi-autoregressive-generation)  
+1. [Unlocking Parallelism in Autoregressive Language Models via Speculative Decoding with Progressive Tree Drafting](/202607/15/2607.10661v1-unlocking-parallelism-in-autoregressive-language-models-via-speculative-decoding-with-progressive-tree-drafting)  
+   标签：评分：10.0/10、query:llm
+   evidence：通过渐进树草稿实现LLM投机解码的并行性
+2. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/15/2607.06763v1-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：具有置信度调度验证和半自回归生成的投机解码
-3. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/14/2607.06763v2-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
+   evidence：提出Weaver，一种用于投机解码的轻量级自回归适配器，构建提议树并支持无回滚验证
+3. [A Practical Investigation of Training-free Relaxed Speculative Decoding](/202607/15/2607.08690v1-a-practical-investigation-of-training-free-relaxed-speculative-decoding)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：提出了Weaver自回归草稿模型，通过树验证改进投机解码
-4. [A Practical Investigation of Training-free Relaxed Speculative Decoding](/202607/14/2607.08690v1-a-practical-investigation-of-training-free-relaxed-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：针对大语言模型的免训练宽松投机解码的实践研究
-5. [Unlocking Parallelism in Autoregressive Language Models via Speculative Decoding with Progressive Tree Drafting](/202607/14/2607.10661v1-unlocking-parallelism-in-autoregressive-language-models-via-speculative-decoding-with-progressive-tree-drafting)  
-   标签：评分：9.0/10、query:llm
-   evidence：渐进树草稿投机解码加速LLM推理
-6. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/14/2607.06763v1-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
-   标签：评分：8.0/10、query:llm-sd
-   evidence：投机解码中的树形草稿生成与因子化先验
+   evidence：无训练宽松投机解码方法
+4. [TriRoute: Unified Learned Routing for Joint Adaptive Attention, Experts, and KV-Cache Allocation](/202607/15/2607.06601v1-triroute-unified-learned-routing-for-joint-adaptive-attention-experts-and-kv-cache-allocation)  
+   标签：评分：8.0/10、query:llm
+   evidence：提出统一学习路由，联合自适应注意力、专家选择和KV缓存分配，优化大语言模型推理效率
+5. [Reducing Temporal Redundancy for Efficient Vision-Language-Action Inference](/202607/15/2607.12287v1-reducing-temporal-redundancy-for-efficient-vision-language-action-inference)  
+   标签：评分：8.0/10、query:vlm-spec
+   evidence：通过减少时序冗余实现高效的视觉-语言-动作推理
+6. [VisCo: Leveraging Large Language Models as Intrinsic Encoders for Visual Token Compression](/202607/15/2607.12756v1-visco-leveraging-large-language-models-as-intrinsic-encoders-for-visual-token-compression)  
+   标签：评分：8.0/10、query:vlm-spec
+   evidence：视觉标记压缩加速VLM推理
 
 ### 速读区论文标签
-1. [TriRoute: Unified Learned Routing for Joint Adaptive Attention, Experts, and KV-Cache Allocation](/202607/14/2607.06601v1-triroute-unified-learned-routing-for-joint-adaptive-attention-experts-and-kv-cache-allocation)  
-   标签：评分：8.0/10、query:llm
-   evidence：联合路由优化注意力、专家选择和KV缓存分配以提升LLM效率
-2. [AnchorPrune: Relevance-Anchored Contextual Expansion for Visual Token Pruning](/202607/14/2607.07033v2-anchorprune-relevance-anchored-contextual-expansion-for-visual-token-pruning)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：视觉标记剪枝加速VLM推理
-3. [SiFAR: Synchronization-Free All-Reduce for Low-Latency LLM Inference](/202607/14/2607.08973v1-sifar-synchronization-free-all-reduce-for-low-latency-llm-inference)  
-   标签：评分：8.0/10、query:llm
-   evidence：通过无同步全规约实现低延迟大语言模型推理
-4. [Spectral Heat Flow for Conservative Token Condensation in Vision-Language Models](/202607/14/2607.10640v1-spectral-heat-flow-for-conservative-token-condensation-in-vision-language-models)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：无需训练的令牌凝聚以实现VLM推理加速
-5. [Seeing is Free, Speaking is Not: Uncovering the True Energy Bottleneck in Edge VLM Inference](/202607/14/2607.09520v1-seeing-is-free-speaking-is-not-uncovering-the-true-energy-bottleneck-in-edge-vlm-inference)  
+1. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/15/2607.06763v2-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
+   标签：评分：7.0/10、query:llm
+   evidence：面向大语言模型投机解码的自回归草稿与树验证
+2. [Gaussian Mixture Modeling for Event-Aware Visual Allocation in Long Video Understanding](/202607/15/2607.12557v1-gaussian-mixture-modeling-for-event-aware-visual-allocation-in-long-video-understanding)  
    标签：评分：7.0/10、query:vlm-spec
-   evidence：系统性地分析了边缘设备上VLM推理的能量消耗，揭示了违反直觉的瓶颈。
-6. [Sparse Attention for Dense Open-Vocabulary Prediction in CLIP](/202607/14/2607.07135v2-sparse-attention-for-dense-open-vocabulary-prediction-in-clip)  
+   evidence：提出事件感知的关键帧选择以减少LVLM的计算开销
+3. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/15/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
    标签：评分：6.0/10、query:llm
-   evidence：在CLIP中用entmax替换softmax实现推理时稀疏注意力
+   evidence：面向MoE大语言模型的代价感知投机解码
 
 
 <div class="dpr-home-promo-card">

@@ -1,0 +1,3817 @@
+Title: A Practical Investigation of Training-free Relaxed Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2607.08690v1
+
+Published Time: Fri, 10 Jul 2026 01:11:03 GMT
+
+Number of Pages: 29
+
+Markdown Content:
+# A Practical Investigation of Training-free Relaxed Speculative Decoding 
+
+Guoxuan Xia, Luka Ribar, g.xia21@imperial.ac.uk 
+
+Paul Balanca paulb@graphcore.ai Work done at Graphcore 
+
+Abstract 
+
+Speculative decoding accelerates sampling from an autoregressive LLM by using a faster auxiliary model to draft tokens which are then verified in parallel by the LLM. Standard speculative decoding is lossless: its rejection and resampling steps exactly preserve the LLM’s sampling distribution. Recent work argues that relaxing this strict guarantee can yield further speed-ups, controlled capability-speed trade-offs , or even capability gains . We practically investigate training-free relaxed speculative decoding techniques, unify existing approaches within a shared framework, benchmark them on contemporary settings, and distil takeaways and empirical findings for practitioners. Important takeaways include: relaxation can require considerable capability evaluation unlike lossless speculative decoding, and many relaxed approaches rely on a drafter that is a good language model, making them unsuited for lightweight dedicated multi-token-prediction drafters. Code is available at: https://github.com/graphcore-research/relaxed-spec-dec-repro .
+
+1 Introduction 
+
+Large language models (LLMs) dominate modern applications of machine learning (Sajadieh et al., 2026). Language modelling as a task is itself in turn dominated by autoregressive (AR ) models (Vaswani et al., 2017; Brown et al., 2020), i.e . models that predict one token after another in series given previous tokens. Such AR models represent the frontier of capability, enabling transformative outcomes in programming, scientific research, and many other applications (Sajadieh et al., 2026). A core issue, however, is the inherent slowness of generation that arises from the requirement to sequentially produce tokens, especially in an era of abundant parallel compute resources (You et al., 2026). Applications often require lower latencies in order to satisfy user requirements (Anthropic, 2025; OpenAI, 2026b) – intuitively, snappier LLM responses enable greater human productivity. One solution to this problem is speculative decoding ( spec-dec ) (Leviathan et al., 2023), which is motivated by the idea that for text generation, weaker but faster models may still be able to “speculate” decent short-range spans of text. Given an AR LLM, spec-dec employs a low-latency auxiliary model to “draft” tokens quickly, which are then “verified” in parallel using the LLM. This better utilises parallel compute and reduces overall latency. A key feature of this algorithm is that “bad” draft tokens are stochastically rejected and resampled during verification in such a way that strictly preserves 
+
+the LLM’s output distribution, giving theoretically lossless acceleration. Speculative decoding is seeing increasing adoption across a wide range of models, such as DeepSeek and Qwen (DeepSeek-AI, 2024; Qwen Team, 2026), and inference frameworks such as vLLM and SGLang (Kwon et al., 2023; Zheng et al., 2024; Schmitt-Ulms et al., 2025). Recently, a new body of research has argued that the strict distribution preservation of speculative decoding is disadvanta-geous; generally, it proposes to relax this requirement in favour of sampling from an alternative distribution to the original LLM. There are a number of motivations for doing this, for example, to enable the option of trading off task capability for speed-up (Holsman et al., 2025), increasing speed-up by accepting semantically valid tokens that strict speculative decod-ing would reject (Bachmann et al., 2025), or even improving task capability (Yuan et al., 2024). In this work, we perform a practical investigation of such relaxed speculative decoding approaches (in particular, those that are training-free). We aim to better inform practitioners and researchers about the practical utility of such approaches, given the variety of methods and experimental settings in recent literature. To this end, we present the following key contributions :1. We provide a primer on strict speculative decoding ( strict spec-dec ), presenting the algorithm and explaining 
+
+why and when it produces latency speed-ups. We also discuss how speed-up is measured and modelled, as well as how inference infrastructure ( i.e . the hardware-software stack) can affect realisable speed-up. 1arXiv:2607.08690v1 [cs.LG] 9 Jul 2026 Algorithm 1 strict spec-dec 
+
+Require: draft model q, verifier model p,context x<t , draft length Ndraft 
+
+▷ DRAFT ◁▷ Sample Ndraft tokens (auto-regressively) from q ◁
+
+for i = 0 to Ndraft − 1 do 
+
+qt+i(·) = q(·| x<t +i)
+
+xt+i ∼ qt+i(·)
+
+▷ VERIFY ◁▷ Run p in parallel to score the draft tokens ◁pt+i(·) = p(·| x<t +i) for i ∈ { 0, . . . , N draft }
+
+▷ Accept or reject draft tokens ◁ai ∼ Ber 
+
+(
+
+min 
+
+{
+
+1, pt+i(xt+i)
+
+> qt+i(xt+i)
+
+}) 
+
+∀i ∈ { 0, . . . , N draft − 1}; aNdraft = 0 
+
+▷ Find the earliest draft rejection position ◁iend = min {i ∈ { 0, . . . , N draft } : ai = 0 }
+
+if iend < N draft then 
+
+▷ If draft rejection occurs ◁▷ Sample a new token from the residual distribution ◁pres (·) = norm(max {0, p t+iend (·) − qt+iend (·)})
+
+Sample xt+iend ∼ pres (·)
+
+else 
+
+▷ All draft tokens accepted ◁▷ Sample bonus next token after end of draft from p ◁pbonus (·) = pt+Ndraft (·)
+
+Sample xt+iend ∼ pbonus (·)
+
+▷ Return accepted draft tokens + additional token ◁
+
+return xt, . . . , x t+iend 
+
+Algorithm 2 relaxed spec-dec 
+
+Require: q, p, x<t , Ndraft , relaxation parameter α,relaxed target distributions πrej , π res , π bonus 
+
+▷ DRAFT ◁
+
+for i = 0 to Ndraft − 1 do 
+
+qt+i(·) = q(·| x<t +i)
+
+xt+i ∼ qt+i(·)
+
+▷ VERIFY ◁pt+i(·) = p(·| x<t +i) for i ∈ { 0, . . . , N draft }
+
+▷ Construct relaxed target distributions π ◁πrej 
+
+> t+i
+
+(·) = πrej [qt+i, p t+i, x t+i, α ]( ·)
+
+πres 
+
+> t+i
+
+(·) = πres [qt+i, p t+i, x t+i, α ]( ·)
+
+for i ∈ { 0, . . . , N draft }
+
+▷ Replace rejection, residual and bonus distributions with π ◁ ai ∼ Ber 
+
+(
+
+min 
+
+{
+
+1, πrej 
+
+> t+i(xt+i)
+> qt+i(xt+i)
+
+}) 
+
+∀i ∈ { 0, . . . , N draft − 1}; aNdraft = 0 
+
+iend = min {i ∈ { 0, . . . , N draft } : ai = 0 }
+
+if iend < N draft then 
+
+pres (·) = norm (max {0, π res  
+
+> t+iend
+
+(·) − qt+iend (·)})
+
+Sample xt+iend ∼ pres (·)
+
+else 
+
+▷ Optional drafter step if needed for πbonus ◁qt+Ndraft (·) = q(·| x<t +Ndraft )
+
+πbonus  
+
+> t+Ndraft
+
+(·) = πbonus [qt+Ndraft , p t+Ndraft , x t+Ndraft , α ]( ·)
+
+pbonus (·) = πbonus  
+
+> t+Ndraft
+
+(·)
+
+Sample xt+iend ∼ pbonus (·)
+
+return xt, . . . , x t+iend 
+
+Figure 1: Left : In strict speculative decoding tokens are rapidly drafted and then verified in parallel. Draft tokens are stochastically rejected; the first rejected token is resampled such that overall sampling is from verifier target distribution 
+
+p. Right : Relaxed speculative decoding can replace p with relaxed target distribution π at different points. 2. We build a taxonomy over the literature of relaxed speculative decoding ( relaxed spec-dec ), organising diverse methods and narratives under a unified framework. The aim is for the reader to better understand not only how existing approaches are concretely implemented, but also their motivating scenarios, and how they relate to each other. 3. We benchmark a range of relaxed speculative decoding approaches on modern drafter-verifier pairs and reasoning benchmarks over different inference-time parameter settings. This allows us to not only fairly compare approaches amongst themselves, but also against their respective paper narratives. This is important as the literature suffers generally from narrow and disparate experimental settings that preclude easy comparison. 4. In relation to the problem setting of (relaxed) spec-dec , we extract practical Takeaway s for the reader. Based on our experimental investigation of relaxed spec-dec methods, we also present practical empirical Finding s. 
+
+2 Preliminaries 
+
+We provide a technical introduction to strict speculative decoding and then introduce a unified framework for relaxed speculative decoding. A glossary of notation can be found in Appendix A for the benefit of the reader. 
+
+2.1 Speculative Decoding ( strict spec-dec )
+
+As previously mentioned, many applications of machine learning are dominated by autoregressive ( AR ) LLMs that necessarily need to generate one token after the other in sequence, and this is an issue as lower generation latency is important for many applications. At the same time, AR LLM decoding is generally memory bound , that is to say, latency is dominated by repeatedly moving model weights and KV-cache activations, leaving available parallel compute underutilised (Ma & Patterson, 2026). The consequence of this spare compute capacity is that increasing parallelism over tokens ( e.g . via batching) has a sublinear, often very small, impact on latency. 2Following from the above, speculative decoding (Leviathan et al., 2023) is an algorithm that aims to better utilise available compute resources via parallelisation in order to reduce generation latency. Importantly, it provably samples from the same distribution as the LLM-to-be-accelerated, i.e . it is lossless acceleration. Algorithm 1 describes the approach: a fast auxiliary drafter model q rapidly proposes an Ndraft -long segment, which is then verified in parallel by the LLM-to-be-accelerated p (the verifier). Each draft token x ∈ { 0, . . . , V −1}, where V is the vocab size, is stochastically accepted/rejected based on Bernoulli random variable a ∼ Ber(min {1, p (x)/q (x)}). At the first rejection ( a = 0 ), the rejected token is resampled from the residual distribution norm(max {0, p (·) − q(·)}), where norm simply normalises to a valid probability distribution, recovering the distribution of p losslessly. A detail that is sometimes overlooked is that the verifier p also produces next-token logits for the final drafter token. If all draft tokens are accepted, then a bonus token is sampled from these logits. In fact, amongst algorithms that sample from p by drafting a token from q, and then randomly rejecting and resampling, the above achieves the lowest possible expected rejection rate (Yin et al., 2024). 
+
+Modelling and understanding speed-up. Intuitively, we expect speed-ups to be large when 1) the cost of the auxiliary drafter is much lower than the cost of verification, 2) the cost of parallel verification is not much more than a single AR decoding step, and 3) long draft segments are accepted. We will formalise this intuition in this section. The speed-up S achieved by speculative decoding can be quantified as, 
+
+S = spec-dec token throughput 
+
+AR token throughput = time for AR to generate ¯laccept + 1 tokens time to draft and verify Ndraft tokens ≈ (¯laccept + 1) CAR 
+
+Ndraft Cdrafter + Cverify 
+
+, (1) where Ndraft is the draft length, ¯laccept is the average number of accepted draft tokens at Ndraft , CAR is the time for one AR 
+
+decoding step of the main LLM p, Cdrafter is the time for one decoding step of the auxiliary drafter model q,1 and Cverify is the time for one parallel verification step. Eq. (1) shows that for greater speed-up, verification cost should be minimised, 
+
+i.e . close to the cost of a single original AR step, Cverify ≈ CAR . This typically happens, as discussed above, when AR 
+
+generation is memory bound so additional parallel compute has a small effect on inference latency. If the compute burden for each verification step is increased by higher token parallelism, then Cverify may become meaningfully larger than CAR , reducing speed-up. Empirical results support this, with investigations showing that increasing batch size can reduce speed-ups (Singh et al., 2025; Liu et al., 2026). In the later analysis of this work, we will make the common assumption Cverify ≈ CAR , allowing us to define the relative cost crel = Cdrafter /C AR giving a simplified speed-up model, 
+
+S ≈ ¯laccept + 1 1 + Ndraft crel 
+
+. (2) Average accepted draft length ¯laccept is intuitively higher when the drafter distribution is better aligned (over the draft length) with the verifier p. In fact, the per-token acceptance probability (on average over the drafter distribution), 
+
+Pr( accept draft token ) = E[a] = 1 − TV (q, p ) = 1 − 12
+
+∑ 
+
+> x
+
+|p(x) − q(x)|, (3) is related to the total-variation distance between q and p (Yin et al., 2024). Considering both Eqs. (1) and (2) we can see that we want to make design choices that reduce the cost of the drafter Cdrafter and increase the average accepted length 
+
+¯laccept . The draft length Ndraft on the other hand is an inference-time hyperparameter, and is subsequently optimised for maximum speed-up after other design choices are selected. It is important to note that the above factors interact ,complicating the maximisation of speed-up. A more lightweight drafter could reduce both Cdrafter and ¯laccept and may only achieve greater final speed-up S after Ndraft is re-optimised. Simply decreasing drafter cost without changing its distribution q, e.g . via kernel or hardware optimisations, may change the optimal value of Ndraft . This is shown on the left of Fig. 2. Suppose we have a drafter that achieves ¯laccept = 2 .5 when Ndraft = 3 and ¯laccept = 5 when Ndraft = 8 ;if we model speed-up according to Eq. (2) as crel is reduced, the better choice of draft length flips, since it becomes cheaper to draft more tokens, i.e . longer Ndraft is “unlocked”. Moreover, speed-up is sensitive to crel , increasingly so as crel is reduced. Suppose we can also improve ¯laccept via better drafter alignment; we see that the (multiplicative) effect is highest when crel is low and Ndraft is high. Moreover, unlocking a longer Ndraft can give greater headroom for 
+
+¯laccept to improve. Thus, a practictioner may choose to focus on reducing crel first, and then consider improving ¯laccept .
+
+Key Takeaway 1: There are many factors that contribute to spec-dec speed-up. We want to be memory bound so the cost of parallel verification is similar to a single AR step. Drafter q should be low-cost and well-aligned with the LLM p so that a draft can be quickly generated and many draft tokens are accepted. After other design choices have    
+
+> 1We note that drafting doesn’t have to be autoregressive, and some recent work proposes one-step parallel drafting (An et al., 2026; Chen et al., 2026). Modelling such approaches would require a simple adjustment to the denominator of Eq. (1) to Cdrafter +Cverify . In this work, we will focus on autoregressive drafters as they represent the majority of existing drafters for speculative decoding.
+
+30.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8                    
+
+> relative cost crel
+> 2
+> 4
+> 6
+> speed-up  S
+> S=̄laccept + 1 1 + Ndraft crel
+> Speed-up Model ̄
+> laccept = 2.5 @ Ndraft = 3 ̄
+> laccept = 5 @ Ndraft = 8
+> improved q̄
+> laccept = 2.8 @ Ndraft = 3 ̄
+> laccept = 6 @ Ndraft = 8 1.0×
+> speed-up →
+> task capability →  relaxation ( α) trades
+> capability for more speed
+> same distribution,
+> speed-up with
+> same capability requires additional
+> capability evals
+> AR
+> strict
+> spec-dec
+> Relaxed spec-dec Trade-off
+
+Figure 2: Left : The speed-up model in Eq. (2). Drafter relative cost crel has a strong impact on speed-up, the best choice of Ndraft , and the speed-up gain from increased average accepted length ¯laccept . Right : strict spec-dec gives lossless speed-up, whilst relaxed spec-dec trades capability for even more speed. If deployment is capability constrained , the former is lossless so it doesn’t require the burden of additional capability evaluation, whilst the latter does. 
+
+CAR AR mode Cdrafter AR mode crel spec-dec mode Cdrafter spec-dec mode crel 
+
+Qwen3 0.6B drafter + 32B verifier 19 .53 ms/token 5.19 ms/token 0.266 16 .54 ms/token 0.847 
+
+Table 1: Inference costs on a single-GPU NVIDIA GH200 Grace Hopper Superchip, using vLLM 0.20.1 and PyTorch 2.11.0+cu130. spec-dec mode is draft token cost for stock vLLM speculative decoding at Ndraft = 5 . vLLM’s built-in 
+
+spec-dec implementation is under-optimised with high crel , see Appendix G for a discussion. been fixed, the draft length Ndraft should then be optimised. These factors interact and should be considered together, 
+
+e.g . a smaller drafter may draft faster but have more tokens rejected and change the optimal Ndraft .We note the existing research often targets a single aspect ( e.g . draft acceptance or drafter cost) and then compares speed-up under a limited setting. For example, an increase in ¯laccept may be measured in a paper for a specific Ndraft ,however, real-world Cdrafter may lead a practitioner to choose a lower optimal Ndraft where real speed-up improvements are much lower. “Real-world” speed-ups may also be measured in settings where neither crel nor Ndraft are well optimised, failing to provide readers with a clear idea of how an approach may translate to realisable improvements. For example, Liu et al. (2026); Hao & Mou (2026) use vLLM to measure speed-up, however, we find that for separate draft models, vLLM has crel much higher than what could be ideally achieved (see Tab. 1). In this paper, we choose to leverage Eq. (2) to illustrate a more holistic view of speed-up for the reader: for different methods, we measure ¯laccept 
+
+at different draft lengths Ndraft and estimate speed-ups for different relative drafter costs crel . As previously discussed, and shown in the left of Fig. 2, a speed-up model like Eq. (2) allows a practitioner to understand the impact on speed-up of different optimisations, allowing them to make more informed improvements. 
+
+Takeaway 2: Although research papers may emphasise end-to-end “real” speed-ups, these are often measured on a narrow software/hardware setup, which may differ to a practitioner’s own. A flexible speed-up proxy model enables practitioners to reason over varying deployment scenarios, illuminating bottlenecks and guiding optimisations such as kernel engineering. Real measurements are nevertheless important to validate final behaviour at deployment. 
+
+2.2 Relaxing Speculative Decoding ( relaxed spec-dec )
+
+In this paper, we are interested in investigating a recent area of research which argues that the exact preservation of the verifier distribution p is too “strict” and that by “relaxing” this requirement, advantages can be obtained over strict spec-dec . We narrow our scope to training-free approaches that apply a per-token relaxation away from p/strict spec-dec , to keep comparisons manageable. Such approaches can be applied directly to existing spec-dec setups without the overhead of additional training and avoid the associated risk of distribution drift from the training data. We start by introducing a framework that unifies existing approaches and then discuss some practical caveats of deployment. Our framework is laid out in Algorithm 2. We introduce relaxed target distributions π that replace p at the rejection, residual sampling, and bonus sampling steps in the original strict spec-dec algorithm ( πrej , π res , π bonus ). The relaxed target distributions π[q, p, x, α ]( ·) depend on a relaxation parameter α and can potentially depend on the drafter and verifier distributions p, q as well as the drafted token x. Given the diverse presentation in the literature, our framework allows us to cleanly describe and compare various existing approaches under a unified setting. We note that “relaxing” the target distribution is typically motivated by the idea of trading off task capability for 
+
+generative speed by accepting more draft tokens than strict spec-dec (Narasimhan et al., 2025; Holsman et al., 2025) 4(we will discuss paper-specific motivations and narratives later). This is illustrated in the right of Fig. 2. Practically, de-ployment is either capability constrained or speed constrained, that is to say one must achieve a target capability or speed. Which type of constraint then determines what must be evaluated in order to tune the relaxation parameter α for deploy-ment. Therefore, a practitioner should consider the cost of evaluation when deciding whether to choose to deploy relaxed speculative decoding. For example, it can be easy to measure latencies on the fly for a speed-constrained edge application and accordingly adjust α, however, the cost of evaluating the capability of a frontier generalist model across all intended deployment scenarios may be considerable (Liang et al., 2023; Ghosh et al., 2026; OpenAI, 2026a). Crucially, strict spec-dec doesn’t require any capability re-evaluation (in theory) as it preserves the distribution of original model p.2
+
+Key Takeaway 3: “Relaxing” speculative decoding is typically motivated by the trading off of task capability for more generative speed . When deployment is capability constrained , no additional capability evaluation is needed for 
+
+strict spec-dec , as it preserves the verifier distribution. On the other hand, relaxation necessitates re-evaluation (Fig. 2 right). If evaluation is costly, it may not be worth deploying relaxed spec-dec over strict spec-dec .
+
+One important detail that many existing works neglect is that deviating from p via relaxation may change the average generated response length vs AR or strict spec-dec , which may affect overall generation time and thus speed-up. Thus for relaxed speculative decoding speed-up should be estimated using, 
+
+Srelax ≈ ¯LAR 
+
+¯Lrelax 
+
+(¯laccept + 1) CAR 
+
+Ndraft Cdrafter + Cverify 
+
+≈ ¯LAR 
+
+¯Lrelax 
+
+¯laccept + 1 1 + Ndraft crel 
+
+, (4) where ¯LAR , ¯Lrelax are the average generation lengths for AR and relaxed spec-dec . Intuitively, if a relaxed distribution 
+
+π tends to generate longer/shorter responses than p then the effective speed-up will decrease/increase. 
+
+Takeaway 4: Since relaxed spec-dec samples from a different distribution to verifier p, speed-up should take into account not only draft acceptance/token throughput but also changes in average response length ¯L (Eq. (4)). 
+
+3 Related Work 
+
+We discuss literature that is relevant to accelerating speculative decoding, and thus may be of interest to the reader, but exists outside of the scope of this paper’s investigation. 
+
+Learned relaxed speculative decoding. A number of works, motivated by the idea that strict spec-dec may reject draft tokens that are still semantically correct, suggest to learn a module that decides dynamically to accept/reject draft tokens. Judge Decoding (Bachmann et al., 2025), inspired by LLM-as-a-Judge, proposes to train an auxiliary classifier on manually annotated data for this purpose, whilst follow-up AutoJudge (Garipov et al., 2025) removes manual annotation by automatically verifying downstream correctness. DIVERSED (Wang et al., 2026) uses reinforcement learning based on task rewards to learn a module that dynamically adjusts a relaxed target distribution. As mentioned before, these are out of scope for our investigation due to their additional complexity and reliance on an auxiliary training data distribution. 
+
+Accelerating strict spec-dec . Since it was originally introduced by Leviathan et al. (2023), there have been a varied range of approaches proposed to further accelerate strict spec-dec . SpecInfer (Miao et al., 2024) and SEQUOIA (Chen et al., 2024) use tree-based drafting to generate multiple drafts and increase acceptance. REST (He et al., 2024) uses text retrieval to propose drafts at a low cost, rather than using a neural network for the drafter. SpecDec++ (Huang et al., 2025) proposes to train an additional module that adaptively varies the draft length during generation. Block Verification (Sun et al., 2025) perform rejection jointly on blocks of draft tokens, rather than token by token, increasing draft acceptance. Speculative Speculative Decoding (Kumar et al., 2026) parallelises drafting and verification by having the drafter precompute continuations for likely verifier outcomes whilst verification is ongoing, thereby hiding drafter latency if the verification outcome is successfully pre-empted. DistillSpec (Zhou et al., 2024) and LK Losses (Samarin et al., 2026) train the drafter to better align with the verifier distribution, increasing draft token acceptance rates. 
+
+Dedicated drafter architectures. There has been strong trend in the community towards researching lightweight dedicated drafter modules that can rapidly propose short drafts. Such approaches aim to minimise drafter cost whilst maintaining decent draft acceptance, leading to strong practical speed-up (see Fig. 2 left). Medusa (Cai et al., 2024) uses multiple prediction heads for drafting, whilst the EAGLE series (Li et al., 2024; 2025) propose to use a shallow auxiliary autoregressive transformer. Recently PARD (An et al., 2026), D-Flash (Chen et al., 2026) and DSpark (Cheng et al., 2026) explore further acceleration via parallel/semi-autoregressive draft token generation. These are 
+
+> 2There still may be numerical effects that lead to deviations, so small-scale sanity checks may still be necessary.
+
+5now generally referred to as multi-token-prediction (MTP) modules and are seeing increasing real-world adoption, frequently appearing in LLM releases such as DeepSeek, Qwen, Gemma, Nemotron, and GLM (DeepSeek-AI, 2024; Cheng et al., 2026; Qwen Team, 2026; Lacombe & Grootendorst, 2026; NVIDIA, 2026; GLM-5 Team, 2026), as the default (and sometimes only) supported spec-dec drafter within inference frameworks, e.g . vLLM, SGLang (Kwon et al., 2023; Zheng et al., 2024; Schmitt-Ulms et al., 2025). By bundling such a module together with an LLM release, deployment complexity is reduced as there is no need to manage and serve an entirely separate model. 
+
+4 A Taxonomy of (Training-free) Relaxed Speculative Decoding 
+
+We now provide the reader with an organised summary of a number of relevant approaches in the literature, that aim to relax speculative decoding in a training-free per-token manner. The aim is for the reader to better understand and compare the motivating narratives and concrete algorithms proposed under a unified framework. Tab. 2 contains a full summary of narrative categorisations and algorithmic details for the different methods investigated in this paper (methods are fully specified when Tab. 2 is combined with Algorithm 2). 
+
+Bonus token. Before introducing the methods we discuss a practical detail that applies to all of them. As mentioned before, when all draft tokens are accepted, an additional bonus token is sampled from p. In the relaxed case, it is possible to replace p with a relaxed distribution πbonus (Algorithms 1 and 2). This can be underspecified in the relaxed spec-dec literature, where πrej , π res are generally the main focus. 3 In this work, aligning with paper narratives that generally set p as the capability standard, and code implementations when they are publicly available, we set πbonus = p,other than for Speculative Contrastive Decoding ( spec-cont-dec ) (Yuan et al., 2024), which is the only method that explicitly aims to improve capability over p and unambiguously defines πbonus :
+
+πbonus = p for all methods other than spec-cont-dec where πbonus = πrej = πres . (5) 
+
+CACTUS ( CACTUS ). Hao & Mou (2026) aim to solve the constrained optimisation problem: 
+
+π[q, p, x ] ∈ arg max  
+
+> r∈∆V−1
+
+min 
+
+{ r(x) 
+
+> q(x)
+
+, 1
+
+}
+
+s.t. DKL (r ∥ p) ≤ α. (6) 
+
+i.e . given a draft token x, maximise the acceptance probability whilst constraining the reverse KL-divergence of the relaxed target from p. CACTUS optimises given the actual draft token x, whilst later approaches focus on objectives in expectation over token distributions. A Taylor expansion of the KL-divergence produces the approximate optimum, 
+
+πrej [q, p, x ]( v) = πres =
+
+{γx if v = x,  
+
+> 1−γx
+> 1−p(x)
+
+p(v) otherwise , where γx = min 
+
+{
+
+p(x) + √2αp (x)(1 − p(x)) , 1
+
+}
+
+, (7) where π(x) is boosted as a function of p(x) and other vocab probabilities are uniformly reduced. Notably, if x is outside of the verifier distribution’s support ( e.g . top-p/k mask) then it is always rejected regardless of α, which is a strict behaviour not shared with many of the other approaches. The method thus interpolates between strict spec-dec 
+
+and verifier-support-based rejection. The narrative is to explicitly control/restrict deviation from p, whilst maximising speed-up beyond strict spec-dec to provide a good capability-speed trade-off. The main results in Hao & Mou (2026) suggest close-to-lossless speed-up can be achieved via relaxation. Additionally, some results suggest capability improves, and the authors speculate in the appendix of (Hao & Mou, 2026) that this may be due to an ensembling effect. 
+
+Mentored Decoding ( mentored-dec ). Tran-Thien (2023) aims to solve a very similar problem as CACTUS ,
+
+π[q, p ] ∈ arg max  
+
+> r∈∆V−1
+
+Ex∼q
+
+[
+
+min 
+
+{ r(x) 
+
+> q(x)
+
+, 1
+
+}] 
+
+s.t. DKL (p ∥ r) ≤ α. (8) This differs from CACTUS by optimising expected-over-q rather than draft-token-conditioned acceptance, and by constraining the forward rather than reverse KL from p. We adopt the version where β = 1 used in Narasimhan et al. (2025) (see their Appendix F.6), as it is simpler and shown to perform very similarly to the full version. 4 This gives, 
+
+πrej [p, α ]( v) = min 
+
+{ p(v)1−α , 1
+
+}
+
+, πres (v) = p(v), (9)      
+
+> 3For example, for the method CACTUS , Hao & Mou (2026) do not specify πbonus in the paper but set it to pin the published code.
+> 4We note that the full version is also more unwieldy to implement as it requires a per-token optimisation over parameters during inference.
+
+6method trade capability for more speed improve capability control deviation from p                                                                             
+
+> rely on drafter qfor generation rejection target dist.
+> πrej
+> α(q, p, x )( v)
+> residual target dist.
+> πres
+> α(v)
+> bonus target dist.
+> πbonus
+> α(v)
+> CACTUS
+> (Hao & Mou, 2026) ✓(✓)✓
+> {γxif v=x,
+> 1−γx
+> 1−p(x)p(v)otherwise
+> γx= min {p(x) +
+> √2αp (x)(1 −p(x)) ,1}
+> same as rej. p(v)
+> mentored-dec β= 1
+> (Tran-Thien, 2023) ✓✓min {p(v)/(1 −α),1}p(v)p(v)
+> r-fuzzy
+> (Holsman et al., 2025) ✓✓✓
+> {
+> q(v)if Div (p, q )< α, p(v)otherwise same as rej. p(v)
+> spec-casc-opt
+> (Narasimhan et al., 2025) ✓(✓)✓
+> {
+> q(v)if max uq(u)≥max up(u)−αTV( p, q ),p(v)otherwise same as rej. p(v)
+> ens
+> (Wang et al., 2026) ✓(✓)✓✓αq (v) + (1 −α)p(v)same as rej. p(v)
+> spec-cont-dec
+> (Yuan et al., 2024) ✓
+> softmax [zπ]( v)
+> zπ(v) = zp(v) + α[zp(v)−zq(v)] if v∈ M top-p/k otherwise − ∞ Mtop-p/k is the set of logits within the top-p/top-kmask
+> same as rej. same as rej.
+
+Table 2: Taxonomy of relaxed spec-dec methods and narratives within our framework from Algorithm 2. ✓ indicates when an idea that is explicitly part of the paper narrative, whilst ( ✓) indicates when an idea is suggested implicitly. which boosts πrej (x) and thus acceptance similarly to CACTUS (compare Eq. (9) with γx from Eq. (8)) and then uses 
+
+p for residual sampling after rejection rather than a relaxed target. The narrative in Tran-Thien (2023) is also very explicitly about controlling deviation from p and maximising acceptance. Thus, mentored-dec is an algorithm that very much belongs in the same bucket as CACTUS both in terms of story and practical implementation. 
+
+(Reducible) Fuzzy Speculative Decoding ( r-fuzzy ). Holsman et al. (2025) propose to relax the rejection requirement using a divergence criterion between q and p to accept draft tokens if the drafter distribution q is similar to the verifier p:
+
+πrej [q, p ]( v) = πres =
+
+{
+
+q(v), if Div (p, q ) < α, p(v), otherwise . (10) We use Jensen-Shannon Divergence as recommended in Holsman et al. (2025). 5 r-fuzzy interpolates between strict spec-dec and always accepting draft tokens from q. The story is that the drafter can be relied upon to unlock further speed-up if its distribution is similar to the verifier, with a strong focus on enabling a trade-off between capability and speed, which strict spec-dec cannot provide. Note that plugging the above Eq. (10) into Algorithm 2 is the “reducible” version of the algorithm, whilst Holsman et al. (2025) mainly discuss a simpler fuzzy version that directly chooses between q and p using the divergence criterion. We only investigate the reducible variant ( r-fuzzy ) as it has 
+
+provably better draft acceptance whilst sampling from the same relaxed target distribution (see Appendix C for a proof). 
+
+Takeaway 5: Reducible fuzzy speculative decoding ( r-fuzzy ) has provably the same or better expected speed-up than regular fuzzy speculative decoding, whilst sampling tokens from exactly the same target distribution, even though the latter is the main focus in the paper that introduces them (Holsman et al., 2025). 
+
+Speculative Cascades ( spec-casc-opt ). Narasimhan et al. (2025) combine ideas from model cascades with spec-ulative decoding. Cascades/early-exit networks (Huang et al., 2018; Xia & Bouganis, 2023) are a well-established approach for increasing the inference efficiency of neural networks. The idea is to run a set of models sequentially, only running later models (at greater cost) when necessary, i.e . exiting computation on a sample early if a satisfactory result has already been achieved. Speculative decoding comes with a drafter+verifier model pair, so Narasimhan et al. (2025) propose to only sample from the verifier distribution p (and incur the cost of potential rejection) if a criterion is met. For binary decision d ∈ { 0, 1}, where d = 1 means deferring to p, their spec-casc-opt rule optimises the per-token loss, 
+
+Lspec (d; q, p ) = Ev∼p⋆ [(1 − d)ℓ(v, q ) + d {ℓ(v, p ) + α TV( p, q )}] , (11) where p⋆ is the true next-token data distribution, ℓ is the 0-1 loss, and αTV is the expected cost of deferring to the verifier under rejection as in Algorithm 2. Approximating expected losses under q and p with 1 − max u q(u) and 
+
+1 − max u p(u) gives deferral rule d⋆(q, p ) = 1{max u q(u) < max u p(u) − α TV( p, q )} and relaxed distribution, 
+
+πrej [q, p, α ]( v) = πres =
+
+{
+
+q(v), if max u q(u) ≥ max u p(u) − α TV( p, q ),p(v), otherwise . (12) 
+
+> 5
+
+Jensen-Shannon Divergence avoids divide-by-zero issues that may occur with KL-Divergence and non-overlapping support from top-p/k.
+
+7Like r-fuzzy , this approach interpolates between strict spec-dec and always accepting draft tokens from q.6 The narrative is not only to rely on q, but to use the confidence of q itself to make the judgment, and to prefer q over p since deferring incurs a cost. As such it is the approach that leans the hardest into trusting the drafter model q. Narasimhan et al. (2025) generally are able to produce close-to-lossless speed-ups, and also suggest that relying on the drafter in some cases can improve capability, showing in some experiments that capability can improve with relaxation. 7
+
+Ensemble ( ens ). Wang et al. (2026) introduce a simple weighted drafter+verifier ensemble as a baseline, 
+
+πrej [q, p ]( v) = πres = αq (v) + (1 − α)p(v), (13) and show that it is pareto-optimal for trading off deviation from p measured by TV( π, p ) against expected rejection rate given by TV( q, π ) (Eq. (3)). They motivate their work by illustrating how strict spec-dec may reject semantically acceptable draft tokens and suggest that the drafter can be relied on more. Their experiments show ensembling as in Eq. (13) may improve capability over p. We omit Wang et al. (2026)’s main approach DIVERSED as out of scope, as it requires learning a model to predict α on each task. 
+
+Speculative Contrastive Decoding ( spec-cont-dec ). Yuan et al. (2024) 8 observe that the drafter-verifier structure of speculative decoding is naturally exploitable for contrastive decoding (Li et al., 2023; O’Brien & Lewis, 2024; Chang et al., 2024), where the logits z of a weak “amateur” model are subtracted from an “expert”, improving the task capability of the “expert”. By substituting the drafter as the amateur, contrastive decoding can be performed “for free” potentially leading to both speedup over AR and better capability. Contrastive decoding is usually performed with a “plausibility set” of logits, in order to prevent noisy lower-valued logits degrading performance (Yuan et al., 2024; Chang et al., 2024). We use the set of logits within the top-p/top-k mask (Fan et al., 2018; Holtzman et al., 2020) of the verifier 
+
+p, Mtop-p/k , as it is already present in our experiments, avoiding the need to introduce additional hyperparameters, 
+
+πrej [q, p ]( v) = πres = πbonus = softmax [zπ ]( v), zπ (v) = zp(v)+ α[zp(v)−zq (v)] if v ∈ M top-p/k otherwise −∞ . (14) As noted earlier, unlike the above approaches, spec-cont-dec uses the relaxed target distribution for the all-accept bonus token, as the relaxed distribution is meant to have superior capability compared to p. It is the only approach whose narrative is focused on improving capability, whilst also benefiting from the speed-up of speculative decoding. 
+
+Implementation cost. We find the implementation overhead of relaxed approaches to be roughly the same as strict spec-dec , incurring a slight memory capacity cost increase. A brief analysis in Appendix F on Qwen 3.5 shows that the additional overhead becomes notable for small models ( e.g . 2B) with large vocabulary sizes at larger batch sizes (e.g . 32), but is negligible for larger models like Qwen 3.5 27B. Readers should keep their own use case in mind. 
+
+5 Experimental Evaluation 
+
+We now present a comparative evaluation of the relaxed speculative decoding methods just discussed. The aim of our experiments is to fairly compare the approaches, to test the validity of the various narratives discussed in Sec. 4 and Tab. 2, and to provide the reader with empirical Findings that may be of use for their own work. We aim to make up for a few shortcomings found in the evaluations of the existing literature. As many of the approaches in Sec. 4 have been published recently and contemporaneously, they often only compare against a subset of the other methods. As previously mentioned in Sec. 2.1, existing works generally present narrow evaluations in terms of Ndraft and real-world drafter cost Cdrafter , and they often neglect the impact of overall generation length on speed-up. Experiments are often performed on out-of-date benchmarks such as CNN/Daily Mail (See et al., 2017) and XSum (Narayan et al., 2018) that may not accurately reflect real-world applications. Finally, the impact of the language modelling ability of the drafter is rarely explored, and the methods in Sec. 4 have yet to be evaluated with the increasingly popular and relevant approach of a bundled dedicated multi-token-prediction (MTP) drafter module. To this end we measure average accepted length ¯laccept over a range of draft lengths Ndraft ∈ { 3, 5, 10 , 20 } and relaxation values α and then use Eq. (4), which takes into account generation length, with different potential drafter/verifier relative time cost crel ∈ { 0.05 , 0.2, 0.5} to estimate speed-up over a broad range of settings. We consider 3 drafter+verifier pairs, {Qwen3.5 MTP+27B, Qwen3 0.6B+32B, Qwen3 8B+32B}, that respectively represent a dedicated single-layer MTP           
+
+> 6Although Narasimhan et al. (2025) define αas a non-negative cost of deferral, in practice, setting a negative αis completely possibly. It simply encourages a preference towards the verifier, and pushing α→ −∞ recovers strict spec-dec .
+> 7We note that Narasimhan et al. (2025) propose another approach Tok which we omit from the main body, see Appendix B for a discussion.
+> 8Fu et al. (2025) also discuss the same idea in a contemporaneous publication
+
+80.0 0.5 1.0                 
+
+> verifier prob. p(x)
+> 0.0
+> 0.5
+> 1.0
+> relaxed prob.  rej (x)
+> draft token
+> prob. boost
+> CACTUS
+> p(x) + 2p(x)(1 p(x))
+> = 0.25
+> = 1
+> mentored-dec
+> p(x)/(1 )
+> = 0.3
+> = 0.7
+> 1.75 2.00 2.25 2.50
+> 77
+> 78
+> 79
+> 80
+> 81
+> acc.
+> AIME24
+> Qwen3 0.6B+32B
+> 2.0 2.2
+> 80
+> 85
+> 90
+> AIME24
+> Qwen3.5 MTP+27B
+> 1.6 1.8 2.0 2.2
+> 58
+> 60
+> 62
+> 64
+> GPQA
+> Qwen3 0.6B+32B
+> 1.8 2.0
+> 83
+> 84
+> 85
+> 86
+> GPQA
+> Qwen3.5 MTP+27B
+> Ndraft = 10, crel = 0.2
+> strict spec-dec
+> CACTUS
+> mentored-dec
+> length-adjusted speed-up
+
+Figure 3: Comparison between CACTUS and mentored-dec . Left: a visualisation of how the relaxed probability of the draft token x is boosted, right: empirical trade-off comparisons. Their algorithmic and narrative similarities (Sec. 4) result in similar empirical behaviour. We omit mentored-dec in favour of CACTUS in the main paper body for brevity. .drafter module, a weak language model drafter and a strong language model drafter. For our main results we consider AIME 2024 ( AIME 24 ), a challenging maths olympiad dataset that is widely used in model evaluations (Zhang & Math-AI Team, 2024). We also evaluate on GPQA Diamond ( GPQA ) and LiveCodeBench Lite v6 ( LCB ) (Rein et al., 2024; Jain et al., 2025). { AIME24 , GPQA , LCB } are modern challenging benchmarks that test a model’s reasoning ability, for which we use thinking mode . To reduce measurement noise from stochastic sampling, we repeat dataset score measurements for each evaluation point {drafter, verifier, Ndraft , method , α} so that the order of 10 3 queries are made to the model. We use standard Qwen stochastic sampling parameters (top-p/k) as softmax support truncation is now standard practice for LLM generation (Noarov et al., 2025). To test another model family we also evaluate Llama 3.2 1B+3.1 70B (Llama Team, 2024) on GPQA . See Appendix D for full experimental details ( e.g . α values, evaluation harness etc .). 
+
+5.1 Empirical Results and Findings 
+
+Fig. 4 shows our main results, a grid of capability-speed trade-offs over methods and drafter+verifier pairs on AIME24 ,with highlighted findings. There is variance in capability evaluation due to random sampling of responses, which can be seen in the differences between lossless configurations – standard error lines indicate measurement noise. The reader should be aware when interpreting the results that lightweight drafters will incur lower crel in reality, even if all drafters are evaluated over the same crel grid. Full results for AIME24 , GPQA , LCB and Llama3 are in Appendix E. We will leave discussion of spec-cont-dec to the end as it is distinct from the other approaches. 
+
+The similarity of CACTUS and mentored-dec . As discussed in Sec. 4, mentored-dec (Tran-Thien, 2023) and the more recently published CACTUS (Hao & Mou, 2026) are in fact quite similar algorithmically. The left of Fig. 3 shows that the probability boost given to draft token x is very similar. We observe generally that both methods behave similarly empirically, shown in the right of Fig. 3, and so we omit mentored-dec from the main body results for brevity. 
+
+Finding 1: Mentored speculative decoding (Tran-Thien, 2023) and CACTUS (Hao & Mou, 2026) are narratively and algorithmically very similar and correspondingly perform similarly in experiments (Fig. 3). 
+
+The impact of draft length. Fig. 4 shows that varying draft length has a considerable impact on achievable speed-up, having comparable or greater impact than relaxation, whilst not requiring any additional capability evaluation. It also demonstrates how the best draft length changes with crel , demonstrating the need to evaluate over { Ndraft ,crel }
+
+i.e . showing relaxation gives a very large speed-up over strict spec-dec at Ndraft = 20 can be misleading if, for a practitioner’s crel , Ndraft = 5 gives higher overall speed-up and much smaller improvements over strict spec-dec .
+
+Key Finding 2: Optimising the draft length Ndraft with strict spec-dec has a comparable impact on speed-up to relaxation, whilst not requiring additional capability evaluation and retaining the lossless guarantee. This should be prioritised first. The relative drafter cost crel has a large impact on the best Ndraft and overall speed-up. (Fig. 4 (A) )Intuitively, a lower optimal Ndraft may impose a lower ceiling on achievable improvement from relaxation. Tab. 3 shows ¯laccept for different Ndraft , where there is clearly much more headroom for improvement at longer draft lengths. 
+
+Finding 3: A lower optimal Ndraft can limit the achievable possible additional speed-up from relaxation, if ¯laccept is already close to Ndraft for strict spec-dec , diminishing the impact of relaxation. (Fig. 4 (B) , Tab. 3) 
+
+The impact of drafter capability on relaxation. As previously noted, the community is increasingly moving towards dedicated lightweight MTP drafter modules that are specialised for drafting rather than general language modelling .Moreover, many open serving frameworks only support MTP for spec-dec if it is bundled with the model, i.e . the user can be forced to use MTP rather than freely choose a drafter (see Appendix H for a discussion). We find that such MTP modules are naturally unsuited to relaxed spec-dec , precisely due to the fact that they are weak general language 9AR strict spec-dec lossless ± standard error Ndraft = 3 Ndraft = 5 Ndraft = 10 Ndraft = 20 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+> crel  = 0.05
+
+CACTUS 
+
+(A) 
+
+Ndraft has 
+
+comparable effect 
+
+on speed-up as 
+
+relaxation 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+r-fuzzy 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+ens 
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+spec-casc-opt 
+
+92.0 
+
+93.0 
+
+94.0 
+
+95.0 
+
+96.0 
+
+spec-cont-dec 
+
+(F) spec-cont-
+
+dec with weak 
+
+drafter may 
+
+improve 
+
+capability 
+
+at the cost 
+
+of reduced 
+
+speed-up. 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+> crel  = 0.2
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+92.0 
+
+93.0 
+
+94.0 
+
+95.0 
+
+96.0 
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+95.0 
+
+0.5 1 2 5
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+0.5 1 2 5
+
+92.0 
+
+93.0 
+
+94.0 
+
+95.0 
+
+96.0 
+
+> Qwen3.5 MTP+27B
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> crel  = 0.05
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 (C) weaker 
+
+drafters can't 
+
+be relied on. 
+
+Capability 
+
+drop-off and 
+
+poor trade-offs. 
+
+For MTP only 
+
+CACTUS gives 
+
+speed-up. 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 (D) weaker 
+
+drafters cause 
+
+"rambling" 
+
+longer 
+
+responses, 
+
+slowing down 
+
+even if token 
+
+throughput 
+
+increases. 55.0 
+
+60.0 
+
+65.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+80.0 
+
+81.0 
+
+82.0 
+
+83.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> crel  = 0.2
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+55.0 
+
+60.0 
+
+65.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+80.0 
+
+81.0 
+
+82.0 
+
+83.0 
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+0.5 1 2 5
+
+55.0 
+
+60.0 
+
+65.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+0.5 1 2 5
+
+80.0 
+
+81.0 
+
+82.0 
+
+83.0 
+
+> Qwen3 0.6B+32B
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> crel  = 0.05
+
+(B) large 
+
+speed-ups at 
+
+high 
+
+Ndraft can 
+
+disappear 
+
+depending on 
+
+crel 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+(E) a strong 
+
+drafter can 
+
+be relied on. 
+
+May achieve 
+
+approx. lossless 
+
+speed-up. 77.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> crel  = 0.2
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+77.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+0.5 1 2 5
+
+77.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+0.5 1 2 5
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+> Qwen3 8B+32B
+
+length-adjusted speed-up (log scale) 
+
+AIME24 Figure 4: Capability-speed trade-offs on AIME24 for relaxed spec-dec methods across drafter+verifier pairs, relative drafter costs crel and draft lengths Ndraft . Standard error lines indicate measurement noise from stochastic sampling. (A) 
+
+Ndraft has a comparable effect on speed-up as relaxation. (B) large speed-ups/increases in average accepted length ¯laccept 
+
+at high Ndraft may become irrelevant depending on crel , if the best Ndraft is shorter. (C) lightweight drafters can’t be relied on for relaxation, with worse trade-offs and clear capability drop-offs – for MTP only CACTUS gives speed-up. 
+
+(D) lightweight drafters cause “rambling” longer responses, leading to slowdown , even if token throughput increases. 
+
+(E) a stronger drafter language model can be relied on for relaxation, potentially giving approx. lossless speed-up, but it will incur higher crel in reality limiting speed-up. (F) spec-cont-dec with a weak drafter language model may improve 
+
+capability at the cost of reduced speed-up. 10 Ndraft = 3 Ndraft = 5 Ndraft = 10 Ndraft = 20 
+
+Drafter+verifier strict α = 0 .1 0 .25 1 10 strict α = 0 .1 0 .25 1 10 strict α = 0 .1 0 .25 1 10 strict α = 0 .1 0.25 1 10 
+
+Qwen3.5 MTP+27B 2.44 2.74 2.76 2.82 2.84 3.52 4.16 4.21 4.36 4.46 4.82 6.34 6.43 7.07 7.50 5.36 7.73 7.86 9.24 10.68 Qwen3 0.6B+32B 2.14 2.31 2.37 2.46 2.54 3.05 3.39 3.52 3.74 3.90 4.32 5.12 5.42 6.02 6.52 5.25 6.54 7.15 8.28 9.36 Qwen3 8B+32B 2.46 2.64 2.70 2.78 2.83 3.72 4.14 4.29 4.47 4.58 5.94 7.11 7.55 8.16 8.55 8.15 10.75 11.95 13.74 14.95 
+
+Table 3: Mean accepted draft tokens ¯laccept (≤ Ndraft ) on AIME24 for CACTUS . Lower Ndraft limits achievable improve-ments from relaxation. The strong drafter is able to better take advantage of longer Ndraft .1 2 3                                                              
+
+> speed-up
+> 50
+> 60
+> 70
+> 80
+> 90
+> AIME24 acc.  α=-0.10
+> α=0
+> α=0.05
+> dedicated drafter
+> Qwen3.5 MTP+27B
+> 1.0 1.5 2.0 2.5
+> speed-up
+> 50
+> 60
+> 70
+> 80
+> 90
+> weak drafter
+> Qwen3 0.6B+32B
+> 1.0 1.5 2.0 2.5 3.0
+> speed-up
+> 50
+> 60
+> 70
+> 80
+> 90
+> strong drafter
+> Qwen3 8B+32B
+> crel = 0.2, Ndraft = 10
+> AR
+> strict spec-dec
+> token throughput
+> length-adjusted
+> strict
+> spec-dec
+> α=-0.10 α=0 α=0.05
+> relaxation
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> mean output length (k tokens)
+> length
+> degradation
+> generation length
+> Qwen3.5 MTP+27B
+> Qwen3 8B+32B
+> Qwen3.5 27B sample text
+> AIME24 question I-1, seed=37
+> spec-casc-opt ( α= 0.05 )
+> ... $18 =1.6s^2 +3.2s$. $18 =
+> 1.6s^2 + 3.2s .18 = 1.6s^2 +
+> 3.2s .18 = 1.6s^2 + 3.2s .18 =
+> 1.6s^2 + 3.2s .18 = 1.6s^2 +
+> 3.2s .18 = 1.6s^2 + 3.2s .18 =
+> 1.6s^2 +3.2s$ ...
+> Collapses into a repeated algebra loop; hits
+> 36.9K tokens and parses the wrong answer
+> (6).
+> strict spec-dec
+> ... Coffee Time. Total Time =3
+> hours +24 minutes. Convert the
+> total time to minutes: 3hours =3x
+> 60 =180 minutes. Total Time =180 +
+> 24 =204 minutes. Therefore, the ...
+> Finishes the same problem cleanly in 5.8K
+> tokens and returns the correct answer.
+
+Figure 5: Left : ( spec-casc-opt ) drafters that are weak language models improve token throughput much more than 
+
+length-adjusted speed-up. Right : relaxation into an MTP drafter increases generation length with rambling responses. models, and so can’t be relied on for relaxation , even if they are decent drafters under strict rejection . Fig. 4 (C) shows that for Qwen3.5 MTP+27B, only CACTUS /mentored-dec , which tightly control deviation from p rather than relying on q, are able to produce a useful capability-speed trade-off. Methods that explicitly rely on q (e.g . spec-casc-opt ,see Tab. 2) fail with capability drop-offs without speed-ups (discussed later). Using a small general language model (Qwen3 0.6B+32B) gives more useful trade-offs than MTP across evaluated methods, but still shows consistent clear capability degradation, a far cry from the near-lossless capability demonstrated in many relaxed spec-dec papers. 
+
+Key Finding 4: A good drafter under strict rejection ̸ = a reliable language model for relaxed rejection. Drafters q
+
+that are weaker standalone language models give poor capability-speed trade-offs with clear capability degradation for relaxed spec-dec . In particular, the dedicated MTP drafter struggles to produce useful trade-offs across most methods, with the exception of CACTUS /mentored-dec that tightly control deviation from p. This is notable as MTP drafting may be the only supported method for spec-dec for a given model+serving framework. (Fig. 4 (C) )Fig. 4 (D) actually shows slowdowns vs strict spec-dec in many cases, even though relaxation should increase ¯laccept 
+
+and token throughput. This is because relaxing into a drafter that is a weak language model may cause the model to take longer to reach a “thinking” conclusion, and can even induce generation pathologies ( e.g . rambling, repetition loops) that lead to longer generations and overall response times. This reduces speed-up compared to what token throughput or ¯laccept would indicate, highlighting the need to consider generation length (Eq. (4)). This is shown in Fig. 5. 9
+
+Finding 5: Relaxing with drafters that are weak language models may lead to longer “rambling” responses, reducing speed-up, potentially to less than strict spec-dec , even if token throughput increases. (Fig. 4 (D) , Fig. 5) 
+
+Fig. 4 (E) actually shows, on the other hand, that the strong drafter (Qwen3 8B+32B) is able to provide much better (sometimes lossless up to measurement noise) trade-offs with relaxation, aligning much closer with results presented in the literature. This is intuitive as a drafter that is a stronger standalone model matches the narrative that q can be relied on more than strict spec-dec allows, and methods with this story (Tab. 2) in particular see improvements compared to results with drafters that are weak language models. Moreover, a stronger drafter also intuitively unlocks greater acceleration via longer Ndraft , as the drafter is able to generate longer spans of acceptable text (Tab. 3). We note the reader should keep in mind that a stronger drafter will incur considerably higher crel in reality than a lightweight drafter, so realisable speed-up will be reduced in comparison (and Fig. 4 should be interpreted with this in mind). 
+
+Key Finding 6: A drafter that is a stronger language model enables better (sometimes close-to-lossless) trade-offs for 
+
+relaxed spec-dec , in particular, methods that explicitly rely on q (Tab. 2) improve considerably vs weaker drafters. However, achievable speed-ups will be limited by large drafter cost, and the community is moving towards dedicated MTP modules rather than drafters that are individually strong standalone language models. (Fig. 4 (E) )This highlights a conflict of narratives where many relaxed spec-dec approaches predicate their methods on the idea that the drafter is a decent language model which can afford relaxation, whilst the community shift towards dedicated 
+
+> 9
+
+Interestingly, α = 0 is the theoretical minimum suggested by (Narasimhan et al., 2025) for spec-casc-opt , as it represents having no “cost” of deferring to the verifier. However, in our experiments, 0 is clearly too high when the drafter is unreliable. 
+
+11 1.0 1.5 2.0             
+
+> −12.5
+> −10.0
+> −7.5
+> −5.0
+> −2.5
+> 0.0
+> Δ score (pp)
+> CACTUS
+> 1.0 1.5 2.0
+> −40
+> −30
+> −20
+> −10
+> 0
+> r-fuzzy
+> 1.0 1.5 2.0
+> −12.5
+> −10.0
+> −7.5
+> −5.0
+> −2.5
+> 0.0
+> ens
+> 1.0 1.5 2.0
+> −40
+> −30
+> −20
+> −10
+> 0
+> spec-casc-opt
+> 1.0 1.5 2.0
+> −1
+> 0
+> 1
+> 2
+> 3
+> 4
+> spec-cont-dec
+> length-adjusted speed-up
+> Qwen3.5 MTP+27B, Ndraft = 10 ,crel = 0.2
+> AR
+> strict spec-dec
+> AIME24
+> GPQA
+
+Figure 6: Relaxation hyperparameters do not reliably generalise between evaluation tasks. Comparing AIME24 and 
+
+GPQA with the same relaxation values, it is clear that the calibration of α is considerably different, e.g . the smallest relaxation of α = 0 .1 for CACTUS leads to considerably more capability loss in percentage points on AIME24 than GPQA .MTP drafters leans into the guarantees of strict spec-dec as a crux to disregard general language modelling and focus on faster drafting, whilst only needing to maintain short-range ¯laccept under strict rejection. Fig. 4 and Tab. 3 show that the MTP drafter even has higher strict speed-up than Qwen3 0.6B, but worse relaxed trade-offs. As such, although existing methods for relaxed spec-dec are not strictly invalid , they are unsuited for many mainstream drafters. 
+
+spec-cont-dec can improve capability at the cost of speed-up. The narrative of this approach, and thus its empirical behaviour, is different to other relaxed spec-dec methods. Fig. 4 shows that spec-cont-dec is able to 
+
+trade-off speed-up for better capability . It meaningfully improves on AIME24 when the drafter is weak, matching the original intuition that pushing the model distribution away from an amateur can improve capability (Li et al., 2023). This also intuitively explains why speed-up is reduced, as Eq. (14) pushes π away from q increasing TV( q, π )
+
+(Eq. (3)). In the case of a strong drafter, we note a degradation in capability, which also aligns with the same intuition, as we wouldn’t expect a non-amateur drafter to produce a useful contrastive signal. We note that with a weak drafter, capability improvement does not happen in every case ( e.g . Qwen 3.5 MTP+27B GPQA in Fig. 8), although in our experiments we do not observe capability degradation beyond measurement noise. This is in line with previous results (O’Brien & Lewis, 2024), that also demonstrate non-universal improvements. Other relaxation approaches that may have been suggested to improve capability (Tab. 2) do not demonstrate this in our experiments. 
+
+Key Finding 7: spec-cont-dec is empirically shown to offer an alternative trade-off where generative speed-up can be sacrificed for (potentially) better task capability. This is intuitive as the target distribution is pushed away from the drafter distribution, thereby reducing acceptance. In the case of speculative inference, it can be implemented with little to no extra cost, as the drafter can be readily used as the amateur model. Other approaches, that may have been suggested to improve capability (see Tab. 2), do not do so in our experiments. 
+
+The generalisation of relaxation parameter α over tasks. There are no expectations or guarantees that relaxation parameter α will generalise between tasks, and we find experimentally that the calibration of α can be quite different between tasks. Fig. 6 shows that the same values of α (see Sec. D.2 for values) induce markedly different capability-speed trade-offs between AIME24 and GPQA , with the former’s accuracy being much more sensitive to α than the latter’s. 
+
+Key Finding 8: Relaxation hyperparameters are not guaranteed to generalise between evaluation tasks, and we show they empirically fail to do so. Thus, for reliable multi-task deployment (that is task-capability constrained), evaluation for relaxation parameter tuning should be across all tasks , and will incur the corresponding cost. 
+
+6 Concluding remarks 
+
+In this work, we performed a practical investigation of recent approaches to relaxed speculative decoding. Such methods deviate from the strict guarantee of matching the verifier distribution in pursuit of additional acceleration, controlled capability-speed trade-offs, or potential capability gains. Our investigation suggests that the achievable results are highly setting-dependent. Draft length and relative drafter cost can affect speed-up as much, if not more than, relaxation; weak or dedicated MTP drafters are not reliable language models for relaxed rejection; stronger drafters can potentially give approximately lossless relaxed speed-up; and relaxation parameters do not reliably transfer across tasks. Relaxation can be useful, especially with stronger drafters or methods that tightly control deviation from the verifier, but it should be treated by practitioners as a deployment-specific optimisation potentially requiring further capability evaluation and tuning, rather than a drop-in replacement for strict standard speculative decoding. 12 References 
+
+Zihao An, Huajun Bai, Ziqiong Liu, Dong Li, and Emad Barsoum. PARD: Accelerating LLM inference with low-cost PARallel draft model adaptation. In The Fourteenth International Conference on Learning Representations , 2026. URL https://openreview.net/forum?id=XbOyv7iVGL . 3, 5 Anthropic. Introducing claude haiku 4.5. https://www.anthropic.com/news/claude-haiku-4-5 , October 2025. Accessed: 2026-05-29. 1 Gregor Bachmann, Sotiris Anagnostidis, Albert Pumarola, Markos Georgopoulos, Artsiom Sanakoyeu, Yuming Du, Edgar Schönfeld, Ali Thabet, and Jonas K Kohler. Judge decoding: Faster speculative sampling requires going beyond model alignment. In The Thirteenth International Conference on Learning Representations , 2025. URL 
+
+https://openreview.net/forum?id=mtSSFiqW6y . 1, 5 Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel Ziegler, Jeffrey Wu, Clemens Winter, Chris Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. In H. Larochelle, M. Ranzato, R. Hadsell, M.F. Balcan, and H. Lin (eds.), Advances in Neural Information Processing Systems , volume 33, pp. 1877–1901. Curran Associates, Inc., 2020. URL https://proceedings.neurips.cc/paper_files/paper/ 2020/file/1457c0d6bfcb4967418bfb8ac142f64a-Paper.pdf . 1 Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. Medusa: Simple LLM inference acceleration framework with multiple decoding heads. In Ruslan Salakhutdinov, Zico Kolter, Katherine Heller, Adrian Weller, Nuria Oliver, Jonathan Scarlett, and Felix Berkenkamp (eds.), Proceedings of the 41st International Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research ,pp. 5209–5235. PMLR, 21–27 Jul 2024. URL https://proceedings.mlr.press/v235/cai24b.html . 5 Haw-Shiuan Chang, Nanyun Peng, Mohit Bansal, Anil Ramakrishna, and Tagyoung Chung. Explaining and improving contrastive decoding by extrapolating the probabilities of a huge and hypothetical LM. In Yaser Al-Onaizan, Mohit Bansal, and Yun-Nung Chen (eds.), Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing , pp. 8503–8526, Miami, Florida, USA, November 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.emnlp-main.484. URL https://aclanthology.org/2024.emnlp-main.484/ . 8 Jian Chen, Yesheng Liang, and Zhijian Liu. Dflash: Block diffusion for flash speculative decoding, 2026. URL 
+
+https://arxiv.org/abs/2602.06036 . 3, 5 Zhuoming Chen, Avner May, Ruslan Svirschevski, Yuhsun Huang, Max Ryabinin, Zhihao Jia, and Beidi Chen. Sequoia: scalable and robust speculative decoding. In Proceedings of the 38th International Conference on Neural Information Processing Systems , NIPS ’24, Red Hook, NY, USA, 2024. Curran Associates Inc. ISBN 9798331314385. 5 Xin Cheng, Xingkai Yu, Chenze Shao, Jiashi Li, Yunfan Xiong, Yi Qian, Jiaqi Zhu, Shirong Ma, Xiaokang Zhang, Jiasheng Ye, Qinyu Chen, Chengqi Deng, Jiping Yu, Damai Dai, Zhengyan Zhang, Yixuan Wei, Yixuan Tan, Wenkai Yang, Runxin Xu, Yu Wu, Zhean Xu, Xuanyu Wang, Muyang Chen, Rui Tian, Xiao Bi, Zhewen Hao, Shaoyuan Chen, Huanqi Cao, Wentao Zhang, Anyi Xu, Huishuai Zhang, Dongyan Zhao, and Wenfeng Liang. DSpark: Confidence-scheduled speculative decoding with semi-autoregressive generation, June 2026. URL https://github.com/deepseek-ai/DeepSpec/blob/main/DSpark_paper.pdf . Technical report, Peking University and DeepSeek-AI. 5, 6 DeepSeek-AI. Deepseek-v3 technical report, 2024. URL https://arxiv.org/abs/2412.19437 . 1, 6 Angela Fan, Mike Lewis, and Yann Dauphin. Hierarchical neural story generation. In Proceedings of the 56th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 889–898, Melbourne, Australia, July 2018. Association for Computational Linguistics. doi: 10.18653/v1/P18-1082. URL 
+
+https://aclanthology.org/P18-1082/ . 8 13 Jiale Fu, Yuchu Jiang, Junkai Chen, Jiaming Fan, Xin Geng, and Xu Yang. Fast large language model collabo-rative decoding via speculation. In Forty-second International Conference on Machine Learning , 2025. URL 
+
+https://openreview.net/forum?id=SGrJ8a9a5U . 8 Roman Garipov, Fedor Velikonivtsev, Ivan Ermakov, Ruslan Svirschevski, Vage Egiazarian, and Max Ryabinin. Autojudge: Judge decoding without manual annotation. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. URL https://openreview.net/forum?id=ktNJgpmjjP . 5 Avijit Ghosh, Yifan Mai, Georgia Channing, and Leshem Choshen. AI evals are becoming the new compute bottleneck. EvalEval Coalition Blog, April 2026. URL https://evalevalai.com/research/2026/04/29/ eval-costs-bottleneck/ . 5 GLM-5 Team. GLM-5: from vibe coding to agentic engineering. arXiv preprint arXiv:2602.15763 , 2026. URL 
+
+https://arxiv.org/abs/2602.15763 . 6 Yongchang Hao and Lili Mou. Cactus: Accelerating auto-regressive decoding with constrained acceptance speculative sampling. In The Fourteenth International Conference on Learning Representations , 2026. URL 
+
+https://openreview.net/forum?id=lpUIkCAy9p . 4, 6, 7, 9, 23 Zhenyu He, Zexuan Zhong, Tianle Cai, Jason Lee, and Di He. REST: Retrieval-based speculative decoding. In Kevin Duh, Helena Gomez, and Steven Bethard (eds.), Proceedings of the 2024 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) , pp. 1582–1595, Mexico City, Mexico, June 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.naacl-long.88. URL https://aclanthology.org/2024.naacl-long.88/ . 5 Maximilian Holsman, Yukun Huang, and Bhuwan Dhingra. Fuzzy speculative decoding for a tunable accuracy-runtime tradeoff. In Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Mohammad Taher Pilehvar (eds.), Findings of the Association for Computational Linguistics: ACL 2025 , pp. 26257–26273, Vienna, Austria, July 2025. Association for Computational Linguistics. ISBN 979-8-89176-256-5. doi: 10.18653/v1/2025.findings-acl.1346. URL https://aclanthology.org/2025.findings-acl.1346/ . 1, 4, 7, 20, 23 Ari Holtzman, Jan Buys, Li Du, Maxwell Forbes, and Yejin Choi. The curious case of neural text degeneration. In Inter-national Conference on Learning Representations , 2020. URL https://openreview.net/forum?id=rygGQyrFvH .8Gao Huang, Danlu Chen, Tianhong Li, Felix Wu, Laurens van der Maaten, and Kilian Weinberger. Multi-scale dense networks for resource efficient image classification. In International Conference on Learning Representations , 2018. URL https://openreview.net/forum?id=Hk2aImxAb . 7 Kaixuan Huang, Xudong Guo, and Mengdi Wang. Specdec++: Boosting speculative decoding via adaptive candidate lengths. In Second Conference on Language Modeling , 2025. URL https: //openreview.net/forum?id=Y131N9fUbU . 5 Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. LiveCodeBench: Holistic and contamination free evaluation of large language models for code. In The Thirteenth International Conference on Learning Representations , 2025. URL 
+
+https://openreview.net/forum?id=chfJJYC3iL . 9, 22 Tanishq Kumar, Tri Dao, and Avner May. Speculative speculative decoding. In The Fourteenth International Conference on Learning Representations , 2026. URL https://openreview.net/forum?id=aL1Wnml9Ef . 5 Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In 
+
+Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , 2023. 1, 6 Olivier Lacombe and Maarten Grootendorst. Accelerating gemma 4: Faster inference with multi-token pre-diction drafters. Google Blog, May 2026. URL https://blog.google/innovation-and-ai/technology/ developers-tools/multi-token-prediction-gemma-4/ . Accessed: 2026-05-29. 6 14 Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative de-coding. In Andreas Krause, Emma Brunskill, Kyunghyun Cho, Barbara Engelhardt, Sivan Sabato, and Jonathan Scarlett (eds.), Proceedings of the 40th International Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research , pp. 19274–19286. PMLR, 23–29 Jul 2023. URL 
+
+https://proceedings.mlr.press/v202/leviathan23a.html . 1, 3, 5, 23 Xiang Lisa Li, Ari Holtzman, Daniel Fried, Percy Liang, Jason Eisner, Tatsunori Hashimoto, Luke Zettlemoyer, and Mike Lewis. Contrastive decoding: Open-ended text generation as optimization. In Anna Rogers, Jordan Boyd-Graber, and Naoaki Okazaki (eds.), Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 12286–12312, Toronto, Canada, July 2023. Association for Computational Linguistics. doi: 10.18653/v1/2023.acl-long.687. URL https://aclanthology.org/2023.acl-long.687/ . 8, 12 Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle: speculative sampling requires rethinking feature uncertainty. In Proceedings of the 41st International Conference on Machine Learning , ICML’24. JMLR.org, 2024. 5 Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. EAGLE-3: Scaling up inference acceleration of large language models via training-time test. In The Thirty-ninth Annual Conference on Neural Information Processing Systems , 2025. URL https://openreview.net/forum?id=4exx1hUffq . 5 Percy Liang, Rishi Bommasani, Tony Lee, Dimitris Tsipras, Dilara Soylu, Michihiro Yasunaga, Yian Zhang, Deepak Narayanan, Yuhuai Wu, Ananya Kumar, Benjamin Newman, Binhang Yuan, Bobby Yan, Ce Zhang, Christian Cosgrove, Christopher D Manning, Christopher Re, Diana Acosta-Navas, Drew A. Hudson, Eric Zelikman, Esin Durmus, Faisal Ladhak, Frieda Rong, Hongyu Ren, Huaxiu Yao, Jue WANG, Keshav Santhanam, Laurel Orr, Lucia Zheng, Mert Yuksekgonul, Mirac Suzgun, Nathan Kim, Neel Guha, Niladri S. Chatterji, Omar Khattab, Peter Henderson, Qian Huang, Ryan Andrew Chi, Sang Michael Xie, Shibani Santurkar, Surya Ganguli, Tatsunori Hashimoto, Thomas Icard, Tianyi Zhang, Vishrav Chaudhary, William Wang, Xuechen Li, Yifan Mai, Yuhui Zhang, and Yuta Koreeda. Holistic evaluation of language models. Transactions on Machine Learning Research ,2023. ISSN 2835-8856. URL https://openreview.net/forum?id=iO4LZibEqW . Featured Certification, Expert Certification, Outstanding Certification. 5 Xiaoxuan Liu, Jiaxiang Yu, Jongseok Park, Ion Stoica, and Alvin Cheung. Speculative decoding: Performance or illusion?, 2026. URL https://arxiv.org/abs/2601.11580 . 3, 4 LiveCodeBench. LiveCodeBench code generation lite, release_v6, 2025. URL https://huggingface.co/datasets/ livecodebench/code_generation_lite . Versioned Hugging Face dataset configuration used for LiveCodeBench Lite v6. 22 Llama Team. The llama 3 herd of models. CoRR , abs/2407.21783, 2024. doi: 10.48550/arXiv.2407.21783. URL 
+
+https://doi.org/10.48550/arXiv.2407.21783 . 9, 23 Xiaoyu Ma and David Patterson. Challenges and research directions for large language model inference hardware. 
+
+Computer , 59(5):55–64, 2026. doi: 10.1109/MC.2026.3652916. 2 Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, Chunan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna Abhyankar, and Zhihao Jia. Specinfer: Accelerating large language model serving with tree-based speculative inference and verification. In Pro-ceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operat-ing Systems, Volume 3 , ASPLOS ’24, pp. 932–949, New York, NY, USA, 2024. Association for Computing Machinery. ISBN 9798400703867. doi: 10.1145/3620666.3651335. URL https://doi.org/10.1145/3620666.3651335 . 5 Harikrishna Narasimhan, Wittawat Jitkrittum, Ankit Singh Rawat, Seungyeon Kim, Neha Gupta, Aditya Krishna Menon, and Sanjiv Kumar. Faster cascades via speculative decoding. In The Thirteenth International Conference on Learning Representations , 2025. URL https://openreview.net/forum?id=vo9t20wsmd . 4, 6, 7, 8, 11, 20, 23 Shashi Narayan, Shay B. Cohen, and Mirella Lapata. Don’t give me the details, just the summary! topic-aware convolutional neural networks for extreme summarization. In Ellen Riloff, David Chiang, Julia Hockenmaier, and Jun’ichi Tsujii (eds.), Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing ,pp. 1797–1807, Brussels, Belgium, October-November 2018. Association for Computational Linguistics. doi: 10.18653/v1/D18-1206. URL https://aclanthology.org/D18-1206/ . 8 15 Georgy Noarov, Soham Mallick, Tao Wang, Sunay Joshi, Yan Sun, Yangxinyu Xie, Mengxin Yu, and Edgar Dobriban. Foundations of top-k decoding for language models. In Advances in Neural Information Processing Systems , volume 38, 2025. URL https://proceedings.neurips.cc/paper_files/paper/2025/hash/ a96d4fda3017f1773b261a52a3efc8dd-Abstract-Conference.html . 9 NVIDIA. Nemotron 3 ultra: Open, efficient mixture-of-experts hybrid mamba-transformer model for agentic reasoning, June 2026. URL https://research.nvidia.com/labs/nemotron/files/ NVIDIA-Nemotron-3-Ultra-Technical-Report.pdf . Technical report. 6 Sean O’Brien and Mike Lewis. Contrastive decoding improves reasoning in large language models, 2024. URL 
+
+https://openreview.net/forum?id=SzV37yefM4 . 8, 12 OpenAI. Why SWE-bench verified no longer measures frontier coding capabilities. https://openai.com/index/ why-we-no-longer-evaluate-swe-bench-verified/ , February 2026a. Accessed: 2026-06-06. 5 OpenAI. Introducing gpt-5.3-codex-spark. https://openai.com/index/introducing-gpt-5-3-codex-spark/ ,February 2026b. Accessed: 2026-05-29. 1 Qwen Team. Qwen3.5: Towards native multimodal agents, February 2026. URL https://qwen.ai/blog?id=qwen3.5 .1, 6, 23 David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani, Julian Michael, and Samuel R. Bowman. GPQA: A graduate-level google-proof q&a benchmark. In First Conference on Language Modeling , 2024. URL https://openreview.net/forum?id=Ti67584b98 . 9, 22 Sha Sajadieh, Loredana Fattorini, Raymond Perrault, Yolanda Gil, Vanessa Parli, Lapo Santarlasci, Juan Pava, Nestor Maslej, Russ Altman, Erik Brynjolfsson, Carla Brodley, Jack Clark, Virginia Dignum, Vipin Kumar, James Landay, Terah Lyons, James Manyika, Juan Carlos Niebles, Yoav Shoham, Elham Tabassi, Russell Wald, Toby Walsh, and Dan Weld. The ai index 2026 annual report. Technical report, AI Index Steer-ing Committee, Institute for Human-Centered AI, Stanford University, Stanford, CA, April 2026. URL 
+
+https://hai.stanford.edu/ai-index/2026-ai-index-report . 1 Alexander Samarin, Sergei Krutikov, Anton Shevtsov, Sergei Skvortsov, Filipp Fisin, and Alexander Golubev. LK losses: Direct acceptance rate optimization for speculative decoding, 2026. URL https://arxiv.org/abs/2602.23881 .ICML 2026. 5 Fynn Schmitt-Ulms, Helen Zhao, Rahul Tuli, and Dipika Sikka. Diving into speculative decod-ing training support for vLLM with speculators v0.3.0. vLLM Blog, December 2025. URL 
+
+https://vllm.ai/blog/2025-12-13-speculators-v030 . Accessed: 2026-05-29. 1, 6 Abigail See, Peter J. Liu, and Christopher D. Manning. Get to the point: Summarization with pointer-generator networks. In Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 1073–1083, Vancouver, Canada, July 2017. Association for Computational Linguistics. doi: 10.18653/v1/P17-1099. URL https://aclanthology.org/P17-1099/ . 8 Sonali Singh, Karthik Sangaiah, Shenrun Zhang, Ryan Swann, and Ganesh Dasika. Accelerating LLM inference: Up to 3x speedup on MI300X with speculative decoding. ROCm Blogs, March 2025. URL https://rocm.blogs.amd. com/artificial-intelligence/spec_decode_mi300x/README.html . Accessed: 2026-05-30. 3 Ziteng Sun, Uri Mendlovic, Yaniv Leviathan, Asaf Aharoni, Jae Hun Ro, Ahmad Beirami, and Ananda Theertha Suresh. Block verification accelerates speculative decoding. In The Thirteenth International Conference on Learning Representations , 2025. URL https://openreview.net/forum?id=frsg32u0rO . 5 Vivien Tran-Thien. An optimal lossy variant of speculative decoding, 2023. URL https://vivien000.github.io/ blog/journal/a-provably-optimal-lossy-variant-of-speculative-decoding.html . 6, 7, 9, 23 Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In I. Guyon, U. Von Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (eds.), Advances in Neural Information Processing Systems , volume 30. 16 Curran Associates, Inc., 2017. URL https://proceedings.neurips.cc/paper_files/paper/2017/file/ 3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf . 1 Ziyi Wang, Siva Rajesh Kasa, Ankith M S, Santhosh Kumar Kasa, Jiaru Zou, Sumit Negi, Ruqi Zhang, Nan Jiang, and Qifan Song. DIVERSED: Relaxed speculative decoding via dynamic ensemble verification. In The 29th International Conference on Artificial Intelligence and Statistics , 2026. URL https://openreview.net/forum?id=yCNt8ovyzl .5, 7, 8, 23 Guoxuan Xia and Christos-Savvas Bouganis. Window-based early-exit cascades for uncertainty estimation: When deep ensembles are more efficient than single models. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pp. 17368–17380, October 2023. 7 An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. 23 Ming Yin, Minshuo Chen, Kaixuan Huang, and Mengdi Wang. A theoretical perspective for speculative decoding algorithm. In Proceedings of the 38th International Conference on Neural Information Processing Systems , NIPS ’24, Red Hook, NY, USA, 2024. Curran Associates Inc. ISBN 9798331314385. 3, 21 Josh You, Venkat Somala, Yafah Edelman, and Luke Emberson. Global AI computing capacity is doubling every 7 months. Epoch AI, 2026. URL https://epoch.ai/data-insights/ai-chip-production . Accessed: 2026-05-29. 1 Hongyi Yuan, Keming Lu, Fei Huang, Zheng Yuan, and Chang Zhou. Speculative contrastive decoding. In Lun-Wei Ku, Andre Martins, and Vivek Srikumar (eds.), Proceedings of the 62nd Annual Meeting of the Association for Compu-tational Linguistics (Volume 2: Short Papers) , pp. 56–64, Bangkok, Thailand, August 2024. Association for Compu-tational Linguistics. doi: 10.18653/v1/2024.acl-short.5. URL https://aclanthology.org/2024.acl-short.5/ .1, 6, 7, 8, 23 Yifan Zhang and Math-AI Team. American invitational mathematics examination (aime) 2024, 2024. URL 
+
+https://math-ai-org.github.io/aime24/ . Hugging Face dataset: math-ai/aime24. 9, 21 Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. SGLang: Efficient execution of structured language model programs. In The Thirty-eighth Annual Conference on Neural Information Processing Systems , 2024. URL 
+
+https://openreview.net/forum?id=VqkAKQibpq . 1, 6 Yongchao Zhou, Kaifeng Lyu, Ankit Singh Rawat, Aditya Krishna Menon, Afshin Rostamizadeh, Sanjiv Kumar, Jean-François Kagy, and Rishabh Agarwal. Distillspec: Improving speculative decoding via knowl-edge distillation. In The Twelfth International Conference on Learning Representations , 2024. URL 
+
+https://openreview.net/forum?id=rsY6J3ZaTF . 5 17 Appendix Contents 
+
+A Glossary of Notation 19 B Speculative Cascades Tok 20 C fuzzy and r-fuzzy 20 D Experimental Details 21 
+
+D.1 Datasets . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21 D.2 Models, Sampling Parameters and Relaxation Parameters . . . . . . . . . . . . . . . . . . . . . . . . 23 D.3 Compute Environment . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23 
+
+E Additional Results 23 F Memory Cost Analysis 28 G vLLM speculative decoding 28 H MTP Support 28 
+
+18 A Glossary of Notation 
+
+We summarise the main notations used in the paper in Tab. 4. 
+
+Notation Meaning 
+
+q, p Drafter and verifier models; p is the LLM being accelerated 
+
+q(·), p (·) Drafter/verifier next-token distributions 
+
+qt, p t, q t+i, p t+i Next-token distributions at positions t or t + ix<t Autoregressive context before position txt, x t+i Tokens at positions t and t + ix, v, V Draft token, vocabulary index, and vocabulary size 
+
+∆V −1 Probability simplex over the vocabulary 
+
+Ndraft Number of draft tokens proposed per step 
+
+i, i end Draft offset and first rejected/end position 
+
+ai, Ber( ·) Acceptance indicator and Bernoulli distribution 
+
+norm( ·) Normalisation to a valid probability distribution 
+
+pres (·) Actual residual distribution sampled after rejection 
+
+pbonus (·) Actual bonus-token distribution sampled after full acceptance 
+
+S, S relax Token-throughput and response-length-adjusted speed-up 
+
+¯laccept Average number of accepted draft tokens 
+
+¯LAR , ¯Lrelax Average response lengths under AR and relaxed spec-dec 
+
+CAR , C drafter , C verify Time costs for one AR verifier step, drafter step, and verification step 
+
+crel Relative drafter time cost, Cdrafter /C AR 
+
+TV , D KL , Div Distribution distances/divergence criteria 
+
+π Generic relaxed target next-token distribution 
+
+πrej , π res , π bonus Relaxed targets for rejection, residual construction, and bonus sampling 
+
+πrej 
+
+> t+i
+
+, π res 
+
+> t+i
+
+, π bonus  
+
+> t+Ndraft
+
+Position-specific relaxed targets 
+
+πrej [q, p, x, α ]( v) Rejection target after method-specific construction at token vα Relaxation parameter; meaning is method-dependent 
+
+r ∈ ∆V −1 Candidate relaxed target in optimisation objectives 
+
+γx CACTUS boosted probability assigned to draft token xβ Mentored-decoding parameter; fixed to β = 1 here 
+
+zp, z q , z π Verifier, drafter, and relaxed logits 
+
+Mtop-p/k Verifier top-p/top-k mask 
+
+d ∈ { 0, 1} Binary deferral decision in spec-casc-opt 
+
+p⋆, ℓ True next-token distribution and 0-1 loss in spec-casc-opt 
+
+Lspec (d; q, p ), d ⋆(q, p ) Speculative-cascades loss and approximate deferral rule 
+
+Aα, η α Trusted top set and mass scaling in appendix spec-casc-tok 
+
+ρ Generic target distribution in the appendix correction proof 
+
+Rt, π fuzzy  
+
+> t
+
+Appendix fuzzy predicate and its target distribution 
+
+Kfuzzy , K r-fuzzy Appendix one-step kernels for fuzzy and r-fuzzy 
+
+Afuzzy , A r-fuzzy Appendix draft-token acceptance events 
+
+pass@1 Appendix code-generation first-sample success rate Table 4: Glossary of Notation 19 B Speculative Cascades Tok 
+
+This approach in Narasimhan et al. (2025) creates a target distribution π by keeping only the vocabulary elements of q within a trusted top set of p and then adding a scaled down version of p on top, 
+
+πrej [q, p ]( v) = πres (v) = 
+
+{
+
+q(v) + ηαp(v), if v ∈ Aα,ηαp(v), otherwise , , πbonus (v) = p(v),Aα = {u : p(u) ≥ (1 − α) max  
+
+> w
+
+p(w)}, ηα = 1 − ∑
+
+> u∈Aα
+
+q(u).
+
+(15) We omit it from the main body for brevity and because it distorts the target distribution away from p, so that minimal relaxation, in this case α = 0 , is not p (it is p for all other approaches), but instead still a combination of q and p
+
+based on the arg max of p. Such top-set truncation may overlap with already present temperature, top-p and top-k
+
+adjustments, confusing results. 10 We do report results for this approach in Appendix E. We find that minimum relaxation 
+
+α = 0 generally incurs a capability drop if the drafter is a weak language model, with no option to reduce relaxation further. We also find that for drafter models that are weak language models, trade-offs are generally roughly the same or a bit worse than CACTUS /mentored-dec and better than approaches that explicitly rely on q. For the strong drafter trade-offs are roughly in line with other approaches, although slightly odd behaviour on GPQA could possibly be attributed to the top-set-distorting behaviour of Eq. (15). 
+
+C fuzzy and r-fuzzy 
+
+The following is a one-step conditional statement under exact sampling. It abstracts away implementation details such as finite block scheduling, caching, numerical approximation, and non-exact residual sampling. For finite draft blocks, the comparison assumes that both variants use the same bonus-token distribution after a full draft is accepted; in our experiments this is pt.
+
+Result 1 (r-fuzzy preserves the fuzzy output distribution and weakly improves acceptance) . Fix a prefix x<t and write 
+
+qt(·) = q(·| x<t ), pt(·) = p(·| x<t ).
+
+Let xt ∼ qt be the draft token, and let 
+
+Rt ≡ Div( pt, q t) < α 
+
+be the fuzzy relaxation predicate. Define the one-token fuzzy target from Holsman et al. (2025) 
+
+πfuzzy  
+
+> t
+
+(v) = 
+
+{
+
+qt(v), Rt,pt(v), otherwise .
+
+Consider r-fuzzy as Algorithm 2 with 
+
+πrej [qt, p t, x t] = πres [qt, p t, x t] = πfuzzy  
+
+> t
+
+, πbonus [qt, p t, x t] = pt.
+
+Let Kfuzzy (· | x<t ) and Kr-fuzzy (· | x<t ) denote the one-step output distributions over the next emitted token given prefix x<t . Let Afuzzy and Ar-fuzzy denote the corresponding events that the drafted token xt is accepted. Then, under exact residual sampling, 
+
+Kr-fuzzy (· | x<t ) = Kfuzzy (· | x<t ) = πfuzzy  
+
+> t
+
+(·).
+
+Consequently, if the same one-token rule is applied after each realised prefix, the two algorithms generate the same distribution over full sequences. They differ only in how often a draft token is kept rather than resampled. Moreover, 
+
+Pr( Ar-fuzzy | x<t ) ≥ Pr( Afuzzy | x<t ),
+
+and, for any prefix x<t such that Rt fails, 
+
+Pr( Ar-fuzzy | x<t ) = ∑ 
+
+> v
+
+min {pt(v), q t(v)} = 1 − TV( pt, q t),
+
+which is the maximal exact acceptance probability for proposal qt and target pt. 
+
+> 10 This is noted in the reviews on openreview https://openreview.net/forum?id=vo9t20wsmd .
+
+20 Proof. We condition throughout on the realised prefix x<t , so qt, pt, and Rt are fixed. We use the standard one-step speculative-correction fact: for proposal q and target ρ, accepting a proposed token v ∼ q with probability 
+
+min {1, ρ (v)/q (v)}
+
+and, on rejection, sampling from 
+
+norm ((ρ − q)+
+
+)
+
+emits a token with marginal distribution ρ. Its acceptance probability is 
+
+∑ 
+
+> v
+
+q(v) min {1, ρ (v)/q (v)} = ∑ 
+
+> v
+
+min {ρ(v), q (v)} = 1 − TV( ρ, q ),
+
+and this is optimal among exact one-step accept/reject corrections with proposal q and target ρ (Yin et al., 2024). As usual, the acceptance ratio is only evaluated on the support of q.If Rt holds, then πfuzzy  
+
+> t
+
+= qt. The fuzzy sampler emits the draft token xt ∼ qt. The r-fuzzy sampler has the same relaxed target qt, so its acceptance probability is one and its output distribution is also qt. Thus both kernels equal 
+
+πfuzzy  
+
+> t
+
+on this branch, and both draft-token acceptance probabilities are one. If Rt fails, then πfuzzy  
+
+> t
+
+= pt. The fuzzy sampler rejects the draft token and samples directly from pt, so its one-step kernel is pt and its draft-token acceptance probability is zero. The r-fuzzy sampler is exactly the standard speculative correction with proposal qt and target pt. By the fact above, its one-step kernel is also pt, and its draft-token acceptance probability is ∑ 
+
+> v
+
+min {pt(v), q t(v)} = 1 − TV( pt, q t),
+
+which is the maximal exact acceptance probability for this proposal and target. Combining the two cases, 
+
+Kr-fuzzy (· | x<t ) = Kfuzzy (· | x<t ) = πfuzzy  
+
+> t
+
+(·),
+
+and 
+
+Pr( Ar-fuzzy | x<t ) = 
+
+{
+
+1, Rt,
+
+1 − TV( pt, q t), otherwise , Pr( Afuzzy | x<t ) = 
+
+{
+
+1, Rt,
+
+0, otherwise .
+
+Hence r-fuzzy weakly improves the draft-token acceptance probability. Equality of the one-step transition kernels at every realised prefix implies equality of the induced autoregressive sequence distributions by the chain rule. 
+
+D Experimental Details 
+
+We evaluate training-free relaxed spec-dec methods over model–task settings, and report speed with the response-length-aware proxy in Eq. (4). Due to the stochastic nature of sampling we repeat each dataset a number of times to reduce measurement noise for each data point ( e.g . visualised in Fig. 4). Each repeat uses a distinct random seed; for a fixed model setting and dataset, the same seed set is used across methods, relaxation parameters, and draft lengths. 
+
+D.1 Datasets 
+
+Example boxes show rendered system and user message contents before model-specific chat-template serialisation. They are not exact tokeniser strings; literal prompt strings and requested output strings are typeset in monospace. 
+
+AIME 2024 ( AIME24 ). AIME24 (Zhang & Math-AI Team, 2024) evaluates olympiad-style contest mathematics with a three-digit integer answer. The exam is part of the U.S. mathematical olympiad qualification pathway, which gives context for the level of contest problem solving being evaluated. We use the 30-question AIME 2024 set distributed by HuggingFaceH4, with 48 final repeats per problem for each reported condition; each plotted data point therefore uses 1,440 model queries ( 30 × 48 ). The prompt asks for step-by-step reasoning and a boxed final answer. We strip Qwen thinking traces before parsing, then use boxed or final-answer integers; the primary metric is exact match, with a post-thinking exact-match diagnostic also recorded. 11  
+
+> 11 Dataset/prompt source: https://huggingface.co/datasets/HuggingFaceH4/aime_2024 .
+
+21 Rendered prompt contents: User. Solve the following math problem efficiently and clearly. The last line of your response should be of the following format: 
+
+'Therefore, the final answer is: $\boxed{ANSWER}$. I hope it is correct ' (without quotes) where ANSWER is just the final number or expression that solves the problem. Think step by step before answering. 
+
+Question. Every morning Aya goes for a 9-kilometer-long walk and stops at a coffee shop afterwards. When she walks at a constant speed of s kilometers per hour, the walk takes her 4 hours, including t minutes spent in the coffee shop. When she walks s + 2 kilometers per hour, the walk takes her 2 hours and 24 minutes, including t minutes spent in the coffee shop. Suppose Aya walks at s + 12 kilometers per hour. Find the number of minutes the walk takes her, including the t minutes spent in the coffee shop. 
+
+GPQA Diamond ( GPQA ). GPQA (Rein et al., 2024) evaluates graduate-level STEM scientific reasoning in a multiple-choice format. The questions are written for domain experts in biology, physics and chemistry, so the task is meant to probe expert-level scientific knowledge rather than general STEM familiarity. We use the 198-question Diamond split after applying a fixed answer-choice shuffle following the EleutherAI evaluation protocol, with 6 final repeats per problem for each reported condition; each plotted data point therefore uses 1,188 model queries ( 198 × 6). The prompt is zero-shot chain-of-thought with a forced final line, The answer is (X). We strip Qwen thinking traces, then parse boxed or final-answer choices before falling back to the last parenthesised choice. Following GPQA usage conditions, we redact the example question and answer choices here. 12 
+
+Rendered prompt contents: System. Here are some example questions from experts. Answer the question by selecting one of the provided choices. 
+
+User. Question. [REDACTED] 
+
+Choices. [REDACTED] 
+
+Instruction. Let’s think step by step. After reasoning, end with exactly: The answer is (X). 
+
+LiveCodeBench Lite v6 ( LCB ). LCB tests contest-style code generation from contemporary programming problems. The benchmark draws from competitive-programming platforms and scores submissions by execution against tests, giving a difficult contest-programming style evaluation. We use LiveCodeBench Code Generation Lite v6, the 175-problem v6 test split and non-cumulative v6 slice of Code Generation Lite (Jain et al., 2025; LiveCodeBench, 2025), with 6 final repeats per problem for each reported condition; each plotted data point therefore uses 1,050 model queries ( 175 × 6). The chat prompt gives the problem statement, asks for a Python programme using standard input/output, and requires fenced code. The parser extracts the final fenced Python block, matching the LiveCodeBench extraction policy; we execute extracted Python solutions against the bundled LCB-lite tests and report pass@1. 13 
+
+Rendered prompt contents: System. You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests. 
+
+User. ### Question: 
+
+Question. Among the 81 integers in the 9-by-9 multiplication table, find the sum of those that are not X. Each cell in row i
+
+and column j contains i × j. The input is a single integer X between 1 and 81. Print the sum, counting repeated table entries separately. 
+
+### Format: Read the inputs from stdin solve the problem and write the answer to stdout (do not directly test on the sample inputs). Enclose your code within delimiters as follows. Ensure that when the python program runs, it reads the inputs, runs the algorithm and writes output to STDOUT. 
+
+``` python # YOUR CODE HERE 
+
+``` 
+
+### Answer: (use the provided format with backticks)        
+
+> 12 Dataset: https://huggingface.co/datasets/Idavidrein/gpqa .Prompt/scoring reference: https://github.com/EleutherAI/ lm-evaluation-harness/tree/v0.4.11/lm_eval/tasks/gpqa .
+> 13 Dataset: https://huggingface.co/datasets/livecodebench/code_generation_lite .Benchmark reference: https://github.com/ LiveCodeBench/LiveCodeBench .
+
+22 D.2 Models, Sampling Parameters and Relaxation Parameters 
+
+Models. We evaluate three reported model settings. The first two use Qwen3-32B as verifier with either Qwen3-0.6B or Qwen3-8B as drafter (Yang et al., 2025). The third uses Qwen3.5-27B in native-MTP mode, with no separate draft model (Qwen Team, 2026). 14 All three settings run AIME24 , GPQA , and LCB . As an additional model-family check, we evaluate Llama-3.1-70B-Instruct as verifier with Llama-3.2-1B-Instruct as drafter on GPQA only (Llama Team, 2024). 15 
+
+Sampling parameters. For all reported Qwen settings, we use the sampling parameters recommended in the Qwen3 tech report (Yang et al., 2025) for thinking mode, temperature=0.6, top-p=0.95 and top-k=20, omitting additional logit-penalty parameters for simplicity. The standard thinking budget is 32,768 tokens and the maximum generation length is 36,864 tokens. The Qwen3.5-27B native-MTP setting uses a 65,536-token thinking budget and 69,632-token maximum generation length on AIME24 and LCB .The generation protocol enforces the Qwen thinking budget operationally. Generation proceeds up to the thinking budget. If no </think> token sequence appears, the reasoning block is closed with a fixed early-stop message and 
+
+</think> , after which answer generation continues within the remaining token budget. For the Llama GPQA run, we use the Hugging Face generation-config sampling parameters, temperature=0.6 and top-p=0.9, with no top-k filtering. Llama does not use a thinking mode; the maximum generation length is 4096 tokens. 
+
+Relaxation parameters. For the reported capability-speed grids, all speculative rows use draft lengths Ndraft ∈{3, 5, 10 , 20 }. We include AR verifier baselines, strict spec-dec (Leviathan et al., 2023), CACTUS (Hao & Mou, 2026), ens (Wang et al., 2026), spec-casc-opt and spec-casc-tok (Narasimhan et al., 2025), spec-cont-dec (Yuan et al., 2024), mentored-dec (Tran-Thien, 2023), and r-fuzzy (Holsman et al., 2025). The relaxed parameter grids are CACTUS α ∈ { 0.10 , 0.25 , 1.00 , 10 .00 }, ens drafter weight α ∈ { 0.05 , 0.10 , 0.20 } (equivalently verifier weight 
+
+1 − α ∈ { 0.95 , 0.90 , 0.80 }), spec-casc-opt α ∈ {− 0.10 , 0.00 , 0.05 }, spec-casc-tok α ∈ { 0.00 , 0.35 , 0.80 },
+
+mentored-dec α ∈ {0.30 , 0.70 , 0.95 }, spec-cont-dec α ∈ {0.10 , 0.50 , 1.00 }, and r-fuzzy threshold 
+
+{0.05 , 0.20 , 0.30 }. The Qwen3.5 native-MTP setting uses the same method definitions with its built-in MTP proposer. The Llama GPQA setting uses the same draft lengths and relaxation grids (other than α = 0 .1 is unevaluated for CACTUS ). 
+
+D.3 Compute Environment 
+
+The main generation experiments were run as single-GPU jobs, on NVIDIA H100 and B200 GPUs, using vLLM 0.20.1 and PyTorch 2.11.0+cu130. We did not use tensor parallelism, data parallelism, pipeline parallelism, or FSDP within a generation job. As described in the main body, speed-up values in the figures are reported with the response-length-aware proxy in Eq. (4), rather than as direct end-to-end wall-clock serving benchmarks. 
+
+E Additional Results 
+
+Full empirical results are in Figs. 7 to 10. These figures use the same capability-speed grid as the main body, without the highlighted annotations, so the broader behaviour across tasks can be inspected directly. Overall, broader results across Figs. 7 to 10 match the takeaways and findings in the main body of the paper.        
+
+> 14 Model cards: https://huggingface.co/Qwen/Qwen3-32B ,https://huggingface.co/Qwen/Qwen3-0.6B ,https://huggingface.co/ Qwen/Qwen3-8B , and https://huggingface.co/Qwen/Qwen3.5-27B .
+> 15 Model cards: https://huggingface.co/meta-llama/Llama-3.1-70B-Instruct and https://huggingface.co/meta-llama/Llama-3. 2-1B-Instruct .
+
+23 AR strict spec-dec lossless ± standard error Ndraft = 3 Ndraft = 5 Ndraft = 10 Ndraft = 20 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+> crel  = 0.05
+
+CACTUS 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+r-fuzzy 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+ens 
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+spec-casc-opt 
+
+92.0 
+
+93.0 
+
+94.0 
+
+95.0 
+
+96.0 
+
+spec-cont-dec 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+mentored-dec 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+spec-casc-tok 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+> crel  = 0.2
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+92.0 
+
+93.0 
+
+94.0 
+
+95.0 
+
+96.0 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+0.5 1 2 5
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+0.5 1 2 5
+
+92.0 
+
+93.0 
+
+94.0 
+
+95.0 
+
+96.0 
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+0.5 1 2 5
+
+75.0 
+
+80.0 
+
+85.0 
+
+90.0 
+
+> Qwen3.5 MTP+27B
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> crel  = 0.05
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+55.0 
+
+60.0 
+
+65.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+80.0 
+
+81.0 
+
+82.0 
+
+83.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> crel  = 0.2
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+55.0 
+
+60.0 
+
+65.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+80.0 
+
+81.0 
+
+82.0 
+
+83.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+0.5 1 2 5
+
+55.0 
+
+60.0 
+
+65.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+0.5 1 2 5
+
+80.0 
+
+81.0 
+
+82.0 
+
+83.0 
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+0.5 1 2 5
+
+74.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+> Qwen3 0.6B+32B
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> crel  = 0.05
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+77.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> crel  = 0.2
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+77.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+0.5 1 2 5
+
+77.0 
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+0.5 1 2 5
+
+78.0 
+
+79.0 
+
+80.0 
+
+81.0 
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+0.5 1 2 5
+
+76.0 
+
+78.0 
+
+80.0 
+
+82.0 
+
+> Qwen3 8B+32B
+
+length-adjusted speed-up (log scale) 
+
+AIME24 Figure 7: Capability-speed trade-offs on AIME24 for relaxed spec-dec methods across drafter+verifier pairs, relative drafter costs crel and draft lengths Ndraft . Each block shows one drafter+verifier pair, with method columns and crel rows. The x-axis is length-adjusted speed-up (log scale) and the y-axis is task capability. 24 AR strict spec-dec lossless ± standard error Ndraft = 3 Ndraft = 5 Ndraft = 10 Ndraft = 20 
+
+82.0 
+
+84.0 
+
+86.0 
+
+> crel  = 0.05
+
+CACTUS 
+
+82.0 
+
+84.0 
+
+86.0 
+
+r-fuzzy 
+
+82.0 
+
+84.0 
+
+86.0 
+
+ens 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+spec-casc-opt 
+
+85.5 
+
+86.0 
+
+86.5 
+
+87.0 
+
+87.5 
+
+spec-cont-dec 
+
+82.0 
+
+84.0 
+
+86.0 
+
+mentored-dec 
+
+82.0 
+
+84.0 
+
+86.0 
+
+spec-casc-tok 
+
+82.0 
+
+84.0 
+
+86.0 
+
+> crel  = 0.2
+
+82.0 
+
+84.0 
+
+86.0 
+
+82.0 
+
+84.0 
+
+86.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+85.5 
+
+86.0 
+
+86.5 
+
+87.0 
+
+87.5 
+
+82.0 
+
+84.0 
+
+86.0 
+
+82.0 
+
+84.0 
+
+86.0 
+
+0.5 1 2 5
+
+82.0 
+
+84.0 
+
+86.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+82.0 
+
+84.0 
+
+86.0 
+
+0.5 1 2 5
+
+82.0 
+
+84.0 
+
+86.0 
+
+0.5 1 2 5
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+0.5 1 2 5
+
+85.5 
+
+86.0 
+
+86.5 
+
+87.0 
+
+87.5 
+
+0.5 1 2 5
+
+82.0 
+
+84.0 
+
+86.0 
+
+0.5 1 2 5
+
+82.0 
+
+84.0 
+
+86.0 
+
+> Qwen3.5 MTP+27B
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+> crel  = 0.05
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+40.0 
+
+45.0 
+
+50.0 
+
+55.0 
+
+60.0 
+
+65.0 
+
+63.0 
+
+64.0 
+
+65.0 
+
+66.0 
+
+67.0 
+
+68.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+> crel  = 0.2
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+40.0 
+
+45.0 
+
+50.0 
+
+55.0 
+
+60.0 
+
+65.0 
+
+63.0 
+
+64.0 
+
+65.0 
+
+66.0 
+
+67.0 
+
+68.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+0.2 0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+> crel  = 0.5
+
+0.2 0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+0.2 0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+0.2 0.5 1 2 5
+
+40.0 
+
+45.0 
+
+50.0 
+
+55.0 
+
+60.0 
+
+65.0 
+
+0.2 0.5 1 2 5
+
+63.0 
+
+64.0 
+
+65.0 
+
+66.0 
+
+67.0 
+
+68.0 
+
+0.2 0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+0.2 0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+> Qwen3 0.6B+32B
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+> crel  = 0.05
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+62.0 
+
+63.0 
+
+64.0 
+
+65.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+> crel  = 0.2
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+62.0 
+
+63.0 
+
+64.0 
+
+65.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+0.5 1 2 5
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+0.5 1 2 5
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+0.5 1 2 5
+
+60.0 
+
+62.0 
+
+64.0 
+
+0.5 1 2 5
+
+62.0 
+
+63.0 
+
+64.0 
+
+65.0 
+
+0.5 1 2 5
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+0.5 1 2 5
+
+60.0 
+
+62.0 
+
+64.0 
+
+66.0 
+
+> Qwen3 8B+32B
+
+length-adjusted speed-up (log scale) 
+
+GPQA Figure 8: Capability-speed trade-offs on GPQA for relaxed spec-dec methods across drafter+verifier pairs, relative drafter costs crel and draft lengths Ndraft . Each block shows one drafter+verifier pair, with method columns and crel rows. The x-axis is length-adjusted speed-up (log scale) and the y-axis is task capability. 25 AR strict spec-dec lossless ± standard error Ndraft = 3 Ndraft = 5 Ndraft = 10 Ndraft = 20 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+> crel  = 0.05
+
+CACTUS 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+r-fuzzy 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+ens 
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+spec-casc-opt 
+
+70.0 
+
+75.0 
+
+80.0 
+
+spec-cont-dec 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+mentored-dec 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+spec-casc-tok 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+> crel  = 0.2
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+70.0 
+
+75.0 
+
+80.0 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+0.5 1 2 5
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+0.5 1 2 5
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+0.5 1 2 5
+
+20.0 
+
+40.0 
+
+60.0 
+
+80.0 
+
+0.5 1 2 5
+
+70.0 
+
+75.0 
+
+80.0 
+
+0.5 1 2 5
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+0.5 1 2 5
+
+40.0 
+
+50.0 
+
+60.0 
+
+70.0 
+
+80.0 
+
+> Qwen3.5 MTP+27B
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> crel  = 0.05
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+35.0 
+
+40.0 
+
+45.0 
+
+50.0 
+
+55.0 
+
+60.0 
+
+58.0 
+
+59.0 
+
+60.0 
+
+61.0 
+
+62.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> crel  = 0.2
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+35.0 
+
+40.0 
+
+45.0 
+
+50.0 
+
+55.0 
+
+60.0 
+
+58.0 
+
+59.0 
+
+60.0 
+
+61.0 
+
+62.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+35.0 
+
+40.0 
+
+45.0 
+
+50.0 
+
+55.0 
+
+60.0 
+
+0.5 1 2 5
+
+58.0 
+
+59.0 
+
+60.0 
+
+61.0 
+
+62.0 
+
+0.5 1 2 5
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+52.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> Qwen3 0.6B+32B
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> crel  = 0.05
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+55.0 
+
+56.0 
+
+57.0 
+
+58.0 
+
+59.0 
+
+57.0 
+
+58.0 
+
+59.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> crel  = 0.2
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+55.0 
+
+56.0 
+
+57.0 
+
+58.0 
+
+59.0 
+
+57.0 
+
+58.0 
+
+59.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> crel  = 0.5
+
+0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+54.0 
+
+55.0 
+
+56.0 
+
+57.0 
+
+58.0 
+
+59.0 
+
+0.5 1 2 5
+
+57.0 
+
+58.0 
+
+59.0 
+
+0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+0.5 1 2 5
+
+54.0 
+
+56.0 
+
+58.0 
+
+60.0 
+
+> Qwen3 8B+32B
+
+length-adjusted speed-up (log scale) 
+
+LCB Figure 9: Capability-speed trade-offs on LCB for relaxed spec-dec methods across drafter+verifier pairs, relative drafter costs crel and draft lengths Ndraft . Each block shows one drafter+verifier pair, with method columns and crel rows. The x-axis is length-adjusted speed-up (log scale) and the y-axis is task capability. 26 GPQA - Drafter = Llama 3.2 1B, Verifier = Llama 3.1 70B 
+
+AR strict spec-dec lossless ± standard error Ndraft = 3 Ndraft = 5 Ndraft = 10 Ndraft = 20 
+
+41.0 
+
+42.0 
+
+43.0 
+
+44.0 
+
+45.0 
+
+46.0 
+
+> CACTUS
+
+crel = 0.05 
+
+41.0 
+
+42.0 
+
+43.0 
+
+44.0 
+
+45.0 
+
+46.0 
+
+crel = 0.2 
+
+41.0 
+
+42.0 
+
+43.0 
+
+44.0 
+
+45.0 
+
+46.0 
+
+crel = 0.5 
+
+36.0 
+
+38.0 
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+> r-fuzzy
+
+36.0 
+
+38.0 
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+36.0 
+
+38.0 
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+38.0 
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+> ens
+
+38.0 
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+38.0 
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+30.0 
+
+35.0 
+
+40.0 
+
+45.0 
+
+> spec-casc-opt
+
+30.0 
+
+35.0 
+
+40.0 
+
+45.0 
+
+30.0 
+
+35.0 
+
+40.0 
+
+45.0 
+
+45.0 
+
+46.0 
+
+47.0 
+
+> spec-cont-dec
+
+45.0 
+
+46.0 
+
+47.0 
+
+45.0 
+
+46.0 
+
+47.0 
+
+40.0 
+
+41.0 
+
+42.0 
+
+43.0 
+
+44.0 
+
+45.0 
+
+46.0 
+
+> mentored-dec
+
+40.0 
+
+41.0 
+
+42.0 
+
+43.0 
+
+44.0 
+
+45.0 
+
+46.0 
+
+40.0 
+
+41.0 
+
+42.0 
+
+43.0 
+
+44.0 
+
+45.0 
+
+46.0 
+
+0.5 1 2 5
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+> spec-casc-tok
+
+0.5 1 2 5
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+0.5 1 2 5
+
+40.0 
+
+42.0 
+
+44.0 
+
+46.0 
+
+length-adjusted speed-up (log scale) Figure 10: Capability-speed trade-offs on GPQA for relaxed spec-dec methods for Llama3, relative drafter costs crel 
+
+and draft lengths Ndraft . The x-axis is length-adjusted speed-up (log scale) and the y-axis is task capability. 27 F Memory Cost Analysis 
+
+Fig. 11 shows how the memory cost of r-fuzzy for varying verifier size and batch size. r-fuzzy is the most memory hungry method in Tab. 2 as it requires additional [batch_size, vocab_size, draft_length] tensors for (parallel) Jensen-Shannon Divergence calculation. We find that for the recent model Qwen3.5 we only see proportionally large memory overheads for a deployment setting of (small model, longer draft length, larger batch, shorter context). 
+
+G vLLM speculative decoding 
+
+As shown in Tab. 1, on a single-GPU NVIDIA GH200 Grace Hopper Superchip with vLLM 0.20.1 and PyTorch 2.11.0+cu130, a small drafter is much cheaper when run as an ordinary autoregressive model than when used inside stock vLLM spec-dec . This gap is an implementation effect rather than a property of the drafter alone. In autoregressive decoding, vLLM can compile and capture the repeated decode loop, largely removing CPU-side scheduling and kernel-launch overheads. In separate-draft-model spec-dec , each round must instead coordinate drafting, verification, acceptance, resampling and cache updates, and this work is not collapsed into the same low-overhead loop. Our profiling indicates that the drafter path is therefore dominated by host-side coordination and many small GPU launches, making its effective cost much closer to the target-model token cost than its standalone autoregressive cost. We consequently treat stock vLLM wall-clock speed for separate autoregressive drafters as a diagnostic of current serving overhead, not as an inherent limit of spec-dec . This motivates our use of Eqs. (2) and (4) to explore potential speed-ups at different drafter costs. 
+
+H MTP Support 
+
+We note that current production inference stacks do not always expose spec-dec with a separate autoregressive drafter once a model architecture has native MTP support. That is to say, frameworks sometimes force users to use a bundled MTP drafter if it exists. In vLLM, models recognised as native-MTP-capable are redirected through an MTP-specific configuration path: a draft checkpoint whose architecture matches this family is rewritten to an MTP model class, and the speculative method is subsequently inferred as MTP rather than as a separate autoregressive draft model. 16 SGLang im-plements a similar convention for its draft worker: the user-specified draft checkpoint is loaded in a mode that marks it as a drafter, and supported native-MTP architectures are then rewritten to the corresponding MTP implementation instead of retaining the full checkpoint as an independent autoregressive model. 17 Consequently, for such model families, supplying a smaller checkpoint through the standard draft-model interface does not provide a supported route to ordinary two-model spec-dec : the request is either diverted into the MTP implementation, or fails with load- or run-time errors when the resulting assumptions about target-side hidden states, weight names, dimensions, and cache structure are violated.                                
+
+> 16 vLLM lists native-MTP model types in MTPModelTypes :https://github.com/vllm-project/vllm/blob/ b7f9b6ab271faa621f4cc438fd5ea7ecaf72db8e/vllm/config/speculative.py#L34-L53 . Its speculative config override rewrites matching draft configs into MTP architectures, e.g. https://github.com/vllm-project/vllm/blob/b7f9b6ab271faa621f4cc438fd5ea7ecaf72db8e/ vllm/config/speculative.py#L460-L468 , and later dispatches such draft configs to method = "mtp" :https://github.com/vllm-project/ vllm/blob/b7f9b6ab271faa621f4cc438fd5ea7ecaf72db8e/vllm/config/speculative.py#L713-L716 .
+> 17 SGLang’s draft worker selects speculative_draft_model_path while passing is_draft_model=True :https://github.com/ sgl-project/sglang/blob/50815d54a7b6502342aa037cf462cb1677190a82/python/sglang/srt/managers/tp_worker.py#L329-L341 . Its model config then rewrites supported draft architectures to MTP variants, e.g. https://github.com/sgl-project/sglang/blob/ 50815d54a7b6502342aa037cf462cb1677190a82/python/sglang/srt/configs/model_config.py#L473-L488 ,whose implementation con-sumes target-side speculative hidden states rather than operating as an ordinary independent LM: https://github.com/sgl-project/sglang/ blob/50815d54a7b6502342aa037cf462cb1677190a82/python/sglang/srt/models/qwen3_5_mtp.py#L170-L181 .
+
+28 1 2 4 8 16 32 
+
+batch size    
+
+> 0
+> 2
+> 4
+> 6
+> modelled memory cost (GiB)
+> Ndraft = 10, V= 248320
+
+Qwen3.5-2B-MTP      
+
+> 124816 32
+
+batch size 
+
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+
+Qwen3.5-27B-MTP    
+
+> weights inc. MTP KV cache @ ctx len = 2048 strict spec-dec overhead r-fuzzy extra
+
+Figure 11: Modelled memory cost for native-MTP Qwen3.5 models as batch size increases. The decomposition separates checkpoint weights, KV cache, strict speculative-decoding overhead, and additional r-fuzzy overhead. 29
