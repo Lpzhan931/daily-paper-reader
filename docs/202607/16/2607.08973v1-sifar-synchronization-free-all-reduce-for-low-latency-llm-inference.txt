@@ -1,0 +1,873 @@
+Title: SiFAR: Synchronization-Free All-Reduce for Low-Latency LLM Inference
+
+URL Source: https://arxiv.org/pdf/2607.08973v1
+
+Published Time: Mon, 13 Jul 2026 00:18:39 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# SiFAR: Synchronization-Free All-Reduce for Low-Latency LLM Inference 
+
+Hritvik Taneja *
+
+htaneja3@gatech.edu 
+
+Anish Saxena *
+
+asaxena317@gatech.edu 
+
+Abhishek Revinipati *
+
+arevinipati3@gatech.edu 
+
+Jae Hyung Ju *
+
+jju35@gatech.edu 
+
+Neal C. Crago †
+
+ncrago@nvidia.com 
+
+Moinuddin Qureshi *
+
+moin@gatech.edu 
+
+## Abstract 
+
+The rise of reasoning models and agentic systems has made LLM token-generation latency a key bottleneck. Unlike chatbots, where latency gains saturate at human reading speed, these systems gen-erate intermediate reasoning tokens that are not consumed by hu-mans. As a result, per-token latency directly determines end-to-end response time. To reduce latency, inference engines operate with minimal batching, making token generation bandwidth-bound. Ten-sor Parallelism addresses this bottleneck by sharding model weights across GPUs and loading them in parallel. However, scaling to more GPUs introduces All-Reduce overheads that grow with GPU count. We observe that removing All-Reduce improves token throughput by 43% for Llama-3.1-8B on 8 H200 GPUs. To address this overhead, we propose Synchronization-Free All-Reduce (SiFAR) , which reduces synchronization overheads incurred by All-Reduce during low-latency inference. Existing oneshot and twoshot algorithms incur high synchronization overheads due to barriers before and after communication, accounting for 32–62% of the latency for small payloads we observe in low-batch serving. To tackle this, first, we find that the bottom barrier in oneshot enforces a WAW dependency, and eliminate it by co-designing communication and model execution to enable dual buffering. However, oneshot scales poorly with GPU count. Twoshot performs better at higher TP degrees, but incurs an unavoidable bottom barrier. To overcome this, we leverage in-switch reduction in modern switches, primarily used for reduce-scatter. We propose redundant pull, where each GPU reduces the entire all-reduce payload at the switch. This im-proves oneshot scalability while retaining its no bottom barrier advantage. Finally, to reduce top barrier overhead, we observe that each token generation step issues multiple All-Reduce operations, keeping GPUs tightly synchronized after the first All-Reduce. We therefore propose speculative reduction , which initiates data trans-fer without waiting for the top barrier and ensures correctness via a lightweight validation mechanism. SiFAR reduces All-Reduce latency by up to 52% and improves end-to-end throughput by 18.6% for Llama-3.1-8B and 13.1% for Qwen3.5-397B-17B at TP=8. 
+
+## Keywords 
+
+Low-Latency LLM Inference, All-Reduce, In-Switch Reduction 
+
+## 1 Introduction 
+
+The advent of agentic systems [ 1, 26 , 31 ] and reasoning models [ 17 ]has made low-latency LLM token generation critical. In human-facing LLM applications such as chatbots, each token is read by users, so reducing latency beyond human reading speed provides di-minishing returns. In contrast, these systems generate intermediate reasoning tokens that are not consumed by humans, so per-token 
+
+> ∗Georgia Institute of Technology, Atlanta, Georgia, USA
+> †NVIDIA, Santa Clara, California, USA
+
+latency compounds across steps and directly impacts end-to-end re-sponse time. Recent proposals for hardware accelerators tailored for reasoning [ 2] and industry platforms like NVIDIA Groq LPU [ 39 ]further emphasize the importance of optimizing for low-latency inference. In this work, we focus on reducing token generation latency in GPU-based inference. 
+
+The Low-Latency Challenge. The first step towards reducing to-ken generation latency is to minimize batching, since larger batches delay individual token generation by (1) increasing the size of KV Cache and (2) activating more model parameters (for MoE [ 29 ]). With minimal batching, loading model weights and KV Cache from HBM becomes the primary bottleneck. Tensor Parallelism (TP) addresses this memory-bandwidth bottleneck by partitioning the model weights and KV Cache across multiple GPUs and loading them in parallel with aggregate bandwidth. However, scaling across GPUs to improve bandwidth introduces additional bottlenecks, in-cluding kernel launch overheads [ 33 ], on-chip delays [ 21 ], HBM under-utilization [48], and communication overheads. 
+
+All-Reduce: The Emerging Bottleneck. Recent advances in system software mitigate many non-communication bottlenecks. Megakernels [ 48 , 56 ] eliminate kernel launch overheads and im-prove HBM utilization by fusing the forward pass, while Program-matic Dependent Launch [ 34 ] enables prefetching across kernels. As these optimizations reduce compute-side overheads, All-Reduce communication emerges as the dominant cost. To quantify this trend, we measure time per output token (TPOT) for Llama 3.1 8B on H200 GPUs using a Megakernel implementa-tion [ 48 ]. As we scale from TP=1 to TP=8, TPOT reduces from 2.73 ms to 1.43 ms, and the fraction of time in All-Reduce increases from 0% to 30% (corresponding to a 43% throughput gain). Thus, All-Reduce becomes a growing contributor to latency and is poised to dominate as other bottlenecks diminish. Despite this, optimizing All-Reduce for low-latency inference remains largely unexplored. 
+
+Limitations of Prior Work. Prior approaches to reducing All-Reduce overhead, such as kernel fusion [ 9 , 63 , 64 ] and microbatch-ing [ 15 , 61 , 65 ], rely on overlapping communication with computa-tion from large batches. However, these techniques are ineffective for low-batch inference, where there is insufficient compute to hide communication. The goal of this work is to directly optimize All-Reduce to minimize its latency. 
+
+All-Reduce Algorithms. The two most common All-Reduce algo-rithms in LLM inference are oneshot [52 ] and twoshot [54 ]. Oneshot completes reduction in a single round trip, where each GPU pulls the entire buffer from all peers and reduces it locally. Twoshot de-composes reduction into a reduce-scatter followed by a broadcast: GPUs first reduce disjoint 𝐾 /𝑁 portions of the payload ( 𝐾 : payload size, 𝑁 : number of GPUs), then broadcast the results so each GPU receives the full reduced output. Compared to oneshot, this reduces data transfer but requires two round trips.             
+
+> 1arXiv:2607.08973v1 [cs.DC] 9 Jul 2026 GPU1
+> GPU2 GPU3
+> NVSwitch
+> acc = p0 + p1 + p2 + p3
+> GPU0
+> Time
+> Bottom Barrier
+> Top Barrier
+> 32-50%
+> Synchronization Overhead
+> Eliminating
+> WAW
+> Dependency
+> Dual Buffering
+> Barrier
+> All-Reduce
+> Barrier
+> Barrier
+> All-Reduce
+> (b)
+> GPU1
+> GPU2 GPU3
+> NVSwitch
+> GPU0
+> Redundant Pull
+> Oneshot
+> Twoshot
+> SiFAR
+> Sends Receives Round Trips
+> K·(N-1) K·(N-1) 1
+> K+K/N K2
+> K·N K1
+> Algorithm
+> (a) (c)
+> Verify Verify
+> Barrier
+> All-Reduce
+> (d)
+> All-Reduce
+> Speculative Reduction
+> Retry
+> acc
+> K = Payload Size (Bytes) and N = Num GPUs
+
+Figure 1: (a) Oneshot All-Reduce with top and bottom barriers around data transfer; these barriers account for up to 50% of latency for small payloads. (b) Dual buffering removes the bottom barrier by eliminating the write-after-write dependency. (c) Redundant pull uses in-switch reduction to reduce the full payload per GPU, extending its use beyond reduce-scatter in twoshot. (d) SiFAR reduces the top barrier overhead by using speculation and retrying on mis-speculation. Key Findings. Both oneshot and twoshot require a synchroniza-tion barrier before and after the data transfer phase. We find that for small payloads typical of low-batch inference, these barriers account for 32-50% of oneshot latency and 49-62% of twoshot la-tency (Figure 1 (a)). Our key insight is to minimize All-Reduce overheads by reducing the cost of these expensive barriers. To that end, we propose Synchronization-Free All-Reduce (SiFAR) 1.
+
+Removing Bottom Barrier via Dual Buffering. The bottom barrier in oneshot ensures all peers have finished reading the pay-load buffer before the owning GPU overwrites it with new data, enforcing a write-after-write dependency. We eliminate this barrier using dual buffering. The inference engine alternates between two payload buffers across successive All-Reduce operations, ensuring that the payload is never overwritten before all peers finish read-ing. While dual buffering is well known, it is not widely used in current LLM serving systems because communication libraries like NCCL [ 36 ] are decoupled from model execution and cannot make assumptions about buffer reuse patterns. SiFAR overcomes this by co-designing communication with model execution, enabling dual buffering in systems like vLLM [ 24 ] and Megakernels [ 48 ] without changes to their memory management (Figure 1 (b)). However, removing the bottom barrier is insufficient. Oneshot scales poorly with GPU count, making it slower than twoshot be-yond TP=2. At TP=8 with an 8 KB payload, oneshot takes 4.01 𝜇 s for data transfer compared to 1.96 𝜇 s for twoshot. While twoshot has lower data transfer latency, it requires a bottom barrier that cannot be eliminated because it enforces a read-after-write dependency af-ter the broadcast phase of twoshot. Ideally, we want oneshot latency to be comparable to twoshot so that dual buffering is effective. 
+
+Reducing Data Transfer via In-Switch Computation. To achieve this, we leverage in-switch computation available in modern NVIDIA switches via the multimem.ld_reduce instruction [ 37 ]. When a GPU issues ld_reduce , the switch pulls data from all peers, per-forms the reduction, and returns the result to the requesting GPU. In existing systems, this primitive is primarily used in the reduce-scatter phase of twoshot, where each GPU reduces a disjoint 𝐾 /𝑁 
+
+portion of the payload at the switch. However, we find that ld_reduce 
+
+can reduce oneshot latency beyond its conventional use in the reduce-scatter phase of twoshot. Reduce-scatter latency remains  
+
+> 1Sifar means zero in Urdu, reflecting our goal of making All-Reduce overheads “zero”.
+
+flat up to 64 KB and grows only slightly up to 256 KB. At TP=8, a 256 KB reduce-scatter means each GPU reduces 32 KB at the switch, which is comparable to the 4-32 KB payloads in low-batch inference. Our insight is that if the switch can reduce 32 KB per GPU with low latency, each GPU can issue ld_reduce over the entire 4–32 KB payload instead of a disjoint partition. We call this 
+
+redundant pull : each GPU reduces the full 𝐾 -byte payload at the switch and receives only 𝐾 bytes instead of 𝐾 × ( 𝑁 − 1) in oneshot, ensuring dual buffering remains effective (Figure 1(c)). 
+
+Reducing Top Barrier Overhead via Speculative Reduction. 
+
+The top barrier ensures all GPUs have produced valid partials before communication begins, enforcing a RAW dependency that cannot be simply eliminated. However, we observe that LLM decoding issues multiple All-Reduce operations per token. As a result, GPUs remain tightly synchronized after the first All-Reduce, as they exe-cute identical operations across successive All-Reduces. Thus, the overhead of the top barrier is primarily due to flag exchange, not divergence between GPUs. This leads to our third optimization: 
+
+speculate and verify . When a GPU enters an All-Reduce, it specula-tively begins fetching data from peers, assuming their data is ready, thereby avoiding explicit flag exchange. To ensure correctness, each GPU writes a flag to a validation buffer that is reduced alongside the payload. If the result equals 𝑁 × flag after reduction, all GPUs had valid data and speculation succeeded. Otherwise, SiFAR reruns the All-Reduce. In practice, speculative reduction substantially reduces top-barrier overhead (Figure 1(d)). 
+
+Results. We integrate SiFAR into Megakernels [ 48 ], a state-of-the-art for low-latency LLM inference, and evaluate it on H200s. SiFAR reduces All-Reduce latency by up to 52% for payloads up to 32 KB and improves throughput by 18.6% for Llama-3.1-8B and 13.1% for Qwen3.5-397B-17B at TP=8. Our contributions are as follows: (1) We identify that synchronization barriers dominate All-Reduce latency in low-latency tensor-parallel LLM inference, account-ing for up to 62% of total All-Reduce time. (2) We propose Synchronization-Free All-Reduce (SiFAR), which eliminates the bottom barrier via dual buffering, reduces data transfer via redundant pull, and minimizes the top barrier via speculative reduction. (3) We demonstrate SiFAR reduces All-Reduce latency by up to 52% and improves end-to-end throughput by up to 18.6%. 
+
+> 2
+
+## 2 Background and Motivation 2.1 LLM Inference: System Design and Metrics 
+
+LLM inference consists of two phases: prefill and decode . During the prefill phase, the model processes all input prompt tokens in parallel, making it compute-bound. In contrast, the decode phase loads all the model weights from memory to produce the next token, making it memory bandwidth-bound. To amortize the cost of repeatedly loading model weights, most LLM inference engines batch requests from multiple users together during inference, trading off latency for higher aggregate throughput. 
+
+Performance Metrics. The performance of LLM inference systems is measured using two latency metrics: Time-to-First-Token (TTFT) 
+
+and Time-per-Output-Token (TPOT) . TTFT measures the time taken to process the prompt and produce the first output token, while TPOT measures how quickly subsequent tokens are generated. Both metrics are critical for user experience: TTFT determines the initial responsiveness, and TPOT governs the perceived generation speed. In this work, we focus on optimizing TPOT, as it dominates end-to-end latency in many use cases of LLM-based applications. 
+
+## 2.2 Low Latency LLM Serving 
+
+Traditional LLM-based applications, such as chatbots, are designed to be human-facing, where each generated token is read by a hu-man. In such settings, reducing token generation latency (TPOT) beyond a certain point yields diminishing returns, since humans can only read 4-7 tokens/second [ 6]. However, newer reasoning models [ 17 ] and agentic systems [ 1, 26 , 31 ] operate under a differ-ent paradigm. Here, tokens are either consumed by other LLMs or used internally as intermediate reasoning steps rather than being read by humans. As a result, per-token latency compounds across steps, making TPOT the dominant contributor to end-to-end re-sponse time. Industry platforms such as the NVIDIA Groq LPU [ 39 ], which stores model weights in on-chip SRAM to improve memory bandwidth, as well as recent hardware proposals for reasoning [ 2], further highlight the growing importance of fast token generation. In this work, we focus on reducing TPOT in GPU-based inference. 
+
+## 2.3 Techniques for Low-Latency Serving 
+
+LLM inference systems face a fundamental tradeoff between through-put and interactivity. On one end, high-throughput systems max-imize aggregate tokens generated per second across all users by batching hundreds of requests together. On the other end, low-latency systems minimize TPOT by reducing batch sizes, prioritiz-ing responsiveness over throughput [46]. Batching requests from multiple users amortizes the cost of load-ing model weights across tokens. However, batching also increases token generation latency: larger batches require loading more KV cache during attention and activating more parameters in MoE models. Prior work [ 11 ] shows that TPOT increases substantially as batch size grows. We observe a similar trend when running Llama-3.1-8B and Qwen3.5-397B-17B at TP=8 on H200 GPUs using vLLM 0.18.1, where TPOT increases by more than 3.5 × when scal-ing from BS=1 to BS=256. Thus, minimizing batch size is essential for reducing TPOT in latency-sensitive settings. 
+
+Tensor Parallelism (TP) to Reduce TPOT. With minimal batch-ing, autoregressive decoding becomes memory bandwidth-bound, since each token generation step repeatedly streams large model weights from GPU memory. TP [ 47 ] is traditionally used to fit mod-els that exceed the memory capacity of a single GPU by sharding weight matrices across devices. However, TP also increases aggre-gate memory bandwidth, as each GPU loads only a fraction of the weights. Thus, after reducing batching, TP can further improve TPOT for bandwidth-bound LLM inference, even when the model fits on one GPU. Figure 2 illustrates how TP operates in LLMs. TP shards weight matrices across GPUs, requiring each layer to per-form two All-Reduce operations: one after attention and one after the feed-forward network. In each All-Reduce kernel all GPUs ex-change partial results and reduce them to produce the final output. Attention    
+
+> FFN or MoE
+> All-Reduce
+> All-Reduce
+> n layers
+> All-Reduce
+> GPU-1 GPU-2 GPU-3 GPU-4
+
+Figure 2: Overview of TP and All-Reduce: TP adds two All-Reduces to every layer of an LLM model. During All-Reduce, each GPU pulls partial results from all peers and reduces them locally to produce the complete result. 
+
+Other parallelism strategies are less effective for reducing TPOT. Pipeline parallelism [ 20 ] does not increase memory bandwidth, as each stage still loads full model weights sequentially. Expert parallelism [12] introduces load imbalance across experts, leading to uneven bandwidth utilization. As a result, neither approach is optimal for reducing TPOT. Thus, in this work, we focus on TP. 
+
+## 2.4 Communication Bottlenecks in Tensor Parallelism (TP) 
+
+Improving TPOT by scaling to more GPUs via TP introduces several overheads, including communication overheads from All-Reduce, kernel launch overheads, low HBM utilization, and GPU on-chip latency [ 48 ]. These overheads prevent ideal linear scaling of TPOT with increasing GPU count, which would otherwise be expected for bandwidth-bound, non-communication kernels. Recent system optimizations mitigate many of these non-communication bottle-necks. For example, Megakernels [ 48 , 56 ] fuse the forward pass into a single kernel to eliminate launch overheads and improve HBM utilization, while Programmatic Dependent Launch (PDL) [ 34 ] en-ables weights prefetching across kernel boundaries. Thus, as non-communication overheads are mitigated, All-Reduce becomes the dominant bottleneck in low-latency inference. To quantify the impact of All-Reduce on TPOT, we use a Megaker-nel [ 48 ] implementation, which fuses the forward pass into a single CUDA kernel, to evaluate Llama-3.1-8B [ 16 ], and Qwen3.5-397B-17B [ 41 ]. Figure 3 shows throughput (tokens/s) across different TP degrees, comparing execution with and without All-Reduce (i.e.,      
+
+> 3TP=2 TP=4 TP=8
+> 0
+> 250
+> 500
+> 750
+> 1000
+> Tokens/s
+> +18%
+> +32%
+> +43% Llama 3.1 8B
+> TP=4 TP=8
+> 0
+> 100
+> 200
+> 300 +16%
+> +21% Qwen3.5-397B-17B
+> With All-Reduce Without All-Reduce
+
+Figure 3: Impact of All-Reduce on TPOT across different TP degrees for Llama-3.1-8B and Qwen3.5-397B-17B. At higher TP, removing All-Reduce leads to larger gains, indicating that All-Reduce becomes an increasingly dominant bottleneck. 
+
+we feed the input of the All-Reduce directly to the next opera-tion instead). For Llama-3.1-8B, removing All-Reduce improves performance by 18% at TP=2 and 43% at TP=8. For Qwen3.5-397B-17B, removing All-Reduce improves performance by 16% at TP=4 and 21% at TP=8. Thus, using TP to achieve lower TPOT makes All-Reduce a significant bottleneck and will become increasingly dominant as other overheads are reduced. 
+
+## 2.5 Limitations of Prior Work 
+
+Microbatching. Prior works such as TokenWeave [15 ], DeepEP [61 ], and NanoFlow [65 ] use microbatching to overlap computation and communication by dividing large batches into smaller microbatches and pipelining their execution. This approach is effective at over-coming communication latencies when the workload is compute-bound, which occurs during prefill or decode with large batch sizes. However, in low-latency inference, batch sizes are intentionally kept small to minimize latency. As a result, microbatching pro-vides little benefit since there is insufficient computation to overlap with communication. Moreover, microbatching primarily improves throughput at the expense of single token latency, which is the key objective in our setting. 
+
+Fine-Grained Compute-Communication Overlap. Kernel fu-sion techniques [ 9, 63 , 64 ] fuse the All-Reduce kernel to the pre-ceding GEMM (matrix multiply) kernel and overlap compute and communication by sending partial results tile-by-tile. While effec-tive in hiding All-Reduce overheads for compute-bound GEMMs with large batch sizes (see Figure 4 (left)), fusion provides little benefit in low-latency inference (see Figure 4 (right)). With small batches, each GEMM only issues a small number of threadblocks, which can execute concurrently on the GPU, making computation insufficient to hide any communication latency. We quantify this using a fused GEMM implementation in Section 6.4. 
+
+## 2.6 Goal of this Work 
+
+The goal of this work is to minimize All-Reduce communication overheads during the decode phase of low-latency LLM inference using Tensor Parallelism. Unlike prior approaches that rely on compute-boundedness from large batch sizes to overlap communi-cation with computation, our solution directly reduces All-Reduce overheads in the low-latency inference regime, where batch sizes are minimal, and there is not enough computation to hide any communication overheads. Concurrent 
+
+> ThreadBlocks  Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comp
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comm
+> Comp
+> Comp
+> Comp
+> Comp
+> Comm
+> Comm
+> Comm
+> Comm
+> Large Batch Size
+> Communication Hidden Behind Compute
+> Small Batch Size
+> Exposed Communication
+> Time
+
+Figure 4: Fine-grained compute-communication overlap. While effective at hiding communication overhead for large batch sizes, this technique provides minimal overlap in low-latency inference due to insufficient computation. 
+
+## 3 Towards Synchronization-Free All-Reduce 
+
+In this section, we first describe the two All-Reduce algorithms used in LLM inference engines. Next, we show that synchronization overheads dominate the overall runtime of All-Reduce operations for small payloads. Finally, we present our insights that enable us to reduce the impact of these overheads by (1) eliminating the bottom-barrier via dual buffering, (2) using in-switch computation to reduce data transfer during All-Reduce, and (3) reducing the top-barrier overhead via speculative reduction. 
+
+## 3.1 All-Reduce: Oneshot & Twoshot Algorithms 
+
+Most LLM inference engines, including vLLM [ 24 ], SGLang [ 62 ], and TRT-LLM [ 35 ], use the oneshot or the twoshot All-Reduce algorithm (or one of their variants) for low-latency serving. The choice depends on payload size and TP degree. In this work we use the best of the two algorithms as our baseline. 
+
+Oneshot. The oneshot All-Reduce algorithm completes the entire reduction in a single communication round. Each GPU pulls the en-tire buffer from all peers and performs reduction locally. It consists of three phases: (1) a top barrier to ensure all GPUs have produced the partials before communication begins. (2) each GPU pulls the partials from all other GPUs and performs element-wise reduction (summation) on received tensors to produce the final result. (3) a bottom barrier to ensure all peers have finished reading the payload buffer before the owning GPU overwrites it. GPU-1                           
+
+> GPU-2
+> Time
+> WXYZ
+> ABCD
+> Input Buffer
+> ABCD
+> WXYZ
+> ++++
+> ABCD
+> WXYZ
+> ++++
+> Bottom
+> Barrier
+> All-Reduce
+> Top
+> Barrier
+> 13
+> 2Reduced Result
+
+Figure 5: Oneshot All-Reduce: each GPU pulls the entire buffer from all peers and reduces locally. Two barrier syn-chronizations at the start and end ensure correctness. 
+
+> 4
+
+Twoshot. The twoshot All-Reduce algorithm decomposes reduc-tion into two communication rounds: reduce-scatter followed by broadcast (all-gather). It consists of 4 phases: (1) a top barrier to ensure all GPUs have produced the partials before communication begins. (2) each GPU pulls a portion of the payload and reduces it. (3) each GPU broadcasts its reduced partial to all peers, allow-ing every GPU to reconstruct the full reduced result. (4) a bottom barrier to ensure that the broadcast writes are visible to all peers before moving on to the next operation. GPU-1          
+
+> GPU-2
+> Time
+> WXYZ
+> ABCD
+> Input Buffer Reduce
+> Scatter 2Broadcast 3
+> Bottom
+> Barrier
+> Top
+> Barrier
+> 13
+
+Figure 6: Twoshot All-Reduce: each GPU reduces a portion of the payload at the switch (reduce-scatter), then broadcasts its result to all peers. Two barrier synchronizations at the start and end ensure correctness. Data Transfer Comparison. The key difference between oneshot and twoshot lies in data movement. In oneshot, each GPU sends and receives 𝐾 × ( 𝑁 − 1) bytes (where 𝐾 is the payload size and 𝑁 is the number of GPUs), scaling linearly with GPU count. In contrast, twoshot keeps data transfer constant by decomposing reduction into two steps: reduce-scatter and broadcast. The data transfer dur-ing twoshot can be further reduced using in-switch computation capabilities [ 37 , 54 ] of modern switches. With in-switch compu-tation, across both steps of twoshot, each GPU sends 𝐾 + 𝐾 /𝑁 
+
+and receives 𝐾 bytes. In this work, we focus on this in-network implementation of twoshot. Oneshot is preferred when the payload size is small and the single round trip is more beneficial. Twoshot becomes more efficient at larger scales where the reduction in data transfer outweighs the cost of the additional round trip. 
+
+## 3.2 The Cost of Synchronization 
+
+While necessary for correctness, the barriers around All-Reduce introduce significant overhead. To quantify their impact on All-Reduce latency, we run the oneshot and twoshot All-Reduce imple-mentations from vLLM [ 52 , 54 ] with and without barriers across different payload sizes and TP configurations on an H200 node. Figure 7 shows the results, breaking down total latency into data transfer time and synchronization time. We observe that synchronization overhead accounts for 32-50% of oneshot and 49-62% of twoshot latency for small payloads (8-32 KB) across all TP configurations. For example, at TP=4 with 8 KB payload, oneshot takes 4.66 𝜇 s with barriers but only 2.33 𝜇 swithout, a 2 × slowdown purely from synchronization. For twoshot at TP=8 with 8 KB payload, barriers account for 3.15 𝜇 s out of 5.11 𝜇 s total, representing 62% overhead. Twoshot exhibits higher synchronization overhead because its bottom barrier must ensure that broadcast writes are visible before the next operation, which 8 16 32     
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> All-Reduce Latency (us)
+> TP=2
+> 816 32
+> TP=4
+> 816 32
+> TP=8
+> Size (KB)
+> Oneshot (Data Transfer, Barrier Overhead)
+> Twoshot (Data Transfer, Barrier Overhead)
+
+Figure 7: Breakdown of All-Reduce latency on H200 GPUs. Synchronization overhead accounts for 32-50% of oneshot and 49-62% of twoshot latency for small payloads across all TP configurations. 
+
+requires a more expensive acquire-release barrier that enforces write ordering. These sizes of 4-8 KB represent the All-Reduce payloads for most leading models [ 3 , 16 , 17 , 29 , 50 , 58 ] at batch size 1. Thus, during autoregressive decoding, every All-Reduce operation encounters this synchronization bottleneck, spending more time waiting at barriers than transferring and reducing data. 
+
+## 3.3 Insight 1: Removing Bottom-Barrier via Dual Buffering 
+
+The bottom barrier in oneshot prevents Write-After-Write (WAW) 
+
+hazards by ensuring all peers finish reading the payload buffer before the owning GPU overwrites it with new data. However, WAW is an avoidable dependency that can be eliminated through redundancy. Despite this, dual buffering is not widely used in cur-rent LLM serving systems because communication is handled by application-agnostic libraries like NCCL, which cannot make as-sumptions about buffer usage patterns and must include a bottom barrier to ensure correctness. 
+
+Eliminating the Bottom-Barrier. Our insight is to use dual buffering to eliminate the bottom-barrier from All-Reduce. By co-designing All-Reduce with the LLM inference engine, we can safely remove this barrier. Figure 8 illustrates our approach. We modify the inference engine to allocate two input buffers and alternate be-tween them across successive All-Reduce operations. This ensures that the payload buffer is never overwritten until the subsequent All-Reduce finishes, eliminating the need for a bottom-barrier. All-Reduce    
+
+> All-Reduce
+> Input
+> Buffer0
+> All-Reduce Input
+> Buffer
+> Bottom Barrier Required Bottom Barrier Not Needed
+> GEMM Input
+> Buffer
+> Input Buffer Being Reused
+> Input
+> Buffer1
+> Input Buffer0 not
+> reused until next AR
+> GEMM
+
+Figure 8: (left) Application-agnostic All-Reduce requires a bottom-barrier to prevent WAW hazards. (right) Dual buffer-ing ensures input buffer is reused only after the next All-Reduce, eliminating the WAW dependency. 
+
+> 5
+
+Dual buffering requires only 4-8 KB per token of additional HBM per GPU, which at low batch sizes is negligible compared to multi-gigabyte model weights. Despite this, it is not widely used for two reasons. First, communication libraries like NCCL [ 36 ] are application-agnostic and cannot make assumptions about buffer reuse patterns, so they must include a bottom barrier for correctness. Second, LLM serving systems like vLLM [ 24 ] employ automatic memory management that reuses tensors aggressively to minimize HBM consumption. Since the input buffer of All-Reduce is the same size as the output of the following GEMM, the memory manager reuses it as the output buffer for the following GEMM, creating the WAW dependency shown in Figure 8 (left). Co-designing commu-nication with model execution allows us to allocate a second buffer and alternate between them, breaking this dependency. 
+
+Dual Buffering Alone is Insufficient. While dual buffering elimi-nates the bottom barrier, oneshot still scales poorly with GPU count since each GPU pulls the entire buffer from all peers. At higher TP degrees, twoshot outperforms oneshot despite requiring two round trips, because its data transfer remains constant (see Figure 7). How-ever, the bottom barrier of twoshot enforces a Read-After-Write (RAW) dependency, ensuring broadcast writes are visible before the next operation. Unlike the WAW dependency in oneshot, this RAW dependency cannot be eliminated through dual buffering. Thus, to benefit from dual buffering, we need a oneshot design with comparable data transfer latency to twoshot. 
+
+## 3.4 Insight 2: Using In-Switch Computation for Oneshot 
+
+Modern NVIDIA switches support in-network reduction via the 
+
+ld_reduce instruction [ 37 ]. Each GPU maps the same virtual ad-dress range to its local buffer using symmetric memory. When a GPU issues ld_reduce on a symmetric address, the switch pulls data from all GPUs, reduces it, and returns the result. Currently, 
+
+ld_reduce is only used for reduce-scatter, the first step of twoshot, where each GPU reduces a disjoint 𝐾 /𝑁 portion of the payload (K: payload size, N: number of GPUs). However, we find that ld_reduce 
+
+can be used beyond reduce-scatter to lower oneshot latency. 
+
+Observation: Constant Latency for Small Payloads. Figure 9 shows that reduce-scatter latency remains nearly constant up to 64 KB across all TP configurations, because latency is dominated by round-trip latency between GPUs rather than data volume. At TP=8 with a 64 KB payload, reduce-scatter means each GPU reduces 8 KB at the switch, comparable to the 4-8 KB payload sizes of most leading models. Even up to 256 KB, reduce-scatter latency does not increase significantly. Our insight is that if the switch can reduce small payloads from each GPU with low latency during reduce-scatter, then each GPU can issue ld_reduce over the entire payload (𝐾 bytes) instead of a disjoint partition ( 𝐾 /𝑁 bytes) and achieve data transfer latency similar to twoshot. 
+
+Redundant Pull. We exploit this observation to propose redundant pull . Instead of pulling raw data from all peers and reducing locally as in oneshot, each GPU issues ld_reduce over the entire buffer. The switch reduces data from all peers and returns the full result. We call this redundant pull because every GPU requests reduction on the same addresses, making the switch perform redundant re-ductions. Figure 10 illustrates this design. Compared to oneshot, 8 16 32 64 128 256           
+
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> Latency (us)
+> TP=2
+> 816 32 64 128 256
+> TP=4
+> 816 32 64 128 256
+> TP=8
+> Payload Size (KB)
+> Reduce-Scatter (each GPU reduces K/N at switch)
+> Redundant Pull (each GPU reduces K at switch)
+
+Figure 9: Latency of reduce-scatter, the first step of twoshot All-Reduce, and redundant pull on H200 GPUs. Reduce-scatter latency remains nearly constant for small payloads, motivating in-switch reduction for the entire payload. 
+
+redundant pull reduces data received per GPU from 𝐾 × ( 𝑁 − 1) to 
+
+𝐾 . For small payloads, redundant pull achieves data transfer latency comparable to reduce-scatter, which is only one phase of twoshot, while retaining the ability to benefit from dual buffering. GPU1     
+
+> GPU2 GPU3
+> NVSwitch
+> GPU0 GPU1
+> GPU2 GPU3
+> NVSwitch
+> Oneshot Redundant Pull
+> acc = p0
+> acc += p1
+> acc += p2
+> acc += p3
+> GPU0
+> acc
+
+Figure 10: Redundant Pull: each GPU issues ld_reduce over the entire 𝐾 bytes. The switch reduces data from all peers and returns the result, reducing data received per GPU from 
+
+𝐾 × ( 𝑁 − 1) to 𝐾 .Latency Comparison. Figure 11 compares oneshot, twoshot, oneshot with dual buffering (DB), and redundant pull with DB. Oneshot with DB removes the bottom barrier, but its data transfer still grows with GPU count, making it slower than twoshot at TP=8. Redundant pull with DB achieves the lowest latency by combining reduced data transfer with the elimination of the bottom barrier. 8 16 32     
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> Latency (us)
+> TP=2
+> 816 32
+> TP=4
+> 816 32
+> TP=8
+> Size (KB)
+> Oneshot (Data Transfer, Barrier)
+> Twoshot (Data Transfer, Barrier)
+> Oneshot + DB (Data Transfer, Barrier)
+> Redundant Pull + DB (Data Transfer, Barrier)
+
+Figure 11: Latency comparison of oneshot, twoshot, oneshot with dual buffering (DB), and redundant pull with DB. Re-dundant pull + DB achieves the lowest latency by (1) reducing data transfer and (2) eliminating the bottom barrier. 
+
+> 6
+
+## 3.5 Insight 3: Reducing Top-Barrier Overheads via Speculative Reduction 
+
+The top barrier enforces a Read-After-Write (RAW) dependency, en-suring all GPUs have produced valid partials before communication begins. Unlike the WAW dependency eliminated by dual buffering, this RAW dependency cannot be removed. However, we find that its overhead can be substantially reduced through speculate and verify .To explain this, we first break down the cost of the top barrier. 
+
+Breakdown of Barrier Costs. The cost of the top barrier consists of two components: divergence and flag exchange . Divergence is the time the fastest GPU waits for the slowest GPU to reach the barrier. Flag exchange is the time spent exchanging synchronization flags across GPUs to confirm that all participants have arrived. 
+
+Divergence is Negligible in Practice. Modern LLM inference engines either launch all kernels for a forward pass within a single CUDA Graph [ 24 , 62 ], or fuse them into a single Megakernel [ 48 ]. In both cases, the forward pass executes entirely on the GPU without host interaction after the initial launch. Once GPUs are synchro-nized by the first All-Reduce, they remain tightly synchronized throughout the remainder of the forward pass, since all GPUs ex-ecute identical kernels with identical input and output sizes. Fig-ure 12 illustrates this behavior using a representative CUDA Graph execution from Nsight profiler [ 38 ], showing that divergence is near-zero after the first All-Reduce. Most barrier time is therefore spent on flag exchange, where GPUs simply idle while exchanging synchronization flags to confirm all participants have arrived. Time   
+
+> AR GPU-1 Attention
+> AR GPU-2
+> AR GPU-3
+> AR GPU-4
+> Attention
+> Attention
+> Attention
+> AR
+> AR
+> AR
+> AR
+> FFN
+> FFN
+> FFN
+> FFN
+> AR
+> AR
+> AR
+> AR
+> Attention
+> Attention
+> Attention
+> Attention
+
+. . . 
+
+. . . 
+
+. . . 
+
+. . .   
+
+> Cost of Top-Barrier = Divergence + Flag-Exchange
+> Dynamic Static
+> Divergence Minimal Divergence
+> AR = All-Reduce
+
+Figure 12: Representative Nsight profiler output: the cost of the top barrier decomposes into divergence (dynamic over-head) and flag exchange (static overhead). Because kernels launch via CUDA Graphs, divergence is near-zero after the first All-Reduce, making flag exchange the dominant cost. Eliminating Flag-Exchange Overhead. Since GPUs are implicitly synchronized during the forward pass, we can speculate that all GPUs are already synchronized and begin the data transfer phase of All-Reduce immediately, avoiding explicit flag exchange. When a GPU enters an All-Reduce, it speculatively begins fetching data from peers, assuming their data is ready. To ensure correctness, each GPU writes a flag to a validation buffer that is reduced alongside the payload. If the result equals 𝑁 × flag after reduction, all GPUs had valid data and speculation succeeded. Otherwise, SiFAR reruns the All-Reduce. We explain the detailed design of speculative reduction and the verification mechanism in Section 4. 
+
+## 4 SiFAR: Design and Implementation 4.1 Design Overview 
+
+In this section, we present the design and implementation of Syn-chronization Free All-Reduce (SiFAR) which uses the optimizations described in the previous section to minimize synchronization over-heads in All-Reduce. Figure 13 illustrates our approach. Barrier  
+
+> Redundant
+> Pull
+> Redundant
+> Pull
+> Verify
+> Speculative Reduction Dual Buffering
+> Barrier
+> Barrier
+> Barrier
+> Buffer0
+> Buffer1
+> Buffer0
+> not reused
+> Retry
+> Redundant Pull
+> GPU1
+> GPU2 GPU3
+> NVSwitch
+> GPU0
+> Barrier
+> Redundant
+> Pull
+> Redundant
+> Pull
+> acc
+
+Figure 13: Overview of SiFAR: (left) Redundant pull replaces oneshot by issuing ld_reduce over the entire buffer to em-ploy in-switch reduction, which reduces data transfer. (cen-ter) Dual buffering alternates two input buffers to eliminate the bottom barrier. (right) Speculative reduction removes the top barrier by speculatively beginning data transfer and verifying correctness, retrying on mis-speculation. Redundant Pull Design. SiFAR replaces the oneshot pull-and-reduce with redundant pull, where each GPU issues ld_reduce over the entire payload buffer. The switch reduces data from all peers and returns the full result, reducing the data transfer of oneshot. 
+
+Dual Buffering Design. SiFAR uses dual buffering to remove the bottom barrier by maintaining two buffers for consecutive All-Reduce operations. Thus, the input buffer to an All-Reduce is not reused until after the next All-Reduce, where the GPUs are again synchronized, safely eliminating the bottom barrier. We explain how SiFAR integrates dual buffering with the automatic memory management of vLLM in Section 4.2. 
+
+Speculative Reduction Design. SiFAR minimizes the overhead of the top barrier using speculative reduction. When a GPU enters the All-Reduce kernel, it speculatively begins issuing ld_reduce to fetch reduced data from remote peers, assuming all peer GPUs have already finished the previous operation. To facilitate validation, SiFAR allocates a small validation buffer per threadblock. After the preceding operation writes its result to the payload buffer, each GPU writes a flag to the validation buffer. The flag is reduced alongside the payload. If the reduced validation result equals ngpus × flag ,all GPUs had valid data and speculation succeeded. Otherwise, SiFAR reruns the All-Reduce until validation succeeds. Payload Buffer  Validation Buffer    
+
+> 4-32 KB 4 Bytes
+> flag
+> All-Reduce
+> Result Validation Out ngpus x flag
+
+Figure 14: Verification Logic to ensure correctness of specula-tive reduction. Each GPU writes a flag to a validation buffer before beginning the All-Reduce. After reduction, the re-duced validation result is checked to detect mis-speculation. 
+
+> 7
+
+## 4.2 Implementation Details 
+
+Redundant Pull. We replace oneshot pull-and-reduce with redun-dant pull by changing how each threadblock performs reduction:                                
+
+> 1#Oneshot : pull from each peer and reduce locally
+> 2for peer in range ( ngpus ):
+> 3data =load ( peer , payload_buf )
+> 4result += data
+> 5#Redundant Pull : switch reduces and returns result
+> 6result =mutlimem . ld_reduce ( payload_buf )
+
+Dual Buffering. Implementing dual buffering requires controlling the allocation and reuse of buffers. However, frameworks like vLLM and SGLang rely on automatic memory management in Pytorch, which eagerly reclaims buffers. Since the input buffer to All-Reduce matches the output size of the next GEMM, it is quickly reused:               
+
+> 1buf =redundant_pull ( input_buf0 )
+> 2input_buf0 =GEMM ( buf , weight ) #Buffer reused
+> 3...
+> 4buf =redundant_pull ( input_buf1 )
+
+To implement dual buffering without modifying framework in-ternals, we modify the All-Reduce function signature to accept an additional argument referencing the previous input buffer:         
+
+> 1buf =redundant_pull ( input_buf0 )
+> 2...
+> 3buf =redundant_pull ( input_buf1 , input_buf0 )
+
+By passing input_buf0 as an additional argument to the second All-Reduce, the memory manager is forced to keep input_buf0 
+
+alive until after the second All-Reduce executes, since it cannot guarantee that input_buf0 will be unused. The additional argu-ment is retained solely for its memory management side-effect and is not used in the computation itself. This approach requires only minimal changes to model execution code and works across frame-works without modifying their memory management systems. 
+
+Speculative Reduction. To implement speculative reduction, we build the SiFAR All-Reduce kernel using redundant pull for the payload and oneshot pull-and-reduce for validation. We show a pseudocode implementation below:                                                   
+
+> 1int * valid_buf ; #Dual buffered
+> 2valid_buf [ blockIdx .x] =flag ;
+> 3__syncthreads () ;
+> 4result =switch_reduce ( payload_buf ); #warps 0.. k
+> 5valid_out =local_reduce ( valid_buf ); #warp k +1
+> 6while ( valid_out != ngpus xflag ) {
+> 7result =switch_reduce ( payload_buf );
+> 8#Use . cg to bypass L1 cache for valid_buf
+> 9valid_out =local_reduce_cg ( valid_buf );
+> 10 __syncthreads () ;
+> 11 }
+> 12 flag =flag +1
+
+The payload buffer is reduced using switch_reduce , which per-forms reduction in the switch. For the validation buffer, we instead use pull-and-local-reduce to compute valid_out , as it empirically outperforms using switch_reduce for this purpose. Each thread-block runs with one extra warp to process the validation buffer while the remaining warps handle the payload. Before beginning the All-Reduce, each GPU writes the flag value into its validation buffer. After reduction, we check if the result matches ngpus ×
+
+flag . If validation fails, we re-execute until validation succeeds. 
+
+Verification Logic Correctness. To maintain correctness across multiple All-Reduce invocations, we increment the flag value after each All-Reduce, ensuring each All-Reduce has a unique validation result. We apply dual buffering to the validation buffer to prevent race conditions where a fast GPU might overwrite its flag before all peers have finished reading it. Since remote loads are cached in L1 [ 14 ], upon mis-speculation we use the .cg modifier to load the validation buffer to bypass L1 and fetch fresh data. The payload 
+
+switch_reduce does not require this, since data is fetched from the switch and not cached locally. The correctness of the verification logic relies on GPU monotonicity; see Section 8.1 for details. 
+
+Megakernel Integration. In Megakernels [ 48 ], the entire forward pass is fused into a single kernel, and successive operations within the kernel communicate completion via flags. SiFAR reuses these existing operator flags for validation by reading and reducing the flag from all remote GPUs, instead of explicitly writing to a separate validation buffer. This eliminates the overhead of writing to the validation buffer before each All-Reduce, further reducing latency. 
+
+## 5 Evaluation Methodology 
+
+Serving Framework. We evaluate SiFAR by integrating it into the Megakernel framework [ 48 ]. Megakernels fuse the entire for-ward pass into a single CUDA kernel, eliminating kernel launch overheads and improving HBM utilization. Within the Megakernel, weights of the next operation are prefetched into shared mem-ory whenever possible, including during All-Reduce, further re-ducing latency. We evaluate on Megakernels rather than serving systems like vLLM [ 24 ] because Megakernels represent the state-of-the-art for low-latency inference, where non-communication overheads are already minimized, making the impact of All-Reduce optimization most visible. We extend the original Megakernel im-plementation to support Llama-3.1-8B and Qwen3.5-397B-17B with multi-GPU tensor parallelism. Our Megakernel baseline without SiFAR already achieves 1.3 × lower TPOT than vLLM 0.18.1 for Llama-3.1-8B and 2.2 × for Qwen3.5-397B-17B at TP=8, confirming that non-communication overheads are substantially reduced. We run both models on batch size 1 unless otherwise specified. 
+
+Models. We evaluate SiFAR on two models: Llama-3.1-8B [ 16 ], a dense transformer, and Qwen3.5-397B-17B [ 41 ], a Mixture-of-Experts (MoE) model that activates only 17B parameters per token but requires storing all 397B parameters in memory. We run both models in FP8 precision. Due to model size, Qwen3.5-397B-17B is evaluated only at TP=4 and TP=8. We evaluate SiFAR using input context lengths from 1K to 16K tokens. 
+
+Hardware. We use a single node with 8 × NVIDIA H200 GPUs, each with 141 GB of HBM3e memory. We use CUDA 12.9 with default clock frequencies. We evaluate TP across 2, 4, and 8 GPUs. 
+
+Metrics. We measure standalone All-Reduce latency to isolate the impact of SiFAR. For end-to-end impact, we measure throughput (inverse of TPOT) in tokens per second during the decode phase. We report speedup relative to the baseline implementation. 
+
+Baselines. Our baseline uses the best of oneshot and twoshot All-Reduce for each configuration. We also compare against two vari-ants of oneshot: TRT-LLM oneshot [ 35 ] and Lamport oneshot [ 8]. We describe these in detail in Section 6.                
+
+> 8816 32
+> 25
+> 50
+> 75
+> 100
+> 125
+> Normalized Latency (%)
+> 70% 65% 70%
+> TP=2
+> 816 32
+> 55% 52% 54%
+> TP=4
+> 816 32
+> 48% 49%
+> 59%
+> TP=8
+> Size (KB)
+> Oneshot Twoshot TRT-LLM (Oneshot Variant 1) Lamport (Oneshot Variant 2) SiFAR
+
+Figure 15: All-Reduce latency across five implementations for TP=2, 4, and 8 with payloads from 8 to 32 KB, normalized to the best of oneshot and twoshot (100%). SiFAR consistently outperforms all other implementations, achieving up to 52% latency reduction at TP=8 by combining redundant pull, dual buffering, and speculative reduction. 
+
+## 6 Evaluation 
+
+In this section, we evaluate SiFAR. We first analyze its impact on All-Reduce latency, then measure end-to-end LLM inference im-provements, and finally study the contribution of each optimization. 
+
+## 6.1 Impact on All-Reduce Latency 
+
+Figure 15 compares standalone All-Reduce latency across five im-plementations: oneshot, twoshot, TRT-LLM, Lamport, and SiFAR for TP configurations of 2, 4, and 8 GPUs with payloads from 8 to 32 KB. The baseline for each configuration is the best of oneshot and twoshot, which is the default in vLLM and SGLang. We execute All-Reduce back-to-back within a Megakernel to avoid measur-ing kernel launch overheads. The measured latency includes any mis-speculation overheads incurred by SiFAR. SiFAR consistently outperforms all other implementations across every configuration. At TP=2, where oneshot is the best baseline, SiFAR reduces latency to 2.36 𝜇 s compared to 3.36 𝜇 s for oneshot at 8 KB, a 30% reduction. At TP=4, twoshot becomes the best baseline and SiFAR achieves a 45% reduction in latency from 4.38 𝜇 s to 2.39 𝜇 s. Finally, the benefits of SiFAR are largest at TP=8, where the baseline is twoshot with 5.11 𝜇 s latency at 8 KB, and SiFAR reduces it to 2.44 𝜇 s , a 2 × improvement. Next, we compare SiFAR against two variants of oneshot: TRT-LLM oneshot and Lamport oneshot. 
+
+TRT-LLM (Oneshot). We compare SiFAR against the TRT-LLM oneshot implementation, which operates in 3 phases: (1) each GPU copies its input data into a separate local buffer, making the payload buffer private to the All-Reduce kernel so the bottom barrier can be safely removed. (2) A top barrier ensures all GPUs have produced valid partials. (3) Each GPU pulls the full buffer from all peers and performs local reduction. Since TRT-LLM still pulls and reduces like oneshot, receiving 𝐾 × ( 𝑁 − 1) bytes per GPU, it does not scale well to higher TP degrees. SiFAR outperforms TRT-LLM by 25-28% at TP=2, 43-44% at TP=4, and 48-57% at TP=8. 
+
+Lamport (with In-Network Multicast) [ 8 ]. Finally, we compare SiFAR against an optimized implementation (using In-Network Multicast) of a Lamport-style All-Reduce, which is a single-round, push-based algorithm. It operates in 3 phases: (1) each GPU pushes its partial results to all peers via multimem.st , which multicasts data through NVSwitch so each GPU sends only 𝐾 bytes. (2) A bottom barrier, similar to the one in twoshot, ensures that all multi-cast writes are visible locally. (3) Each GPU then loads all received partials from its local buffer and reduces them. Lamport avoids the top barrier and transfers the same total data as redundant pull, but in the opposite direction: it sends 𝐾 bytes and receives 𝐾 × 𝑁 bytes into local memory. In contrast, redundant pull sends 𝐾 × 𝑁 bytes and receives only 𝐾 bytes of reduced data directly into registers via 
+
+multimem.ld_reduce . SiFAR outperforms Lamport by 32-33% at TP=4 and 34-43% at TP=8 by avoiding the acquire-release bottom barrier and the on-chip latency of loading the full payload from local memory before reduction. 
+
+Comparison with NCCL 2.30. We compare SiFAR against NCCL 2.30, which provides custom low-latency kernels that use the LL protocol [19]. We run NCCL with its default auto-selection policy, which uses a heuristic to choose a communication strategy based on the network topology and payload size. Figure 16 shows that NCCL auto is only better than the best of oneshot and twoshot for the 8 and 16 KB payloads at TP=8. Finally, despite the custom low-latency kernels, SiFAR achieves 46–62% lower latency than NCCL across evaluated TP degrees and payload sizes. 8 16 32        
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> Per-AR Latency ( μs)  TP=2
+> 816 32
+> TP=4
+> 816 32
+> TP=8
+> Size (KB)
+> Oneshot Twoshot NCCL 2.30 (auto) SiFAR
+
+Figure 16: All-Reduce latency with NCCL 2.30 auto-selection for TP=2, 4, and 8 across 8–32 KB payloads. NCCL is competi-tive with the best of oneshot and twoshot, but SiFAR achieves the lowest latency across all configurations. 
+
+## 6.2 Impact on End-to-End LLM Inference 
+
+Figure 17 shows end-to-end throughput across TP degrees for Llama-3.1-8B and Qwen3.5-397B-17B, with input and output se-quence length of 1000. SiFAR improves throughput consistently 
+
+> 9
+
+across all configurations with best of oneshot and twoshot as the baseline. For Llama-3.1-8B, the improvement grows with TP degree: 9.1% at TP=2, 14.9% at TP=4, and 18.6% at TP=8. For Qwen3.5, we observe a similar trend with 9.2% improvement at TP=4 and 13.1% at TP=8. This scaling behavior is expected because the impact of All-Reduce increases with TP degree, making the optimizations of SiFAR more impactful. TP=2 TP=4 TP=8   
+
+> 200
+> 400
+> 600
+> 800
+> Tokens/s
+> 9.1%
+> 14.9%
+> 18.6% Llama 3.1 8B
+> TP=4 TP=8
+> 100
+> 200
+> 300
+> 9.2%
+> 13.1%
+> Qwen3.5-397B-17B
+> Baseline (Best of Oneshot & Twoshot) SiFAR
+
+Figure 17: End-to-end throughput (tokens/s) for Llama-3.1-8B and Qwen3.5-397B-17B across TP configurations. SiFAR improves throughput by 9.1% to 18.6% for Llama-3.1-8B and up to 13.1% for Qwen3.5-397B-17B. Impact of Input Sequence Length (ISL). Figure 18 shows the impact of SiFAR when varying ISL for Llama-3.1-8B and Qwen3.5-397B-17B at TP=8. For Llama-3.1, SiFAR provides a 18.6% improve-ment at ISL=1000 and 14.6% at ISL=16K. For Qwen3.5, the improve-ment ranges from 13.1% at ISL=1000 to 10.2% at ISL=16K. As ISL increases, the fraction of time spent in attention grows, which does not benefit from SiFAR. However, even at ISL=16K, SiFAR provides meaningful improvements because All-Reduce remains a significant fraction of total execution time. 1K 2K 4K 8K 16K             
+
+> 200
+> 400
+> 600
+> 800
+> Tokens/s
+> 18.6% 17.6% 16.9%
+> 15.7%
+> 14.6%
+> Llama 3.1 8B
+> 1K 2K 4K 8K 16K
+> 100
+> 200
+> 300 13.1% 12.5% 12.1% 11.2% 10.2%
+> Qwen3.5-397B-17B
+> Input Sequence Length
+> Baseline (Best of Oneshot & Twoshot) SiFAR
+
+Figure 18: End-to-end throughput (tokens/s) for Llama-3.1-8B and Qwen3.5-397B-17B at TP=8 across input sequence lengths and output sequence length = 1000. Improvement decreases with longer sequences as attention dominates, but SiFAR still provides 14.6% and 10.2% improvement at ISL=16K. Impact of Batch Size. Figure 19 evaluates SiFAR across BS=1, 2, and 4 on Llama-3.1-8B at TP=8. SiFAR improves throughput by 18.6% at BS=1, 15.0% at BS=2, and 10.2% at BS=4. The gain is largest at BS=1 and shrinks as the batch grows. Larger batches increase the GEMM and attention compute, so All-Reduce is a smaller fraction of TPOT. SiFAR targets the BS=1 regime because it is latency-critical. Although larger batches raise throughput, they worsen per-request TPOT by 45% from BS=1 to BS=4. 1 2 4
+
+> Batch Size
+> 0
+> 1000
+> 2000
+> Tokens/s
+> 18.6%
+> 15.0%
+> 10.2% Llama 3.1 8B (TP=8)
+> Baseline
+> SiFAR
+
+Figure 19: Batch-size sensitivity for Llama-3.1-8B at TP=8. SiFAR improves throughput by 18.6% at BS=1, and the gain shrinks to 10.2% at BS=4 as larger batches make All-Reduce a smaller fraction of TPOT. Comparison with Other All-Reduce Algorithms. Figure 20 compares the throughput of SiFAR against the TRT-LLM oneshot variant and the Lamport-style push-based. At TP=8 for Llama-3.1-8B, TRT-LLM and Lamport reach only 85.6% and 90.3% of SiFAR throughput, so SiFAR outperforms even these optimized oneshot-style implementations end-to-end. TP=2 TP=4 TP=8    
+
+> 80
+> 85
+> 90
+> 95
+> 100
+> Normalized Throughput (%)
+> Llama 3.1 8B
+> TP=4 TP=8
+> Qwen3.5-397B-17B
+> SiFAR TRT-LLM (Oneshot Variant 1) Lamport (Oneshot Variant 2)
+
+Figure 20: End-to-end throughput comparison across All-Reduce implementations, normalized to SiFAR . SiFAR out-performs the TRT-LLM oneshot variant and the Lamport-style push-based All-Reduce. Impact of SiFAR on Tail Latency. Figure 21 reports TPOT per-centiles at TP=8, normalized to the baseline p50. SiFAR lowers both median and tail latency: for Llama-3.1-8B it reduces p50 to 81.4% and p99 to 84.0%, and for Qwen3.5-397B-17B it reduces p50 to 86.3% and p99 to 87.8%. The speedup from SiFAR holds through p99.9, so mis-speculation retries do not inflate tail latency. p50 p90 p99 p99.9     
+
+> 70
+> 80
+> 90
+> 100
+> 110
+> Normalized Latency (%)
+> Llama 3.1 8B (TP=8)
+> p50 p90 p99 p99.9
+> Qwen3.5-397B-17B (TP=8)
+> Percentile
+> Baseline SiFAR
+
+Figure 21: End-to-end TPOT percentiles for Llama-3.1 and Qwen3.5 at TP=8, normalized to the baseline p50 latency. The speedup from SiFAR holds through the tail, reducing p99 la-tency to 84.0% for Llama-3.1-8B and 87.8% for Qwen3.5-397B-17B, so mis-speculation retries do not inflate tail latency. 
+
+> 10
+
+## 6.3 Impact of Individual Optimizations 
+
+To understand the individual contributions of our optimizations, we conduct an ablation study where we enable each optimization incre-mentally: redundant pull alone, redundant pull with dual buffering, and SiFAR with all three optimizations including speculative reduc-tion. Figure 22 shows the contributions of each of our optimizations. TP=2 TP=4 TP=8 
+
+0
+
+5
+
+10 
+
+15 
+
+20    
+
+> Speedup (%)
+> 9.1%
+> 14.9%
+> 18.6% Llama 3.1 8B
+> TP=4 TP=8
+> 9.2%
+> 13.1%
+> Qwen3.5-397B-17B
+> Redundant Pull Dual Buffering Speculative Reduction
+
+Figure 22: Breakdown of the speedup from our 3 optimiza-tions for Llama-3.1-8B and Qwen3.5-397B-17B across TP con-figurations. All three optimizations contribute meaningfully, with benefits increasing at higher TP degrees. 
+
+For Llama-3.1-8B, redundant pull contributes 6.7% at TP=8 by reducing data transfer through in-switch reduction. Dual buffering builds on this by eliminating the bottom barrier, contributing an additional 3.4% at TP=8. Speculative reduction reduces latency by minimizing the top-barrier overhead, contributing 3.8% at TP=2 and up to 8.5% at TP=8. Together, the three optimizations are com-plementary and address distinct sources of All-Reduce overhead. 
+
+Mis-Speculation and Verification Overhead. We compare SiFAR against two idealized configurations in Figure 23: perfect specu-lation (no retries) and redundant pull without barriers. The gap between SiFAR and perfect speculation isolates the cost of mis-speculation retries, while the gap between perfect speculation and redundant pull without barriers isolates the verification overhead. TP=2 TP=4 TP=8 
+
+5
+
+10 
+
+15 
+
+20    
+
+> Speedup (%)
+> +0.1 +0.1
+> +0.3 +1.0
+> +1.6 +1.4 Llama 3.1 8B
+
+TP=4 TP=8     
+
+> +0.5 +1.5
+> +1.0 +1.0
+> Qwen3.5-397B-17B
+> SiFAR SiFAR w/o Misspeculation Redundant Pull w/o Barriers
+
+Figure 23: SiFAR compared against idealized configurations: perfect speculation (no mis-speculation) and redundant pull with no barriers. The gaps quantify the cost of mis-speculation retries and verification overhead. 
+
+For Llama-3.1-8B at TP=8, SiFAR achieves a 18.6% improve-ment. With perfect speculation, the improvement increases to 20.2%, meaning mis-speculation retries cost only 1.6% despite a 32.2% av-erage mis-speculation rate (Figure 24). Removing barriers entirely yields 21.6%, so verification overhead accounts for an additional 1.4%. Together, mis-speculation and verification account for only 3.0% of lost improvement, showing that speculative reduction cap-tures most of the available benefit. TP=2 TP=4 TP=8  
+
+> 0
+> 10
+> 20
+> 30
+> 40
+> Misspeculation Rate (%)
+> 10.4%
+> 17.6%
+> 32.2% Llama 3.1 8B
+> TP=4 TP=8
+> 19.1%
+> 26.6%
+> Qwen3.5-397B-17B
+
+Figure 24: Mis-speculation rate for Llama-3.1-8B and Qwen3.5-397B-17B. While mis-speculation rate increases with TP degree, it results in at most 1.6% lost performance. Retry Overhead. Figure 25 shows the SiFAR latency for the no-retry case and the added latency from each retry. We measure this by forcing SiFAR to retry a fixed number of times. Even with retries, the average SiFAR latency stays well below the baseline (oneshot or twoshot) across all evaluated TP degrees and payload sizes. Each retry costs less than the first attempt, which pays the one-time startup cost of beginning the All-Reduce. 8 16 32         
+
+> 0
+> 2
+> 4
+> 6
+> Per-AR Latency ( μs)  TP=2
+> 816 32
+> TP=4
+> 816 32
+> TP=8
+> Size (KB)
+> Baseline SIFAR (no retry) + 1st retry + 2nd retry SIFAR (actual)
+
+Figure 25: Retry latencies of SiFAR. Even with retries, the average SiFAR latency stays below the baseline. 
+
+## 6.4 Comparison with Compute-Comm. Fusion 
+
+Figure 26 compares fine-grained compute-communication fusion from ParallelKittens [ 49 ] against an unfused implementation for the down-projection GEMM of Llama-3.1-8B at TP=8. At small batch sizes, the fused GEMM has similar or worse latency, because there is not enough computation to overlap with communication. Fusion helps only at very large batch sizes, such as BS=2048, where the GEMM has enough work to hide communication. In the regime that SiFAR targets, overlap provides little benefit, so SiFAR reduces All-Reduce latency directly instead of trying to hide it. 1 8 32 64 128 256 512 1024 2048  
+
+> Batch size
+> 50
+> 100
+> Latency ( μs)  M×N×K = bs ×4096 ×(14336/8) Without fusion With fusion
+
+Figure 26: Compute-communication fusion from ParallelKit-tens for the down-projection GEMM of Llama-3.1-8B at TP=8. Fusion helps only at large batch sizes, while small batches have insufficient computation to hide communication. 
+
+> 11
+
+## 7 Related Work 
+
+We discuss related work in four categories: (1) speculation and relaxation techniques to reduce synchronization overheads, (2) low-latency LLM inference optimizations, (3) collective communication optimizations, and (4) in-network push-based reduction. 
+
+Using Speculation to Reduce Synchronization Overheads. Along line of work explores reducing synchronization latency by exe-cuting critical sections speculatively rather than waiting at locks or barriers. Early hardware proposals such as Transactional Memory (TM) [ 18 ], Speculative Lock Elision [ 42 ], and Speculative Synchro-nization [ 30 ] execute code regions in parallel while deferring con-flict checks to commit time. TM provides architectural support for atomic sections whose updates are speculatively buffered and com-mitted only when no conflicts are detected. Transactional Lock-Free Execution [ 43 ] extends this model using timestamp-based ordering to allow multiple threads to speculatively enter the same critical section. Subsequent work, such as TMbarrier [40] and Elastic Bar-riers [ 51 ], applies similar ideas to barrier synchronization by spec-ulating across phase boundaries. Speculative Lock Forwarding [ 57 ]and Redundant Barrier Elimination [ 7] further reduce waiting by dynamically validating safety conditions at runtime. While these techniques also use speculation to reduce synchro-nization costs, they primarily target removing locks and barriers placed conservatively for cases where threads may not actually conflict. In contrast, SiFAR addresses scenarios with true read-after-write dependencies where multiple GPUs must be synchronized for correctness. SiFAR exploits the observation that GPUs executing identical work remain largely synchronized, allowing it to speculate past the barrier and eliminate explicit synchronization latency. 
+
+Low-Latency LLM Inference Optimizations. Programmatic De-pendent Launch (PDL) [ 34 ] reduces inter-kernel idle time by al-lowing a kernel to begin while the preceding one is still running. Megakernels [ 48 ] fuse the entire forward pass into a single kernel, eliminating launch overheads and enabling weight prefetching. Mi-rage [ 55 ] provides a compiler that automatically fuses operators into Megakernels, making them easier to implement. Speculative Decoding [ 25 ] reduces the number of sequential decode steps by generating multiple tokens in parallel. SiFAR is complementary to all of these: it reduces the latency of All-Reduce communication within each decode step, which these techniques do not address. 
+
+Collective Communication Optimizations. During training, All-Reduce communication accounts for a major fraction of training time due to the large volume of gradient data exchanged. Multiple works exploit tolerance to gradient errors by communicating only a subset of gradients [ 13 , 22 , 28 ], applying lossy compression [ 27 , 53 ], or using quantization [ 4, 5, 44 ]. Our work is orthogonal as we focus on low-latency inference, where the payload size is very small, and the latency of the synchronization barrier is significant. During in-ference, PRESERVE [ 59 ] proposes prefetching model weights from HBM to L2 cache during All-Reduce operations to overlap memory access with communication. However, our evaluation setup using Megakernels already prefetches weights into shared memory, and for MoE models, prefetching during All-Reduce is not possible be-cause expert selection depends on the All-Reduce output. SiFAR directly reduces All-Reduce latency rather than hiding it, providing benefits even when prefetching opportunities are exhausted. 
+
+In-Network Push-Based Reduction. Several works propose push-based in-network reduction where GPUs send data to a switch, which reduces and broadcasts without a top barrier. SwitchML [ 45 ]uses programmable switches for streaming aggregation during training. Klenk et al. [ 23 ] propose push-based reduction in NVSwitch fabrics, achieving up to 18 × speedup for small messages. CAIS [ 60 ]extends NVSwitch with compute-aware request merging that uni-fies push and pull. These approaches require hardware modifica-tions to the switch. In contrast, SiFAR achieves barrier-free reduc-tion on current systems by combining dual buffering and specula-tive reduction, without requiring push-based hardware support. 
+
+## 8 Discussion 8.1 Monotonicity Assumption and Correctness 
+
+SiFAR’s speculative reduction relies on a validation mechanism to ensure correctness, which depends on the monotonicity assumption .Consider the case where GPU1 is ahead of GPU0, so GPU1 reads GPU0’s payload before it finishes writing. In this case, the verifi-cation flag correctly indicates an error. However, if GPU1 slows down after reading the payload and only reads the verification flag after GPU0 has caught up, GPU1 would read an incorrect payload but a correct flag, causing incorrect verification. Thus, correctness assumes that if GPU1 is ahead of GPU0 at time 𝑇 1, it remains ahead at time 𝑇 2 > 𝑇 1, i.e., relative GPU progress is monotonic. In LLM inference, this assumption holds for two reasons. First, CUDA Graphs or Megakernels eliminate host-side variability, the primary source of extreme GPU divergence. Second, GPU kernels typically execute with a run-to-completion model. Unlike CPU processes that can be easily preempted, GPU kernels run atomically to completion unless explicitly preempted [ 10 , 32 ]. Thus, once a kernel begins executing, its relative progress with respect to other kernels is unlikely to change significantly, i.e., if GPU1 is ahead of GPU0 when reading the payload, it will likely remain ahead when reading the verification flag. To verify this independently of the validation mechanism itself, we compare the output of SiFAR against the twoshot All-Reduce. Across 100,000 decode iterations spanning multiple models and TP configurations, SiFAR matches this baseline, confirming that no silent error occurs. 
+
+## 9 Conclusion 
+
+With the rise of reasoning models and agentic systems, token gen-eration latency has become critical for LLMs. To minimize latency, inference engines reduce batching and use Tensor Parallelism to leverage aggregate memory bandwidth across GPUs. However, All-Reduce emerges as the dominant cost as other bottlenecks diminish. Removing All-Reduce improves throughput by 43% at TP=8 for Llama 3.1 8B on H200 GPUs. We present Synchronization-Free All-Reduce (SiFAR), which minimizes All-Reduce overhead through three techniques: redundant pull to reduce data transfer via in-switch computation, dual buffering to eliminate the bottom barrier, and speculative reduction to minimize the top barrier. We integrate SiFAR into Megakernels, a state-of-the-art approach for low-latency inference, and evaluate it on Llama-3.1-8B and Qwen3.5-397B-17B. SiFAR reduces All-Reduce latency by up to 52% and improves end-to-end throughput by 18.6% for Llama-3.1-8B and 13.1% for Qwen3.5-397B-17B at TP=8. 
+
+> 12
+
+## Acknowledgments 
+
+We thank the anonymous reviewers of ISCA-2026 and MICRO-2026 for their valuable feedback and suggestions. This work was supported, in part, by NSF grant 233304. 
+
+## References 
+
+[1] Deepak Bhaskar Acharya, Karthigeyan Kuppan, and B Divya. 2025. Agentic ai: Autonomous intelligence for complex goals–a comprehensive survey. IEEe Access 
+
+(2025). [2] Matthew Joseph Adiletta, Gu-Yeon Wei, and David Brooks. 2026. RPU–A Reason-ing Processing Unit. In 2026 IEEE International Symposium on High Performance Computer Architecture (HPCA) . IEEE, 1–17. [3] Sandhini Agarwal, Lama Ahmad, Jason Ai, Sam Altman, Andy Applebaum, Edwin Arbus, Rahul K Arora, Yu Bai, Bowen Baker, Haiming Bao, et al . 2025. gpt-oss-120b & gpt-oss-20b model card. arXiv preprint arXiv:2508.10925 (2025). [4] Alham Fikri Aji and Kenneth Heafield. 2017. Sparse communication for dis-tributed gradient descent. arXiv preprint arXiv:1704.05021 (2017). [5] Dan Alistarh, Demjan Grubic, Jerry Li, Ryota Tomioka, and Milan Vojnovic. 2017. QSGD: Communication-efficient SGD via gradient quantization and encoding. 
+
+Advances in neural information processing systems 30 (2017). [6] Marc Brysbaert. 2019. How many words do we read per minute? A review and meta-analysis of reading rate. Journal of memory and language 109 (2019), 104047. [7] Milind Chabbi, Wim Lavrijsen, Wibe de Jong, Koushik Sen, John Mellor-Crummey, and Costin Iancu. 2015. Barrier elision for production parallel programs. ACM SIGPLAN Notices 50, 8 (2015), 109–119. [8] K Mani Chandy and Leslie Lamport. 1985. Distributed snapshots: Determining global states of distributed systems. ACM Transactions on Computer Systems (TOCS) 3, 1 (1985), 63–75. [9] Li-Wen Chang, Wenlei Bao, Qi Hou, Chengquan Jiang, Ningxin Zheng, Yinmin Zhong, Xuanrun Zhang, Zuquan Song, Ziheng Jiang, Haibin Lin, Xin Jin, and Xin Liu. 2024. FLUX: Fast Software-based Communication Overlap On GPUs Through Kernel Fusion. arXiv:2406.06858 [cs.LG] [10] Michael Davies, Neal Crago, Karthikeyan Sankaralingam, and Stephen W Keck-ler. 2025. Kitsune: Enabling Dataflow Execution on GPUs. arXiv preprint arXiv:2502.18403 (2025). [11] Michael Davies, Neal Crago, Karthikeyan Sankaralingam, and Christos Kozyrakis. 2025. Efficient llm inference: Bandwidth, compute, synchronization, and capacity are all you need. arXiv preprint arXiv:2507.14397 (2025). [12] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39. [13] Jiawei Fei, Chen-Yu Ho, Atal N Sahu, Marco Canini, and Amedeo Sapio. 2021. Efficient sparse collective communication and its application to accelerate dis-tributed deep learning. In Proceedings of the 2021 ACM SIGCOMM 2021 Conference .676–691. [14] Luigi Fusco, Mikhail Khalilov, Marcin Chrapek, Giridhar Chukkapalli, Thomas Schulthess, and Torsten Hoefler. 2024. Understanding data movement in tightly coupled heterogeneous systems: A case study with the Grace Hopper superchip. 
+
+arXiv preprint arXiv:2408.11556 (2024). [15] Raja Gond, Nipun Kwatra, and Ramachandran Ramjee. 2025. TokenWeave: Efficient Compute-Communication Overlap for Distributed LLM Inference. https: //arxiv.org/abs/2505.11329 [16] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al . 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 
+
+(2024). [17] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, et al . 2025. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning. arXiv preprint arXiv:2501.12948 (2025). [18] Maurice Herlihy and J Eliot B Moss. 1993. Transactional memory: Architec-tural support for lock-free data structures. In Proceedings of the 20th annual international symposium on Computer architecture . 289–300. [19] Zhiyi Hu, Siyuan Shen, Tommaso Bonato, Sylvain Jeaugey, Cedell Alexander, Eric Spada, James Dinan, Jeff Hammond, and Torsten Hoefler. 2025. Demystifying NCCL: An in-depth analysis of GPU communication protocols and algorithms. In 2025 IEEE Symposium on High-Performance Interconnects (HOTI) . IEEE, 48–59. [20] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui Wu, et al . 2019. Gpipe: Efficient training of giant neural networks using pipeline parallelism. Advances in neural information processing systems 32 (2019). [21] Zhixian Jin, Christopher Rocca, Jiho Kim, Hans Kasan, Minsoo Rhu, Ali Bakhoda, Tor M Aamodt, and John Kim. 2024. Uncovering real gpu noc characteristics: Implications on interconnect architecture. In 2024 57th IEEE/ACM International Symposium on Microarchitecture (MICRO) . IEEE, 885–898. [22] Hans Kasan, Dennis Abts, Jungwook Choi, and John Kim. 2025. SkipReduce:(Interconnection) Network Sparsity to Accelerate Distributed Machine Learning. In Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture ®. 643–658. [23] Benjamin Klenk, Nan Jiang, Greg Thorson, and Larry Dennison. 2020. An in-network architecture for accelerating shared-memory multiprocessor collectives. In 2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA) . IEEE, 996–1009. [24] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Mem-ory Management for Large Language Model Serving with PagedAttention. In 
+
+Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .[25] Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast Inference from Transformers via Speculative Decoding. In Proceedings of the 40th International Conference on Machine Learning (Proceedings of Machine Learning Research, Vol. 202) . PMLR, 19274–19286. [26] Dacheng Li, Shiyi Cao, Chengkun Cao, Xiuyu Li, Shangyin Tan, Kurt Keutzer, Jiarong Xing, Joseph E Gonzalez, and Ion Stoica. 2025. S*: Test time scaling for code generation. arXiv preprint arXiv:2502.14382 (2025). [27] Minghao Li, Ran Ben Basat, Shay Vargaftik, ChonLam Lao, Kevin Xu, Michael Mitzenmacher, and Minlan Yu. 2024. {THC }: Accelerating distributed deep learning using tensor homomorphic compression. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) . 1191–1211. [28] Shigang Li and Torsten Hoefler. 2022. Near-optimal sparse allreduce for dis-tributed deep learning. In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming . 135–149. [29] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Cheng-gang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al . 2024. Deepseek-v3 technical report. arXiv preprint arXiv:2412.19437 (2024). [30] Jose F Martinez and Josep Torrellas. 2002. Speculative synchronization: Applying thread-level speculation to explicitly parallel applications. ACM SIGOPS Operating Systems Review 36, 5 (2002), 18–29. [31] Niklas Muennighoff, Zitong Yang, Weijia Shi, Xiang Lisa Li, Li Fei-Fei, Hannaneh Hajishirzi, Luke Zettlemoyer, Percy Liang, Emmanuel Candès, and Tatsunori Hashimoto. 2025. s1: Simple test-time scaling. arXiv preprint arXiv:2501.19393 
+
+(2025). [32] NVIDIA. 2016. Pascal Tuning Guide: Compute Preemption. https://docs.nvidia. com/cuda/pascal-tuning-guide/index.html#preemption. [33] NVIDIA. 2025. Blackwell Breaks the 1,000 TPS/User Barrier With Meta’s Llama 4 Maverick. https://developer.nvidia.com/blog/blackwell-breaks-the-1000-tps-user-barrier-with-metas-llama-4-maverick/. [34] NVIDIA. 2025. Programmatic Dependent Launch and Synchroniza-tion. https://docs.nvidia.com/cuda/cuda-c-programming-guide/#programmatic-dependent-launch-and-synchronization Online; accessed 2025-11-17. [35] Nvidia. 2025. TensorRT-LLM: A TensorRT Toolbox for Optimized Large Language Model Inference. https://github.com/NVIDIA/TensorRT-LLM [36] NVIDIA Corporation. 2025. NCCL: NVIDIA Collective Communication Library. https://github.com/NVIDIA/nccl. Accessed 2025-11-17. [37] NVIDIA Corporation. 2025. Parallel Thread Execution ISA Version 8.7. https: //docs.nvidia.com/cuda/parallel-thread-execution/index.html Accessed: March 2026. [38] NVIDIA Corporation. Retrieved November 16, 2025. NVIDIA Nsight Compute. https://developer.nvidia.com/nsight-compute. [39] NVIDIA Developer Blog. 2026. Inside NVIDIA Groq 3 LPX: The Low-Latency Inference Accelerator for the NVIDIA Vera Rubin Plat-form. https://developer.nvidia.com/blog/inside-nvidia-groq-3-lpx-the-low-latency-inference-accelerator-for-the-nvidia-vera-rubin-platform/. Accessed: 2026-03-27. [40] Manuel Pedrero, Eladio Gutierrez, and Oscar Plata. 2018. TMbarrier: Speculative barriers using hardware transactional memory. In 2018 26th Euromicro Interna-tional Conference on Parallel, Distributed and Network-based Processing (PDP) .IEEE, 214–221. [41] Qwen Team. 2026. Qwen3.5: Towards Native Multimodal Agents. https: //qwen.ai/blog?id=qwen3.5 [42] Ravi Rajwar and James R Goodman. 2001. Speculative lock elision: Enabling highly concurrent multithreaded execution. In Proceedings. 34th ACM/IEEE Inter-national Symposium on Microarchitecture. MICRO-34 . IEEE, 294–305. [43] Ravi Rajwar and James R Goodman. 2002. Transactional lock-free execution of lock-based programs. ACM SIGOPS Operating Systems Review 36, 5 (2002), 5–17. [44] Cèdric Renggli, Saleh Ashkboos, Mehdi Aghagolzadeh, Dan Alistarh, and Torsten Hoefler. 2019. SparCML: High-performance sparse communication for machine learning. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis . 1–15. [45] Amedeo Sapio, Marco Canini, Chen-Yu Ho, Jacob Nelson, Panos Kalnis, Changhoon Kim, Arvind Krishnamurthy, Masoud Moshref, Dan Ports, and Pe-ter Richtárik. 2021. Scaling distributed machine learning with {In-Network }
+
+> 13
+
+aggregation. In 18th USENIX Symposium on Networked Systems Design and Imple-mentation (NSDI 21) . 785–808. [46] SemiAnalysis. 2026. InferenceX: Open-Source Continuous AI Inference Bench-mark. https://inferencex.semianalysis.com/. Accessed: 2026-04-05. [47] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2019. Megatron-LM: Training multi-billion parameter language models using model parallelism. arXiv preprint arXiv:1909.08053 (2019). [48] Benjamin Spector, Jordan Juravsky, Stuart Sul, Owen Dugan, Dylan Lim, Dan Fu, Simran Arora, and Chris Ré. 2025. Look Ma, No Bubbles! Designing a Low-Latency Megakernel for Llama-1B. https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles. Blog post. [49] Stuart H Sul, Simran Arora, Benjamin F Spector, and Christopher Ré. 2025. Par-allelKittens: Systematic and Practical Simplification of Multi-GPU AI Kernels. 
+
+arXiv preprint arXiv:2511.13940 (2025). [50] Kimi Team, Yifan Bai, Yiping Bao, Guanduo Chen, Jiahao Chen, Ningxin Chen, Ruijue Chen, Yanru Chen, Yuankun Chen, Yutian Chen, et al . 2025. Kimi k2: Open agentic intelligence. arXiv preprint arXiv:2507.20534 (2025). [51] Amit Tiwari and V Krishna Nandivada. 2025. Unleashing Parallelism with Elastic-Barriers. ACM Transactions on Architecture and Code Optimization 22, 2 (2025), 1–26. [52] vLLM. Retrieved November 16, 2025. vLLM Custom All-Reduce Implementation. https://github.com/vllm-project/vllm/blob/main/csrc/custom_all_reduce.cuh. [53] Thijs Vogels, Sai Praneeth Karimireddy, and Martin Jaggi. 2019. PowerSGD: Practical low-rank gradient compression for distributed optimization. Advances in Neural Information Processing Systems 32 (2019). [54] Yifu Wang, Horace He, and Luca Wehrstedt. 2025. PyTorch SymmetricMem-ory: Harnessing NVLink Programmability with Ease. PyTorch Developer Blog. https://dev-discuss.pytorch.org/t/pytorch-symmetricmemory-harnessing-nvlink-programmability-with-ease/2798 Accessed: March 2026. [55] Mengdi Wu, Xinhao Cheng, Shengyu Liu, Chunan Shi, Jianan Ji, Kit Ao, Praveen Velliengiri, Xupeng Miao, Oded Padon, and Zhihao Jia. 2025. Mirage: A Multi-Level Superoptimizer for Tensor Programs. In 19th USENIX Symposium on Oper-ating Systems Design and Implementation (OSDI 25) . USENIX Association, Boston, MA. [56] Mengdi Wu, Xinhao Cheng, Shengyu Liu, Chunan Shi, Jianan Ji, Man Kit Ao, Praveen Velliengiri, Xupeng Miao, Oded Padon, and Zhihao Jia. 2025. Mirage: A 
+
+{Multi-Level } Superoptimizer for Tensor Programs. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . 21–38. [57] Pooria M Yaghini, George Michelogiannakis, and Paul V Gratz. 2019. SpecLock: Speculative lock forwarding. In 2019 IEEE 37th International Conference on Com-puter Design (ICCD) . IEEE, 273–282. [58] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al . 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 (2025). [59] Ahmet Caner Yüzügüler, Jiawei Zhuang, and Lukas Cavigelli. 2025. PRESERVE: Prefetching Model Weights and KV-Cache in Distributed LLM Serving. arXiv preprint arXiv:2501.08192 (2025). [60] Chen Zhang, Qijun Zhang, Zhuoshan Zhou, Yijia Diao, Haibo Wang, Zhe Zhou, Zhipeng Tu, Zhiyao Li, Guangyu Sun, Zhuoran Song, et al . 2026. Towards Compute-Aware In-Switch Computing for LLMs Tensor-Parallelism on Multi-GPU Systems. In 2026 IEEE International Symposium on High Performance Com-puter Architecture (HPCA) . IEEE, 1–15. [61] Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. 2025. DeepEP: an efficient expert-parallel communication library. https://github.com/deepseek-ai/DeepEP. [62] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al . 2024. Sglang: Efficient execution of structured language model programs. 
+
+Advances in neural information processing systems 37 (2024), 62557–62583. [63] Size Zheng, Wenlei Bao, Qi Hou, Xuegui Zheng, Jin Fang, Chenhui Huang, Tianqi Li, Haojie Duanmu, Renze Chen, Ruifan Xu, Yifan Guo, Ningxin Zheng, Ziheng Jiang, Xinyi Di, Dongyang Wang, Jianxi Ye, Haibin Lin, Li-Wen Chang, Liqiang Lu, Yun Liang, Jidong Zhai, and Xin Liu. 2025. Triton-distributed: Program-ming Overlapping Kernels on Distributed AI Systems with the Triton Compiler. arXiv:2504.19442 [cs.DC] https://arxiv.org/abs/2504.19442 [64] Size Zheng, Jin Fang, Xuegui Zheng, Qi Hou, Wenlei Bao, Ningxin Zheng, Ziheng Jiang, Dongyang Wang, Jianxi Ye, Haibin Lin, et al . 2025. Tilelink: Generating ef-ficient compute-communication overlapping kernels using tile-centric primitives. 
+
+arXiv preprint arXiv:2503.20313 (2025). [65] Kan Zhu, Yufei Gao, Yilong Zhao, Liangyu Zhao, Gefei Zuo, Yile Gu, Dedong Xie, Zihao Ye, Keisuke Kamahori, Chien-Yu Lin, et al . 2025. {NanoFlow }: Towards optimal large language model serving throughput. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . 749–765.

@@ -6,47 +6,44 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-15
-- 运行时间：2026-07-15 21:28:34 UTC
+- 最新运行日期：2026-07-16
+- 运行时间：2026-07-16 20:12:49 UTC
 - 运行状态：成功
-- 本次总论文数：9
-- 精读区：6
+- 本次总论文数：8
+- 精读区：5
 - 速读区：3
 
 ### 今日简报（AI）
-今日精选6篇论文，聚焦自回归语言模型并行化加速与长视频理解；最推荐精读《Unlocking Parallelism...》与《Trees from Marginals》，前者通过渐进树草稿实现高效投机解码，后者用因子化先验改进自回归草稿生成；建议关注投机解码在混合专家模型中的成本感知优化。
-- 详情：[/202607/15/README](/202607/15/README)
+今日聚焦推测解码技术的两项高分突破，分别提出免训练松弛策略与成本感知MoE加速方案。最值得关注的是两篇9.0分精读论文，它们从不同角度大幅提升大模型推理效率。建议优先深入阅读这两篇，掌握当前高效解码的最新实践方向。
+- 详情：[/202607/16/README](/202607/16/README)
 
 ### 精读区论文标签
-1. [Unlocking Parallelism in Autoregressive Language Models via Speculative Decoding with Progressive Tree Drafting](/202607/15/2607.10661v1-unlocking-parallelism-in-autoregressive-language-models-via-speculative-decoding-with-progressive-tree-drafting)  
-   标签：评分：10.0/10、query:llm
-   evidence：通过渐进树草稿实现LLM投机解码的并行性
-2. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/15/2607.06763v1-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
+1. [A Practical Investigation of Training-free Relaxed Speculative Decoding](/202607/16/2607.08690v1-a-practical-investigation-of-training-free-relaxed-speculative-decoding)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：提出Weaver，一种用于投机解码的轻量级自回归适配器，构建提议树并支持无回滚验证
-3. [A Practical Investigation of Training-free Relaxed Speculative Decoding](/202607/15/2607.08690v1-a-practical-investigation-of-training-free-relaxed-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：无训练宽松投机解码方法
-4. [TriRoute: Unified Learned Routing for Joint Adaptive Attention, Experts, and KV-Cache Allocation](/202607/15/2607.06601v1-triroute-unified-learned-routing-for-joint-adaptive-attention-experts-and-kv-cache-allocation)  
+   evidence：无训练宽松投机解码方法研究
+2. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/16/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
+   标签：评分：9.0/10、query:llm
+   evidence：面向混合专家模型的成本感知投机解码
+3. [AnchorPrune: Relevance-Anchored Contextual Expansion for Visual Token Pruning](/202607/16/2607.07033v3-anchorprune-relevance-anchored-contextual-expansion-for-visual-token-pruning)  
+   标签：评分：8.0/10、query:vlm-spec
+   evidence：视觉token剪枝用于VLM推理加速
+4. [SiFAR: Synchronization-Free All-Reduce for Low-Latency LLM Inference](/202607/16/2607.08973v1-sifar-synchronization-free-all-reduce-for-low-latency-llm-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：提出统一学习路由，联合自适应注意力、专家选择和KV缓存分配，优化大语言模型推理效率
-5. [Reducing Temporal Redundancy for Efficient Vision-Language-Action Inference](/202607/15/2607.12287v1-reducing-temporal-redundancy-for-efficient-vision-language-action-inference)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：通过减少时序冗余实现高效的视觉-语言-动作推理
-6. [VisCo: Leveraging Large Language Models as Intrinsic Encoders for Visual Token Compression](/202607/15/2607.12756v1-visco-leveraging-large-language-models-as-intrinsic-encoders-for-visual-token-compression)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：视觉标记压缩加速VLM推理
+   evidence：无同步全规约降低LLM推理延迟
+5. [Unlocking Parallelism in Autoregressive Language Models via Speculative Decoding with Progressive Tree Drafting](/202607/16/2607.10661v1-unlocking-parallelism-in-autoregressive-language-models-via-speculative-decoding-with-progressive-tree-drafting)  
+   标签：评分：8.0/10、query:llm
+   evidence：渐进式树形草稿解码加速LLM推理
 
 ### 速读区论文标签
-1. [Trees from Marginals: Autoregressive drafting with factorized priors](/202607/15/2607.06763v2-trees-from-marginals-autoregressive-drafting-with-factorized-priors)  
-   标签：评分：7.0/10、query:llm
-   evidence：面向大语言模型投机解码的自回归草稿与树验证
-2. [Gaussian Mixture Modeling for Event-Aware Visual Allocation in Long Video Understanding](/202607/15/2607.12557v1-gaussian-mixture-modeling-for-event-aware-visual-allocation-in-long-video-understanding)  
+1. [Attention-Free and Lightweight Token Reduction for Efficient Vision-Language Models](/202607/16/2607.13500v1-attention-free-and-lightweight-token-reduction-for-efficient-vision-language-models)  
    标签：评分：7.0/10、query:vlm-spec
-   evidence：提出事件感知的关键帧选择以减少LVLM的计算开销
-3. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/15/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
+   evidence：标记减少加速视觉语言模型推理
+2. [Hidden Decoding at Scale: Latent Computation Scaling for Large Language Models](/202607/16/2607.08186v1-hidden-decoding-at-scale-latent-computation-scaling-for-large-language-models)  
    标签：评分：6.0/10、query:llm
-   evidence：面向MoE大语言模型的代价感知投机解码
+   evidence：通过序列长度计算扩展提升LLM推理效率
+3. [Screening Is Effective for Visual Recognition](/202607/16/2607.13983v1-screening-is-effective-for-visual-recognition)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：筛选方法用于视觉Token剪枝，减少冗余Token，可应用于VLM加速
 
 
 <div class="dpr-home-promo-card">
