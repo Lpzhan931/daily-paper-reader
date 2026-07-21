@@ -1,0 +1,447 @@
+Title: Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware
+
+URL Source: https://arxiv.org/pdf/2607.17283v1
+
+Published Time: Tue, 21 Jul 2026 01:10:21 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware 
+
+Param Chordiya University of California, San Diego 
+
+pchordiya@ucsd.edu 
+
+July 21, 2026 
+
+Abstract 
+
+Single-stream autoregressive decoding of large language models is bound by memory band-width: each generated token requires one full forward pass through the target model, and successive passes cannot be parallelized. Speculative decoding restructures this computation — a small draft model proposes K tokens autoregressively, and the target model scores all of them in one batched pass — while a rejection-sampling rule provably preserves the target model’s output distribution. We present a from-scratch, device-agnostic (CUDA/MPS/CPU) implementation and an empirical study across five draft/target backend configurations on a consumer Apple-silicon laptop. Distribution equivalence is verified at three levels, culminating in a two-sample test over roughly 9,200 real-model tokens per method ( χ2 = 162 .5, dof = 200 , p = 0 .976 ) and exact greedy-sequence agreement. The best configuration reaches a measured 1.61 × wall-clock speedup at K=6, on an acceptance profile declining from 69 .7% at K=1 to 37 .8% at the optimum, while three of five configurations decelerate — because the draft fails to out-speed a small target, or because the quantized Metal backend executes “parallel” verification serially, an effect we isolate and quantify. The failures are as instructive as the successes: speculative decoding pays off only when verification is genuinely batch-parallel and the draft/target latency gap is real. 
+
+Keywords: speculative decoding, speculative sampling, LLM inference, rejection sampling, KV cache, quantization, Apple silicon, llama.cpp, Metal, MPS 
+
+# 1 Introduction 
+
+Generating text from a decoder-only transformer is a serial process. Producing token t + 1 requires a forward pass conditioned on tokens 1..t ; producing token t + 2 requires the output of that pass. No amount of parallel hardware removes this dependency chain — at batch size one, each decoding step reads essentially all model weights to produce a single token, so the process is bound by memory bandwidth rather than arithmetic throughput [ 8, 17 ]. A modern accelerator that can multiply matrices at hundreds of TFLOP/s spends a single-stream decode step mostly waiting on weight reads. Speculative decoding [ 2 , 9 ] attacks the dependency chain itself. The observation is that verifying 
+
+a proposed continuation is parallelizable even though generating one is not: if some cheap process guesses the next K tokens, the target model can score all K positions in one forward pass, because every position’s inputs are known in advance. A small draft model supplies the guesses; a carefully constructed accept/reject rule keeps only the prefix of guesses the target model “agrees with,” and — 1arXiv:2607.17283v1 [cs.AI] 19 Jul 2026 critically — resamples the first rejected position from an adjusted distribution such that the overall output distribution is mathematically identical to sampling the target model alone. Acceleration therefore never trades away output quality; the only question is whether the bookkeeping costs less than the target passes it saves. That question is usually answered on server-class GPUs. This paper answers it on consumer hardware — an Apple-silicon laptop with 18 GB of unified memory — where quantized inference runtimes, Metal compute kernels, and PyTorch’s MPS backend interact in ways that can silently invalidate speculative decoding’s premises. Our contributions: 
+
+• A from-scratch, device-agnostic implementation. A five-block engine (model abstraction, draft–verify loop, rejection sampling, benchmark harness, CLI) that runs unmodified on CUDA, MPS, and CPU, mixes backends freely (Hugging Face Transformers fp16, llama.cpp GGUF 4/8-bit), and performs all sampling arithmetic in float32 on the CPU with an explicit generator for cross-device reproducibility. 
+
+• A verified distribution-equivalence result. Correctness is gated, not assumed, at three levels: a 50 ,000 -trial statistical test of the rejection-sampling rule against analytic ground truth; an end-to-end decoder test on deterministic mock models including bit-exact greedy agreement; and a real-model gate comparing about 9,200 speculative tokens against as many target-only tokens (a χ2 two-sample test, p = 0 .976 ). 
+
+• An empirical K-sweep across five backend configurations, measuring throughput, acceptance by draft position, time-to-first-token, latency decomposition, and peak memory. The sweep surfaces two failure modes that we isolate with targeted microbenchmarks: adraft that is slower per step than a small quantized target, and a quantized Metal backend whose verification cost grows linearly in batch size for batches of 2–7 because it executes matrix–vector kernels per position. 
+
+# 2 Background and Related Work 
+
+Autoregressive decoding is latency-bound. A decoder-only transformer with cached keys and values performs, per generated token, one matrix–vector-shaped pass over its weights. At batch size one the arithmetic intensity of this pass is far below the compute/bandwidth break-even of modern accelerators, so step latency approaches (weights read) /(memory bandwidth) — the memory-bandwidth-bound regime. Larger batches amortize the weight reads across many streams and move inference toward the compute-bound regime; this is exactly the lever that serving-side optimizations pull. Continuous batching schedules many concurrent requests at iteration granularity [ 17 ], and PagedAttention partitions KV-cache memory into paged blocks so those batches fit [ 8 ]. Both raise 
+
+throughput across requests; neither shortens the latency of a single stream, which is the setting this paper targets. 
+
+Orthogonal accelerations. Weight quantization — GPTQ’s second-order one-shot approach [ 4 ], AWQ’s activation-aware scaling [ 10 ], NF4 4-bit data types [ 3 ], and llama.cpp’s k-quant formats [ 5] — shrinks the weights that each step must read and is fully composable with speculative decoding: our target models are 4-bit quantized. Knowledge distillation [ 7 ] transfers a large model’s behavior into a smaller one; it changes the model rather than the decoding procedure, and (unlike speculative decoding) offers no guarantee of matching the large model’s distribution. 2Table 1: Notation. 
+
+Symbol Meaning 
+
+p(· | s), q (· | s) target / draft next-token distribution given context sV, T shared vocabulary; sampling temperature (applied to both models) 
+
+K speculation length (draft tokens proposed per round) 
+
+xi, q i the i-th drafted token and the draft distribution it was sampled from 
+
+pi target distribution at position i, i.e. p(· | s + x1: i−1)
+
+pK+1 bonus distribution p(· | s + x1: K ), free from the verify pass 
+
+ri acceptance draw, ri ∼ Uniform(0 , 1) 
+
+a index of the last accepted draft (first rejection at a+1 )
+
+p′ 
+
+> a+1
+
+adjusted resampling distribution at the first rejected position 
+
+α (pooled) acceptance rate 
+
+Speculative decoding. Blockwise parallel decoding [ 16 ] first exploited the verify-in-parallel observation, using auxiliary prediction heads and exact-match acceptance for greedy decoding. Leviathan et al. [9] and Chen et al. [2] independently generalized this to sampling with a modified rejection rule that preserves the target distribution exactly (Section 3), using a separate small draft model. Follow-on work varies the draft source: Medusa [ 1 ] attaches several additional decoding heads to the target model itself and verifies a tree of candidates under a purpose-built attention mask; self-speculative approaches such as Draft & Verify [ 18 ] skip layers of the target to draft, requiring no second model. We implement the two-model formulation of Leviathan et al. [9] and Chen et al. [2] because it cleanly separates the mathematical guarantee (rejection sampling) from the systems question (when do the economics work), which is the object of our study. 
+
+# 3 Method 
+
+3.1 Setting and notation 
+
+Let p(· | s) denote the target model’s next-token distribution given context s, and q(· | s) the draft model’s. Both are computed as temperature-scaled softmaxes over a shared vocabulary V ; the same temperature T is applied to both. Table 1 collects the symbols used throughout. One round of speculative decoding proceeds: 1. Draft. Sample K tokens autoregressively from the draft: xi ∼ q(· | s + x1: i−1) for i = 1 ..K ,retaining each full distribution qi.2. Verify. Run the target once over the K new positions (with its KV cache covering s), obtaining K+1 distributions: pi = p(· | s + x1: i−1) for i = 1 ..K , plus the bonus distribution 
+
+pK+1 = p(· | s + x1: K ).3. Accept/reject. Walk i = 1 ..K : draw ri ∼ Uniform(0 , 1) and accept xi iff 
+
+ri < min 
+
+(
+
+1, pi(xi)
+
+qi(xi)
+
+)
+
+. (1) At the first rejection, position a+1, discard xa+1 ..x K and emit one replacement token drawn from the adjusted distribution 
+
+p′
+
+> a+1
+
+(x) = max (0, p a+1 (x) − qa+1 (x))∑ 
+
+> y∈V
+
+max (0, p a+1 (y) − qa+1 (y)) . (2) 3Input: context s; draft q, target p; speculation length K; temperature T                                                                       
+
+> Output: 1to K+1 new tokens, distributed as p(· | s)
+> for i= 1 to K:xi∼q(· | s+x1: i−1), retaining qi▷draft autoregressively
+> (p1, . . . , p K+1 )←TargetForward (s+x1: K)▷one target pass, K+1 rows
+> for i= 1 to K:draw ri∼Uniform(0 ,1)
+> if ri<min (1, p i(xi)/q i(xi)):commit xi▷accept
+> else :emit y∼p′
+> iwith p′
+> i(x)∝max (0, p i(x)−qi(x));return committed +y▷reject; discard xi:K
+> emit bonus y∼pK+1 ;return committed +y▷all Kaccepted
+
+Algorithm 1: One round of speculative decoding. Caches are truncated to the accepted length after the walk; sampling arithmetic is CPU float32. 4. Bonus. If all K drafts are accepted, emit one extra token sampled from pK+1 — free, because that distribution was already computed by the verify pass. The round emits between 1 and K+1 tokens for exactly one target pass and K draft steps; the loop repeats until an end-of-sequence token or a length budget (Algorithm 1). 
+
+3.2 Why the output distribution equals the target’s 
+
+Proposition 1 (2, 9 ). For any context, the token emitted by one round of Algorithm 1 is distributed exactly as p(· | s).Proof sketch (single position). Fix a context and abbreviate p, q for the target and draft distributions there. The emitted token Y is either an accepted draft or an adjusted resample. For any token y,
+
+Pr[ Y = y, accept ] = q(y) · min 
+
+> (
+
+1, p(y)
+
+q(y)
+
+> )
+
+= min (p(y), q (y)). (3) The total rejection probability is 1 − ∑ 
+
+> z
+
+min (p(z), q (z)) = ∑ 
+
+> z
+
+max (0 , p (z) − q(z)) , which is exactly the normalizer of p′ in Eq. (2), so 
+
+Pr[ Y = y, reject ] =  
+
+> [ ∑
+> z
+
+max(0 , p (z) − q(z)) 
+
+> ]
+
+· p′(y) = max (0, p (y) − q(y)). (4) Summing the two cases gives Pr [Y = y] = min (p, q )( y) + max (0 , p − q)( y) = p(y). Induction over positions extends this to sequences: conditioned on any committed prefix, the next emitted token is distributed as p(· | prefix ) — whether it arrives as an accepted draft, a resample, or a bonus draw (the bonus is a direct sample from pK+1 ). The marginal process is therefore indistinguishable from autoregressive sampling of the target alone. 
+
+Greedy special case. As T → 0 both distributions collapse to one-hot argmax vectors, and the general rule degenerates to: accept iff arg max pi = xi, else emit arg max pi. Our implementation treats T =0 explicitly (no RNG is consumed), and the general-rule-on-one-hots equivalence is unit-tested. 4context s                
+
+> (KV caches)
+> Draft qKautoregr. steps keep q1: K
+> Verify p
+> one target pass rows p1: K+1
+> Accept walk
+> ri<
+> min (1,pi(xi)
+> qi(xi)
+> )
+> Bonus
+> y∼pK+1
+> Resample
+> y∼p′
+> a+1
+> ∝max (0 , p −q)
+> commit
+> 1–(K+1)
+> tokens
+> x1: K
+> all Kacc.
+> reject @ a+1
+> append committed tokens; truncate KV caches; repeat
+> HF fp16 (MPS) or GGUF (llama.cpp/Metal)
+
+Figure 1: Core draft–verify–accept loop and the two exit branches. The draft proposes K tokens autoregressively (keeping each distribution qi); the target scores all K positions in one pass, yielding 
+
+p1: K+1 ; the accept walk commits the longest agreeing prefix. If every draft is accepted, a free bonus 
+
+token is drawn from pK+1 ; otherwise the first rejected position is resampled from the adjusted distribution and the remaining drafts are discarded. Both model roles sit behind one device-agnostic abstraction (Block 1) that mixes Hugging Face fp16 and llama.cpp GGUF backends. Both models run on either backend; sampling arithmetic is always CPU float32. 
+
+Expected yield. Under the idealized assumption of a position-independent acceptance rate α, a round emits (1 − αK+1 )/(1 − α) tokens in expectation [ 9 ]. Measured acceptance in fact decays with draft position (Section 6.3), so this expression is an upper bound that becomes loose as K grows — one of the two reasons large K underperforms in practice. 1
+
+# 4 Implementation 
+
+The engine is organized as five blocks coded against a frozen interface file that fixes every shared signature, the KV-cache choreography, and the benchmark JSON schema before any block was written — which allowed the blocks to be developed in parallel without integration drift. Figure 1 shows the core loop. 
+
+Model abstraction. A SpecModel interface exposes a stateless forward and a stateful incremental API: extend(tokens) →logits appends tokens to the model’s KV cache and returns full-vocabulary logits for the new positions; truncate_cache(n) rolls the cache back (a no-op when already shorter — the contract that makes post-rejection cleanup uniform). Two implementations exist. 
+
+HFModel wraps any Hugging Face causal LM with a DynamicCache , cropping it in place on rollback.        
+
+> 1Eq. (2) is well defined whenever a rejection can occur; the implementation additionally guards the measure-zero case in which the residual mass is exactly zero (only reachable when p=qat that position) by falling back to p, which is distributionally harmless there.
+
+5QuantizedModel wraps llama.cpp: the KV rollback sets n_tokens and explicitly removes stale cache entries via the current kv_cache_seq_rm API, and — essential for correctness — the runtime is configured with logits_all=True so full-vocabulary logits are available at every drafted position, not just the final one; rejection sampling is impossible with top-k-truncated outputs. Both wrappers pass a KV-consistency test battery: after any extend/truncate sequence, logits must match a fresh evaluation of the same tokens. 
+
+One tokenizer. The draft’s Hugging Face tokenizer is the single source of truth; llama.cpp receives token ids directly and never re-tokenizes. Pair construction validates tokenizer identity across backends (vocabulary comparison for HF–HF pairs; id →text round-trips for HF–GGUF pairs) and computes the shared sampling width as the minimum of the two logit widths, since model families pad their output layers differently. This validation exists because plausible-looking pairs fail it: TinyLlama [ 19 ] uses a 32 ,000 -token Llama-2 vocabulary and cannot legally pair with Llama-3.1’s 128 ,256 -token one, which is why our CUDA headline script pairs Llama-3.2-1B with Llama-3.1-8B [6] instead. 
+
+Numerics and reproducibility. All sampling mathematics — temperature scaling, the accept test, the adjusted-distribution construction, multinomial draws — executes on CPU in float32 through an explicit torch.Generator , regardless of where the models run. Model wrappers return CPU float32 logits at their boundary. This costs microseconds per round (Section 6.4) and buys bit-reproducible runs across CUDA, MPS, and CPU, immunity to fp16 underflow in probability space, and a well-defined division in p/q (with the q = 0 edge cases handled explicitly). 
+
+Cache choreography. Between rounds both models’ caches hold a prefix of the committed sequence; each round extends the draft cache with the uncached suffix, extends the target cache once with (last committed token + all K drafts), takes the last K+1 logit rows — the alignment where row i predicts draft token i+ 1 — and truncates both caches back to the accepted length after the accept walk. Getting the “last K+1 rows” alignment wrong is the classic off-by-one in speculative decoders; it is pinned by mock-model tests in which any misalignment breaks a cache-prefix invariant assertion. 
+
+Device handling. A single get_device() helper selects CUDA/MPS/CPU; timers call a device-appropriate synchronize before reading the clock. The same benchmark scripts run unmodified on a CUDA machine; a self-contained Colab script reproduces the benchmark JSON schema for the 8B-class pairing (Llama-3.2-1B fp16 draft + Llama-3.1-8B 4-bit target via bitsandbytes NF4 [3]). 
+
+# 5 Experimental Setup 
+
+Hardware and software. All measurements in this paper were produced on one consumer machine: an Apple-silicon (M3-class, arm64) laptop with 18 GB of unified memory, macOS 26.5; Python 3.12.2, PyTorch 2.12.1 (MPS backend), Transformers 5.13.0, llama-cpp-python 0.3.33 (Metal). No CUDA device was available; the 8B-class configuration is provided as a runnable Colab-T4 script that emits the identical results schema, but its numbers are deliberately absent from this paper because they were not measured here. 6Table 2: The five benchmark configurations (draft → target, with backend).             
+
+> Config Draft (backend) Target (backend)
+> primary 0.5B fp16 (Transformers, MPS) 1.5B q4_k_m (llama.cpp, Metal)
+> all_gguf 0.5B q8_0 (llama.cpp, Metal) 1.5B q4_k_m (llama.cpp, Metal)
+> stretch_7b 0.5B q8_0 (llama.cpp, Metal) 7B q4_k_m (llama.cpp, Metal)
+> mixed 0.5B q8_0 (llama.cpp, Metal) 1.5B fp16 (Transformers, MPS)
+> mixed_3b 0.5B q8_0 (llama.cpp, Metal) 3B fp16 (Transformers, MPS)
+
+Models. All local pairs draw from the Qwen2.5 instruct family [ 11 ], which shares one tokenizer across sizes: Qwen2.5-0.5B (draft; HF fp16 or GGUF q8_0) [ 12 ], and targets Qwen2.5-1.5B (GGUF q4_k_m or HF fp16) [ 13 ], Qwen2.5-3B (HF fp16) [ 14 ], Qwen2.5-7B (GGUF q4_k_m) [ 15 ]. Five configurations cover the backend cross-product (Table 2). 
+
+Prompts. A fixed, vendored set of 100 instruction-style prompts ( 48 –788 characters; explanation, summarization-with-passage, reasoning, coding, how-to, comparison, and creative categories) is versioned in the repository for offline reproducibility; no benchmark-time dataset download occurs. Prompts are chat-templated identically for both decoding paths. 
+
+Protocol. Main benchmarks: the first 30 prompts, 2 used as untimed warm-up ( 28 recorded), 128 
+
+new tokens per prompt, T = 0 .8, K = 4 , per-prompt seed = prompt index . K-sweeps: 10 prompts (2 warm-up), 96 tokens, K ∈ { 1, 2, 4, 6, 8, 10 , 12 }. Equivalence gate: 100 prompts × 100 tokens per method at T = 1 .0, seeds 1234 +i, plus a greedy leg of 5 prompts × up to 200 tokens at T = 0 .Every run writes a JSON artifact; every number below cites its artifact. 
+
+Metrics. Throughput : generated tokens / wall-clock per prompt, reported mean ± std across recorded prompts, with a device synchronize before each clock read. TTFT : start of generation to the first committed token (for speculative decoding this includes the first full draft +verify round). 
+
+Acceptance rate : accepted draft tokens / drafted tokens, pooled over the run; positional acceptance 
+
+is the same statistic restricted to draft position i. Latency split : draft / verify / sampling / other wall-time per generated token, from per-round timers. Peak memory : process-wide high-water RSS (ru_maxrss ); as a high-water mark it is non-decreasing across runs in one process, so per-config values are upper bounds. VRAM is absent because no CUDA device was present. 
+
+# 6 Results 
+
+6.1 Distribution equivalence (the correctness gate) 
+
+Three levels of verification, from algebra to real models. 
+
+Level 1 — the sampling rule in isolation. For four synthetic (p, q ) families over a 30 -token vocabulary (uniform-Dirichlet, heavy-tailed, near-identical, mismatched concentration), 50 ,000 trials of draw-from-q → accept/reject → adjusted-resample were compared against the analytic target p.Goodness-of-fit p-values were 0.652 , 0.260 , 0.225 , and 0.978 , with KL ( ˆp ∥ p) ≤ 3.5 × 10 −4 in all cases — the emitted marginal is statistically indistinguishable from p.70 25 50 75 100 125 150 175 200   
+
+> token rank (top 200 by combined count)
+> 10 1
+> 10 2
+> count (log scale)
+> χ2= 162.5, dof = 200
+> p= 0.976 (no detectable difference)
+> target-only
+> speculative
+
+Figure 2: Token-frequency overlay for the top-200 tokens by combined count, speculative vs. target-only, on a log scale, annotated with the two-sample test statistics ( primary pair, 100 prompts ×
+
+100 tokens, T =1 .0). The two curves are visually and statistically indistinguishable ( p = 0 .976 ). 
+
+Level 2 — the full decoder on deterministic mock models. With draft and target imple-mented as fixed stochastic matrices (vocabulary 48 ), pooling 1,000 seeded generations of 25 tokens per method gave a two-sample χ2 = 67 .0 (dof = 47 , p = 0 .029 , above the 0.01 gate threshold and consistent with the null) over 20 ,950 tokens per method, and greedy decoding produced bit-identical 
+
+sequences to the baseline for every K ∈ { 1, 2, 4, 8}.
+
+Level 3 — real models. Using the primary pair, 100 prompts × 100 tokens at T = 1 .0 produced 
+
+9,209 speculative and 9,214 baseline tokens under matched seeds. A two-sample χ2 test over 201 
+
+frequency bins (binned so every expected count ≥ 5) gives 
+
+χ2 = 162 .5, dof = 200 , p = 0 .976 , (5) — no detectable difference between the speculative output distribution and target-only sampling (Fig-ure 2). The greedy leg produced exactly identical token sequences on 5/5 prompts ( 200 , 122 , 147 , 200 , 200 
+
+tokens; the shorter two stopped at EOS in both paths). Two honest caveats. First, the reported smoothed symmetric KL ( 0.471 ) is dominated by add-0.5 smoothing over the sparse union support (about 9,200 samples spread thinly over a large vocabulary); the calibrated instrument is the binned χ2. Second, the greedy leg runs both paths on an fp32-CPU backend. The reason is measured, not asserted: on the quantized Metal backend, evaluating the same context with the final tokens in a batch of five versus one at a time shifts logits by up to roughly 0.1 — enough to flip the argmax at near-ties (observed top-1/top-2 probability gaps of 1.8 × 10 −3–5.8 × 10 −3), with no speculative machinery involved. Batch-invariance of logits is a backend property that bit-exact greedy comparison presupposes; fp32 CPU exhibits it, the quantized Metal path does not. 8Table 3: Main results ( K = 4 , T = 0 .8, 128 new tokens, mean ± std over 28 prompts). Peak RSS is a process-wide high-water mark (an upper bound). Values from each run’s JSON aggregate; speedups from results/summary.json .
+
+Config Base tok/s Spec tok/s Speedup Accept. TTFT b(s) TTFT s(s) Peak RSS (GB) 
+
+mixed_3b 16 .00 ±0.71 25 .07 ±2.59 1.57 × 43 .3% 0.237 0.389 5.23 
+
+mixed 26 .38 ±2.70 36 .91 ±6.53 1.40 × 51 .0% 0.187 0.268 3.78 
+
+all_gguf 73 .99 ±6.34 37 .00 ±4.74 0.50 × 52 .4% 0.125 0.248 3.22 
+
+stretch_7b 23 .15 ±2.16 11 .95 ±1.35 0.52 × 40 .2% 0.479 0.736 5.49 
+
+primary 73 .46 ±6.25 24 .44 ±3.10 0.33 × 53 .4% 0.122 0.307 2.93 mixed_3b  
+
+> mixed
+> all_gguf
+> stretch_7b
+> primary
+> 0
+> 20
+> 40
+> 60
+> 80
+> throughput (tokens/s)
+> 1.57 ×
+> 1.40 ×
+> 0.50 ×
+> 0.52 ×
+> 0.33 ×
+> autoregressive baseline
+> speculative ( K= 4)
+
+(a) Baseline vs. speculative throughput per configura-tion, K=4 .1 2 4 6 8 10 12              
+
+> speculation length K
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> 1.4
+> 1.6
+> speedup vs.\ own baseline
+> break-even
+> K⋆= 6, 1.61×
+> mixed_3b (0.5B →3B, MPS)
+> mixed (0.5B →1.5B, MPS)
+> all_gguf (0.5B →1.5B, Metal)
+> stretch_7b (0.5B →7B, Metal)
+> primary (0.5B →1.5B, Metal)
+
+(b) Speedup vs. K, each normalized by its own base-line. 
+
+Figure 3: (a) Main-run throughput ( 128 tokens, 28 prompts); speedup factors labeled. Only the two configurations with a Transformers-on-MPS target exceed 1.0×. (b) The K-sweep ( 96 
+
+tokens, 8 recorded prompts): mixed_3b peaks at K=6 (1.61 ×); the three llama.cpp-Metal-verifier configurations sit below break-even at every K.
+
+6.2 Throughput, speedup, and the K-sweep 
+
+Table 3 reports the headline numbers. mixed_3b (a 0.5B q8_0 draft against a 3B fp16 MPS target) is the fastest at 1.57 ×; mixed follows at 1.40 ×; the three llama.cpp-Metal-verifier configurations all lose. Table 4 sweeps K for the best configuration. The measured optimum is K = 6 at 1.61 ×, but the honest reading of Table 4 is a plateau :
+
+K ∈ { 2, 4, 6} all deliver 1.52 –1.61 × and their standard deviations overlap ( K=6’s std of 4.70 
+
+tok/s spans the K=2 mean); beyond the plateau, throughput decays as acceptance collapses. The companion configuration mixed peaks at K = 4 (43 .02 tok/s, 1.53 ×) with the same plateau shape. The three configurations below 1.0× in Figure 3b decelerate at nearly every K (stretch_7b only ties its baseline, 1.01 ×, at K=1 ); Sections 6.4–6.5 show precisely why. 
+
+6.3 Acceptance by draft position 
+
+For the primary main run, positional acceptance falls monotonically: 75 .4% , 57 .7% , 44 .7% , 35 .9% 
+
+for positions 1–4; for mixed_3b (a larger draft/target quality gap): 66 .4% , 48 .0% , 34 .8% , 24 .2% 
+
+(Figure 4). This shape is the mechanism behind the K-sweep: each additional draft position is conditioned on a longer unverified prefix, so its acceptance probability is roughly the product of 9Table 4: K-sweep for the best configuration ( mixed_3b : 0.5B q8_0 draft, 3B fp16 MPS target; 96 
+
+tokens, 8 prompts; baseline 16 .85 ± 0.07 tok/s). 
+
+K tok/s Acceptance Speedup 
+
+1 22 .57 ±1.09 69 .7% 1.34 ×
+
+2 26 .03 ±1.60 60 .2% 1.55 ×
+
+4 25 .57 ±1.93 42 .1% 1.52 ×
+
+6 27 .17 ±4.70 37 .8% 1.61 ×
+
+8 21 .46 ±3.22 25 .6% 1.27 ×
+
+10 17 .92 ±2.71 22 .2% 1.06 ×
+
+12 19 .27 ±4.57 22 .8% 1.14 ×1 2 3 4            
+
+> draft position within a K= 4 round
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> acceptance rate (\%)
+> mixed_3b (0.5B →3B, MPS)
+> mixed (0.5B →1.5B, MPS)
+> all_gguf (0.5B →1.5B, Metal)
+> stretch_7b (0.5B →7B, Metal)
+> primary (0.5B →1.5B, Metal)
+
+Figure 4: Acceptance rate by draft position within K=4 rounds, all five main-run configurations. Position 1 is accepted far more often than position 4 — the signature of compounding draft/target divergence. Configurations with a larger draft/target quality gap ( stretch_7b , mixed_3b ) decay fastest. survival through all earlier positions times a decreasing marginal agreement. Sweep-level pooled acceptance tells the same story from another angle, declining from 69 .7% at K=1 to 22 .8% at 
+
+K=12 for mixed_3b . The practical consequence: the marginal value of drafting token K+1 shrinks geometrically, while its cost (one more draft step, one more verify position) is constant or growing — producing an interior optimum in K.
+
+6.4 Where the time goes 
+
+For mixed_3b at K = 4 : 40 .0 ms per generated token, split into draft 12 .7 ms, verify 23 .7 ms, sampling 0.88 ms, other 2.8 ms — against a 62 .5 ms/token baseline ( 1000 /16 .0; Figure 5). Two facts matter. First, sampling overhead is negligible (2.2% of wall time), vindicating the CPU-float32 design: correctness-critical math need not live on the accelerator. Second, the engine spends 32% of its time drafting — at 8.5 ms per draft step against the 3B target’s roughly 64 ms verify round, the draft is cheap enough that even a 43% acceptance rate at K=4 nets a large win. The same decomposition explains the primary failure: its Transformers-fp16-on-MPS draft costs 10 baseline speculative   
+
+> (K= 4)
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> wall-clock per generated token (ms)
+> draft
+> 12.7
+> verify
+> 23.7
+> 62.5 ms
+> 40.0 ms
+> 1.56 ×faster/token
+> speculative phases
+> draft
+> verify
+> sampling
+> other
+
+Figure 5: Per-token latency decomposition for the best configuration ( mixed_3b , K=4) against its baseline. Sampling (the correctness-critical CPU-float32 arithmetic) is 0.88 ms/token — 2.2% of wall time. The draft is cheap enough ( 12 .7 ms total per token) that a 43% acceptance rate still nets a large win. 
+
+18 .0 ms per draft step — more than the llama.cpp 1.5B target’s entire 13 .6 ms baseline step. A draft slower than its target cannot produce speedup at any K or acceptance rate; framework per-step overhead (Python dispatch, MPS kernel launch) dominates model size at this scale. Swapping the same 0.5B draft to llama.cpp q8_0 ( 8.4 ms/step, all_gguf ) fixes the draft but still loses — for the reason below. 
+
+6.5 When “parallel” verification is not parallel 
+
+Speculative decoding’s arithmetic rests on one systems assumption: scoring K+ 1 known positions costs roughly one decode step, not K+1. On the quantized Metal backend, that assumption is measurably false for the relevant batch sizes. Verify cost per round on the 7B q4_k_m target grows nearly linearly — 51 .0 ms for a 2-token pass, 74 .7 ms for 3, 164 .9 ms for 5, 218 .5 ms for 7 —then drops to a flat 141 –142 ms at batches of 9–13 , the signature of a kernel-path switch: below the threshold, llama.cpp’s Metal path executes quantized matrix– vector products per position, re-reading the weights each time; above it, a matrix–matrix kernel reads the weights once. By contrast, the Transformers-MPS backend extends its cache with 5 tokens in 42 .3 ms versus 35 .2 ms for one token — a 1.20 × ratio, i.e., genuinely batch-parallel. This single backend property cleanly partitions Figure 3b: the two configurations whose verifier 
+
+runs on torch-MPS GEMM sit above 1.0×; the three whose verifier is llama.cpp-Metal at batch sizes 
+
+2–7 sit below it, regardless of how favorable their draft economics are. stretch_7b is the sharpest illustration: a textbook-asymmetric pair ( 8.5 ms draft steps against a 43 ms/token target) that still 
+
+halves throughput at K=4 because each 5-token verify pass costs nearly four single-token steps. 11 7 Discussion and Limitations 
+
+Why the optimal K sits where it does. Three forces set the optimum. (i) The geometric decay of positional acceptance (Section 6.3) means no single constant α reproduces a round’s yield in the idealized (1 − αK+1 )/(1 − α): measured yield for mixed_3b at K=4 is 2917 /1084 ≈ 2.7 tokens per round, above the ≈ 1.7 that the pooled rate α = 0 .43 gives in that formula, because the pooled average understates the high early-position acceptance ( 66 .4% at position 1) that dominates a round while later positions ( 24 .2% at position 4) add little. (ii) Draft cost grows linearly in K (8.5 ms per step). (iii) Verify cost grows with batch size — mildly on MPS, brutally on quantized Metal. On the MPS-verifier configurations these forces balance at K ∈ [2 , 6] ; on the Metal-verifier configurations force (iii) is so strong that the optimum collapses to K = 1 (or, equivalently, to not speculating at all). A rough reading of Table 4: on the MPS-verifier configurations the optimum sits where pooled acceptance has fallen to the high-30% s ( 37 .8% at K=6), and throughput collapses once acceptance drops into the mid-20% s ( K ≥ 8). 
+
+Where the overhead lives. Across all five configurations, rejection-sampling arithmetic is under 1 ms per generated token — the mathematically delicate part of speculative decoding is computationally free. The engineering-relevant costs are the two systems terms: per-step framework overhead in the draft loop, and the batch-scaling behavior of the verifier. Both are properties of the 
+
+runtime , not the algorithm, and both flipped configurations between speedup and slowdown in our measurements. We suggest that implementations report a draft-step/target-step latency ratio and a verify-batch scaling curve alongside acceptance rates; without them, acceptance is uninterpretable as a predictor of speedup. 
+
+Limitations. (1) All results are single-stream, batch-size-one, on one consumer machine; server-side batching changes the economics entirely, and our wall-clock constants are specific to Apple-silicon Metal/MPS kernels as of the pinned software versions. (2) Acceptance rates are properties of the specific draft/target pair (same family, instruction-tuned, T = 0 .8); different families, temperatures, or domains will shift every curve. (3) The 8B-class pairing is provided as a Colab script but was not executed for this paper; no numbers are claimed for it. (4) The sampled-leg equivalence test has the statistical resolution of about 9,200 tokens per method — it bounds, rather than eliminates, distributional deviation; the exact result is established analytically (Section 3.2) and bit-exactly in the greedy limit. (5) The greedy real-model leg required an fp32-CPU backend because quantized-Metal logits are not batch-invariant; we report this as a measured backend property, but it means bit-exact greedy equivalence on the quantized backend itself is unattainable by any implementation whose baseline and verifier use different batch shapes. (6) Peak-memory figures are process-wide high-water marks and thus upper bounds per configuration. (7) Sweep points use 8
+
+recorded prompts; adjacent-K differences within one standard deviation (e.g., the K=2–6 plateau) should be read as ties. 
+
+# 8 Conclusion and Future Work 
+
+We built a speculative decoding engine from scratch, showed — statistically at three levels, and bit-exactly in the greedy limit — that it preserves the target model’s output distribution, and measured when it actually pays on consumer hardware. The headline is a 1.61 × single-stream speedup at 
+
+K=6 (plateau 1.52 –1.61 × across K=2–6) with a 0.5B-draft/ 3B-target pair; the anti-headline is that three plausible configurations decelerate, for two measured reasons that have nothing to do with the 12 algorithm: a draft whose per-step framework overhead exceeds a small target’s entire decode step, and a quantized backend that verifies serially below batch size 8. The guarantee is free; the speedup is a systems property. Future work follows directly. Continuous batching [17 ] interacts with speculation non-trivially — accepted-length variance de-synchronizes streams within a batch. Tree verification (Medusa-style [ 1 ]) amortizes one verify pass over multiple candidate continuations, raising expected yield at fixed verify cost — particularly attractive where verify passes are expensive. Adaptive K could exploit the strong per-round acceptance signal we observe (positional decay curves in Section 6.3) to shrink K
+
+when recent acceptance drops, harvesting the plateau without paying the tail. Self-speculation [18 ]removes the second model entirely, which matters on memory-constrained devices like the 18 GB machine used here. Finally, the Colab script ships with the repository precisely so that the 8B-class CUDA measurement — where batched verification is known to be parallel-efficient — can be added to this paper’s tables by anyone with a free T4. 
+
+# Originality Note 
+
+All prose in this paper is original writing; no sentence or distinctive phrasing is reproduced from the cited works. All equations are typeset fresh, and all figures are generated by this project’s own code from this project’s own measurements. Every empirical value is traceable to a specific artifact under 
+
+results/ in the accompanying repository, and the figure-generating scripts are included so each plotted value can be traced to source data. Text-to-text generative AI (Anthropic’s Claude, used via Claude Code) assisted in drafting prose and L ATEX; all bibliographic entries were verified against their source pages, and the authorship of and responsibility for the method, code, experiments, and claims rest with the author. 
+
+# Reproducibility 
+
+The engine, benchmark harness, equivalence gate, vendored prompt set, figure scripts, and all result JSONs are in the accompanying repository. The frozen interface file fixes the model API, cache choreography, and result schema; the benchmark and gate scripts regenerate every artifact cited here, and paper/figures/scripts/make_figures.py regenerates every figure from those artifacts. 
+
+# References 
+
+[1] Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. Medusa: Simple llm inference acceleration framework with multiple decoding heads. In Proceedings of the 41st International Conference on Machine Learning (ICML) , volume 235 of Proceedings of Machine Learning Research , pages 5209–5235. PMLR, 2024. URL 
+
+https://arxiv.org/abs/2401.10774 .[2] Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 , 2023. URL https://arxiv.org/abs/2302.01318 .[3] Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning of quantized llms. In Advances in Neural Information Processing Systems (NeurIPS) ,volume 36, pages 10088–10115, 2023. URL https://arxiv.org/abs/2305.14314 .13 [4] Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. In The Eleventh International Conference on Learning Representations (ICLR) , 2023. URL https://arxiv.org/abs/2210.17323 .[5] Georgi Gerganov and llama.cpp contributors. llama.cpp: Llm inference in c/c++. GitHub repository, 2023. URL https://github.com/ggml-org/llama.cpp . ggml tensor library and GGUF model format. [6] Aaron Grattafiori et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. URL https://arxiv.org/abs/2407.21783 .[7] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowledge in a neural network. 
+
+arXiv preprint arXiv:1503.02531 , 2015. URL https://arxiv.org/abs/1503.02531 .[8] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) . ACM, 2023. URL https://arxiv.org/abs/2309.06180 .[9] Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In Proceedings of the 40th International Conference on Machine Learning (ICML) , volume 202 of Proceedings of Machine Learning Research , pages 19274–19286. PMLR, 2023. URL https://arxiv.org/abs/2211.17192 .[10] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for llm compression and acceleration. In Proceedings of Machine Learning and Systems (MLSys) ,2024. URL https://arxiv.org/abs/2306.00978 .[11] Qwen Team. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 , 2024. URL https: //arxiv.org/abs/2412.15115 .[12] Qwen Team. Qwen2.5-0.5b-instruct. Hugging Face model card, 2024. URL https: //huggingface.co/Qwen/Qwen2.5-0.5B-Instruct .[13] Qwen Team. Qwen2.5-1.5b-instruct. Hugging Face model card, 2024. URL https: //huggingface.co/Qwen/Qwen2.5-1.5B-Instruct .[14] Qwen Team. Qwen2.5-3b-instruct. Hugging Face model card, 2024. URL https://huggingface. co/Qwen/Qwen2.5-3B-Instruct .[15] Qwen Team. Qwen2.5-7b-instruct. Hugging Face model card, 2024. URL https://huggingface. co/Qwen/Qwen2.5-7B-Instruct .[16] Mitchell Stern, Noam Shazeer, and Jakob Uszkoreit. Blockwise parallel decoding for deep autoregressive models. In Advances in Neural Information Processing Systems (NeurIPS) ,volume 31, pages 10107–10116, 2018. URL https://arxiv.org/abs/1811.03115 .[17] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. Orca: A distributed serving system for transformer-based generative models. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) , pages 521–538. USENIX Association, 2022. URL https://www.usenix.org/conference/osdi22/presentation/yu .14 [18] Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen, Gang Chen, and Sharad Mehrotra. Draft & verify: Lossless large language model acceleration via self-speculative decoding. arXiv preprint arXiv:2309.08168 , 2023. URL https://arxiv.org/abs/2309.08168 .[19] Peiyuan Zhang, Guangtao Zeng, Tianduo Wang, and Wei Lu. Tinyllama: An open-source small language model. arXiv preprint arXiv:2401.02385 , 2024. URL https://arxiv.org/abs/ 2401.02385 .15

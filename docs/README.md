@@ -6,37 +6,47 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-20
-- 运行时间：2026-07-20 21:35:20 UTC
+- 最新运行日期：2026-07-21
+- 运行时间：2026-07-21 21:39:20 UTC
 - 运行状态：成功
-- 本次总论文数：5
-- 精读区：3
-- 速读区：2
+- 本次总论文数：9
+- 精读区：4
+- 速读区：5
 
 ### 今日简报（AI）
-今日聚焦投机解码领域突破，精读两篇9分论文探索大模型推理加速新路径。  
-最值关注《Unlocking Parallelism》的树形草稿并行策略与《D-cut》的批处理自适应验证深度剪枝。  
-普通读者可留意后续低成本加速方案，例如MoE专家的稀疏调度思路。
-- 详情：[/202607/20/README](/202607/20/README)
+今日聚焦投机解码效率提升，两篇高分论文分别提出成本感知的专家模型解码与自适应验证深度剪枝方法。速读中视觉语言模型的token剪枝与精确缓存机制也值得关注。建议优先精读两篇投机解码论文，理解其核心优化思路，再扩展速读三篇中与自身研究相关的具体方法。
+- 详情：[/202607/21/README](/202607/21/README)
 
 ### 精读区论文标签
-1. [Unlocking Parallelism in Autoregressive Language Models via Speculative Decoding with Progressive Tree Drafting](/202607/20/2607.10661v1-unlocking-parallelism-in-autoregressive-language-models-via-speculative-decoding-with-progressive-tree-drafting)  
+1. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/21/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
    标签：评分：9.0/10、query:llm
-   evidence：提出针对大语言模型的投机解码方法，直接解决高效推理问题
-2. [D-cut: Adaptive Verification Depth Pruning for Batched Speculative Decoding](/202607/20/2607.14647v1-d-cut-adaptive-verification-depth-pruning-for-batched-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：批处理投机解码的自适应验证深度剪枝
-3. [Efficient Frame Selection for Long Videos at Test Time with Attention-Based MLLM Selectors](/202607/20/2607.15689v1-efficient-frame-selection-for-long-videos-at-test-time-with-attention-based-mllm-selectors)  
+   evidence：面向MoE大语言模型的成本感知投机解码
+2. [D-cut: Adaptive Verification Depth Pruning for Batched Speculative Decoding](/202607/21/2607.14647v1-d-cut-adaptive-verification-depth-pruning-for-batched-speculative-decoding)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：面向批量投机解码的自适应验证深度剪枝
+3. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/21/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
+   标签：评分：8.0/10、query:llm-sd
+   evidence：针对线性注意力模型的投机解码运行时，解决了状态模型中的验证挑战
+4. [Searching for Task-Specific Vision Paths: Evolutionary Block Pruning Across Vision-Language Models](/202607/21/2607.17052v1-searching-for-task-specific-vision-paths-evolutionary-block-pruning-across-vision-language-models)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：通过注意力机制进行帧选择以加速VLM推理
+   evidence：通过进化块剪枝跳过视觉块来加速VLM推理
 
 ### 速读区论文标签
-1. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/20/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
+1. [LookME: Lookup-Based Multimodal Embeddings for Layer Injection in Vision-Language Models](/202607/21/2607.16305v1-lookme-lookup-based-multimodal-embeddings-for-layer-injection-in-vision-language-models)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：通过查找式嵌入降低VLM推理延迟
+2. [CRISP: Pre-LLM Yet Text-Driven Visual Token Pruning for Efficient LVLM Inference](/202607/21/2607.16326v1-crisp-pre-llm-yet-text-driven-visual-token-pruning-for-efficient-lvlm-inference)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：文本驱动的视觉标记剪枝加速LVLM推理
+3. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/21/2607.16339v1-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：面向混合专家大模型的成本感知投机解码
-2. [Adaptive Multi-Step Lookahead Decoding for Diffusion Language Models](/202607/20/2607.15655v1-adaptive-multi-step-lookahead-decoding-for-diffusion-language-models)  
-   标签：评分：6.0/10、query:llm
-   evidence：面向扩散语言模型的自适应多步前瞻解码，提升准确率与效率权衡
+   evidence：通过缓存和混合精度加速扩散大语言模型推理
+4. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/21/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
+   标签：评分：7.0/10、query:llm
+   evidence：在消费级硬件上对LLM投机解码的经验研究，涵盖分布等价性和性能
+5. [Token-Wise Latent Streaming from Slow Reasoners to Fast Planners for Dynamic Vision Language Navigation](/202607/21/2607.16806v1-token-wise-latent-streaming-from-slow-reasoners-to-fast-planners-for-dynamic-vision-language-navigation)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：通过标记级潜流加速基于VLM的导航推理
 
 
 <div class="dpr-home-promo-card">
