@@ -6,41 +6,41 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-22
-- 运行时间：2026-07-22 21:25:57 UTC
+- 最新运行日期：2026-07-23
+- 运行时间：2026-07-23 21:39:15 UTC
 - 运行状态：成功
 - 本次总论文数：7
 - 精读区：4
 - 速读区：3
 
 ### 今日简报（AI）
-聚焦推测解码与扩散语言模型最新进展，精读两篇高分论文。最值得关注方向：MoE模型中代价感知的推测解码策略，以及扩散LLM的精确缓存与精度自适应推理方法。建议普通读者重点了解这两项技术如何提升推理效率并降低计算成本。
-- 详情：[/202607/22/README](/202607/22/README)
+今日日报聚焦推测解码性能分析与自适应优化。最值得看的两篇精读分别揭示推测解码在消费硬件上的实际开销，以及通过在线策略蒸馏实现自适应加速。建议关注推测解码的效率与硬件适配平衡，后续可跟踪扩散语言模型的多步解码与缓存优化。
+- 详情：[/202607/23/README](/202607/23/README)
 
 ### 精读区论文标签
-1. [Less Experts, Faster Decoding: Cost-Aware Speculative Decoding for Mixture-of-Experts](/202607/22/2607.12696v1-less-experts-faster-decoding-cost-aware-speculative-decoding-for-mixture-of-experts)  
+1. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/23/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
+   标签：评分：9.0/10、query:llm
+   evidence：投机解码在消费级硬件上的实证研究
+2. [AdaFlash: Adaptive Speculative Decoding via On-Policy Distilled Diffusion Drafters](/202607/23/2607.19223v1-adaflash-adaptive-speculative-decoding-via-on-policy-distilled-diffusion-drafters)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：面向LLM的自适应投机解码与扩散草稿模型
+3. [Look Less, Think Faster: Joint Token-Compute Adaptation for Multimodal LLMs](/202607/23/2607.20357v1-look-less-think-faster-joint-token-compute-adaptation-for-multimodal-llms)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：统一token-计算自适应加速多模态大模型推理
+4. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/23/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
    标签：评分：8.0/10、query:llm
-   evidence：面向MoE大语言模型的成本感知投机解码，减少专家散射
-2. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/22/2607.16339v1-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
-   标签：评分：8.0/10、query:llm
-   evidence：基于缓存的扩散大语言模型推理加速
-3. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/22/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
-   标签：评分：8.0/10、query:llm
-   evidence：用于线性注意力模型的投机解码
-4. [AdaFlash: Adaptive Speculative Decoding via On-Policy Distilled Diffusion Drafters](/202607/22/2607.19223v1-adaflash-adaptive-speculative-decoding-via-on-policy-distilled-diffusion-drafters)  
-   标签：评分：8.0/10、query:llm
-   evidence：基于扩散草稿模型的自适应投机解码加速LLM推理
+   evidence：面向线性注意力模型的投机解码验证策略
 
 ### 速读区论文标签
-1. [Adaptive Multi-Step Lookahead Decoding for Diffusion Language Models](/202607/22/2607.15655v1-adaptive-multi-step-lookahead-decoding-for-diffusion-language-models)  
+1. [Adaptive Multi-Step Lookahead Decoding for Diffusion Language Models](/202607/23/2607.15655v1-adaptive-multi-step-lookahead-decoding-for-diffusion-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：提出自适应前瞻解码用于高效扩散语言模型推理
-2. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/22/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
+   evidence：自适应多步前瞻解码提高文本生成效率
+2. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/23/2607.16339v1-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：在消费级硬件上对投机解码的实证研究
-3. [ST-Veto: Spatio-Temporal Token Veto for Diffusion MLLMs via Taylor Prediction and Visual Grounding](/202607/22/2607.17884v1-st-veto-spatio-temporal-token-veto-for-diffusion-mllms-via-taylor-prediction-and-visual-grounding)  
-   标签：评分：7.0/10、query:vlm-spec
-   evidence：通过时空token否决提高扩散多模态大模型的推理效率
+   evidence：扩散LLM的缓存与精度自适应推理加速推断
+3. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/23/2607.16339v2-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
+   标签：评分：7.0/10、query:llm
+   evidence：面向LLM高效推理的缓存技术
 
 
 <div class="dpr-home-promo-card">
