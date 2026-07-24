@@ -6,41 +6,41 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-23
-- 运行时间：2026-07-23 21:39:15 UTC
+- 最新运行日期：2026-07-24
+- 运行时间：2026-07-24 21:19:18 UTC
 - 运行状态：成功
 - 本次总论文数：7
-- 精读区：4
-- 速读区：3
+- 精读区：3
+- 速读区：4
 
 ### 今日简报（AI）
-今日日报聚焦推测解码性能分析与自适应优化。最值得看的两篇精读分别揭示推测解码在消费硬件上的实际开销，以及通过在线策略蒸馏实现自适应加速。建议关注推测解码的效率与硬件适配平衡，后续可跟踪扩散语言模型的多步解码与缓存优化。
-- 详情：[/202607/23/README](/202607/23/README)
+今日日报聚焦推测解码与缓存推理的实证分析及优化，共7篇论文，其中3篇精读。最值得关注的是对推测解码在消费级硬件上的经验性剖析（9.0分）和面向线性注意力模型的高效推测解码方案（8.0分）。建议进一步了解精确缓存与精度自适应推理技术（如LaCache），以平衡效率与准确性。
+- 详情：[/202607/24/README](/202607/24/README)
 
 ### 精读区论文标签
-1. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/23/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
-   标签：评分：9.0/10、query:llm
-   evidence：投机解码在消费级硬件上的实证研究
-2. [AdaFlash: Adaptive Speculative Decoding via On-Policy Distilled Diffusion Drafters](/202607/23/2607.19223v1-adaflash-adaptive-speculative-decoding-via-on-policy-distilled-diffusion-drafters)  
+1. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/24/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：面向LLM的自适应投机解码与扩散草稿模型
-3. [Look Less, Think Faster: Joint Token-Compute Adaptation for Multimodal LLMs](/202607/23/2607.20357v1-look-less-think-faster-joint-token-compute-adaptation-for-multimodal-llms)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：统一token-计算自适应加速多模态大模型推理
-4. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/23/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
+   evidence：在消费级硬件上对投机解码的实证研究，验证分布等价性
+2. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/24/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
    标签：评分：8.0/10、query:llm
-   evidence：面向线性注意力模型的投机解码验证策略
+   evidence：面向线性注意力大语言模型的投机解码
+3. [Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs](/202607/24/2607.21291v1-adaptive-depth-sparse-framework-similarity-driven-resource-allocation-for-pre-trained-llms)  
+   标签：评分：8.0/10、query:llm
+   evidence：提出无需完全重训练的自适应深度稀疏框架用于大语言模型推理加速
 
 ### 速读区论文标签
-1. [Adaptive Multi-Step Lookahead Decoding for Diffusion Language Models](/202607/23/2607.15655v1-adaptive-multi-step-lookahead-decoding-for-diffusion-language-models)  
+1. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/24/2607.16339v1-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：自适应多步前瞻解码提高文本生成效率
-2. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/23/2607.16339v1-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
+   evidence：扩散大语言模型的无损缓存与精度自适应推理，属于大模型高效推理技术
+2. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/24/2607.16339v2-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
    标签：评分：7.0/10、query:llm
-   evidence：扩散LLM的缓存与精度自适应推理加速推断
-3. [LaCache: Exact Caching and Precision-Adaptive Inference for Diffusion Large Language Models](/202607/23/2607.16339v2-lacache-exact-caching-and-precision-adaptive-inference-for-diffusion-large-language-models)  
+   evidence：通过无损缓存和混合精度实现扩散LLM的无训练加速
+3. [Beyond Independent Optimization: Compression, MoE Routing, and Quantization Interactions in Multimodal Edge Intelligence](/202607/24/2607.20981v1-beyond-independent-optimization-compression-moe-routing-and-quantization-interactions-in-multimodal-edge-intelligence)  
    标签：评分：7.0/10、query:llm
-   evidence：面向LLM高效推理的缓存技术
+   evidence：涵盖KV缓存优化和高效多模态推理
+4. [Adaptive Multi-Step Lookahead Decoding for Diffusion Language Models](/202607/24/2607.15655v1-adaptive-multi-step-lookahead-decoding-for-diffusion-language-models)  
+   标签：评分：6.0/10、query:llm
+   evidence：自适应多步前瞻解码用于高效扩散语言模型推理
 
 
 <div class="dpr-home-promo-card">
