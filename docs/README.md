@@ -6,40 +6,41 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-25
-- 运行时间：2026-07-25 21:14:02 UTC
+- 最新运行日期：2026-07-26
+- 运行时间：2026-07-26 21:00:50 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：5
+- 本次总论文数：7
+- 精读区：6
 - 速读区：1
 
 ### 今日简报（AI）
-今日6篇论文聚焦推测解码，精读2篇高分研究。  
-SpecLA专为线性注意力模型加速，而另文揭示消费级硬件上无损推测解码的代价。  
-普通读者可重点关注推测解码在不同模型架构中的适配策略。
-- 详情：[/202607/25/README](/202607/25/README)
+今日推荐7篇论文，精读2篇高分研究。最值得关注的方向是高效KV缓存复用（C$^2$KV）与自适应投机解码（AdaFlash），均获9.0高分。建议优先阅读这两篇论文，深入了解LLM推理加速的前沿压缩与解码优化技术。
+- 详情：[/202607/26/README](/202607/26/README)
 
 ### 精读区论文标签
-1. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/25/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
+1. [C$^2$KV: Compressed and Composable KV Cache Reuse for Efficient LLM Inference](/202607/26/2607.17715v1-c2kv-compressed-and-composable-kv-cache-reuse-for-efficient-llm-inference)  
+   标签：评分：9.0/10、query:llm
+   evidence：KV缓存压缩与重用用于LLM高效推理
+2. [AdaFlash: Adaptive Speculative Decoding via On-Policy Distilled Diffusion Drafters](/202607/26/2607.19223v1-adaflash-adaptive-speculative-decoding-via-on-policy-distilled-diffusion-drafters)  
+   标签：评分：9.0/10、query:llm
+   evidence：自适应投机解码，利用扩散草稿模型加速LLM推理
+3. [Windowed-MTP: Removing the Full-Context Draft-KV Tax at Million-Token Context](/202607/26/2607.21535v1-windowed-mtp-removing-the-full-context-draft-kv-tax-at-million-token-context)  
+   标签：评分：9.0/10、query:llm
+   evidence：通过窗口化草稿提高投机解码效率，与LLM推理加速相关
+4. [SpecLA: Efficient Speculative Decoding for Linear-Attention Models](/202607/26/2607.16673v1-specla-efficient-speculative-decoding-for-linear-attention-models)  
    标签：评分：8.0/10、query:llm
-   evidence：面向线性注意力模型的投机解码，加速大语言模型推理
-2. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/25/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
+   evidence：针对线性注意力模型的投机解码方法，包含拓扑感知验证核
+5. [Lossless but Not Free: An Empirical Anatomy of Speculative Decoding on Consumer Hardware](/202607/26/2607.17283v1-lossless-but-not-free-an-empirical-anatomy-of-speculative-decoding-on-consumer-hardware)  
    标签：评分：8.0/10、query:llm
-   evidence：投机解码在消费硬件上的实证研究，与LLM推理加速相关
-3. [AdaFlash: Adaptive Speculative Decoding via On-Policy Distilled Diffusion Drafters](/202607/25/2607.19223v1-adaflash-adaptive-speculative-decoding-via-on-policy-distilled-diffusion-drafters)  
+   evidence：提供投机解码在消费硬件上的实证研究和实现，与LLM推理加速相关
+6. [Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs](/202607/26/2607.21291v1-adaptive-depth-sparse-framework-similarity-driven-resource-allocation-for-pre-trained-llms)  
    标签：评分：8.0/10、query:llm
-   evidence：基于扩散草稿模型的自适应投机解码，加速大语言模型推理
-4. [Beyond Independent Optimization: Compression, MoE Routing, and Quantization Interactions in Multimodal Edge Intelligence](/202607/25/2607.20981v1-beyond-independent-optimization-compression-moe-routing-and-quantization-interactions-in-multimodal-edge-intelligence)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：综述涵盖多模态高效推理技术，如KV缓存、压缩、量化，与VLM加速相关
-5. [Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs](/202607/25/2607.21291v1-adaptive-depth-sparse-framework-similarity-driven-resource-allocation-for-pre-trained-llms)  
-   标签：评分：8.0/10、query:llm
-   evidence：用于LLM推理加速的深度稀疏框架
+   evidence：深度稀疏化用于LLM推理加速
 
 ### 速读区论文标签
-1. [Adaptive Multi-Step Lookahead Decoding for Diffusion Language Models](/202607/25/2607.15655v1-adaptive-multi-step-lookahead-decoding-for-diffusion-language-models)  
-   标签：评分：7.0/10、query:llm
-   evidence：自适应多步前向解码提升扩散语言模型生成效率
+1. [Beyond Independent Optimization: Compression, MoE Routing, and Quantization Interactions in Multimodal Edge Intelligence](/202607/26/2607.20981v1-beyond-independent-optimization-compression-moe-routing-and-quantization-interactions-in-multimodal-edge-intelligence)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：综述高效视觉语言模型，涵盖KV缓存优化、视觉令牌压缩等加速技术
 
 
 <div class="dpr-home-promo-card">
