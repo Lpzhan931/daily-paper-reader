@@ -6,64 +6,62 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-05
-- 运行时间：2026-08-05 20:30:09 UTC
+- 最新运行日期：2026-08-07
+- 运行时间：2026-08-07 01:53:11 UTC
 - 运行状态：成功
 - 本次总论文数：14
-- 精读区：10
-- 速读区：4
+- 精读区：8
+- 速读区：6
 
 ### 今日简报（AI）
-今日14篇论文聚焦推理加速，投机解码成最大热点。  
-精读双雄《Approximate Speculative Decoding》（10分）与《AngelSpec》（9分）均瞄准投机解码的实用化优化，值得优先关注。  
-若想快速落地方案，可结合速读中的动态调度与预取技术，从系统层面协同提速。
-- 详情：[/202608/05/README](/202608/05/README)
+今日14篇论文聚焦投机解码优化，精读两篇高分研究分别揭示损失性验证的机制与失败模式、提出MLA草稿模型的功能重建方法。最值得关注的是投机解码的鲁棒性与效率权衡，以及针对混合注意力模型和云边网络的树形投机加速方案。建议普通读者优先精读这两篇9分论文，把握投机解码当前的核心挑战与解决思路。
+- 详情：[/202608/07/README](/202608/07/README)
 
 ### 精读区论文标签
-1. [Approximate Speculative Decoding](/202608/05/2608.03447v1-approximate-speculative-decoding)  
-   标签：评分：10.0/10、query:llm-sd
-   evidence：通过预算化最长前缀选择放宽投机解码中的贪心验证机制
-2. [AngelSpec: Towards Real-World High Performance Inference with Speculative Decoding](/202608/05/2607.25852v1-angelspec-towards-real-world-high-performance-inference-with-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：统一MTP与块并行草稿的投机解码框架，加速大模型推理
-3. [AngelSpec: Towards Real-World High Performance Inference with Speculative Decoding](/202608/05/2607.25852v2-angelspec-towards-real-world-high-performance-inference-with-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向大语言模型推理加速的投机解码，统一MTP与块并行草稿训练
-4. [Revisiting Lossy Verification in Speculative Decoding: Mechanisms, Trade-offs, and Failure Modes](/202608/05/2607.26627v1-revisiting-lossy-verification-in-speculative-decoding-mechanisms-trade-offs-and-failure-modes)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：投机解码中的有损验证；宽松验证机制、权衡与失败模式
-5. [Beyond KV Reconstruction: Functional Reconstruction for MLA Draft Models in Speculative Decoding](/202608/05/2607.27269v1-beyond-kv-reconstruction-functional-reconstruction-for-mla-draft-models-in-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向LLM的投机解码与KV缓存优化，通过功能重建提升草稿与目标的一致性
-6. [A Sparse Glimpse of the Whole: Train-Free Self-Speculative Decoding](/202608/05/2607.27735v1-a-sparse-glimpse-of-the-whole-train-free-self-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：基于稀疏KV缓存草稿的无训练自投机解码框架，加速LLM推理
-7. [CURE: Local Uncertainty Repair for Block-Parallel Speculative Decoding](/202608/05/2608.00531v1-cure-local-uncertainty-repair-for-block-parallel-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：利用局部不确定性修复提升块并行投机解码的验证接受率
-8. [Bole: Efficient Tree Speculation for Hybrid-Attention Language Models](/202608/05/2608.01651v1-bole-efficient-tree-speculation-for-hybrid-attention-language-models)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向混合注意力LLM的高效树投机，降低验证延迟与瞬态内存
-9. [From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding](/202608/05/2608.02123v1-from-chains-to-trees-parent-conditioned-drafting-for-semi-autoregressive-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向LLM投机解码加速；提出PCTree进行树形半自回归草稿生成
-10. [Adaptive Two-Stage Visual Token Pruning for Efficient Inference in Video-Language Models](/202608/05/2608.03112v1-adaptive-two-stage-visual-token-pruning-for-efficient-inference-in-video-language-models)  
+1. [Revisiting Lossy Verification in Speculative Decoding: Mechanisms, Trade-offs, and Failure Modes](/202608/07/2607.26627v1-revisiting-lossy-verification-in-speculative-decoding-mechanisms-trade-offs-and-failure-modes)  
    标签：评分：9.0/10、query:vlm-spec
-   evidence：针对视频语言模型的自适应两阶段视觉Token剪枝，降低推理延迟
+   evidence：对投机解码中有损验证机制的原理性分析
+2. [Beyond KV Reconstruction: Functional Reconstruction for MLA Draft Models in Speculative Decoding](/202608/07/2607.27269v1-beyond-kv-reconstruction-functional-reconstruction-for-mla-draft-models-in-speculative-decoding)  
+   标签：评分：9.0/10、query:llm
+   evidence：围绕大语言模型高效推理与投机解码，涉及KV缓存和草稿-目标一致性
+3. [A Sparse Glimpse of the Whole: Train-Free Self-Speculative Decoding](/202608/07/2607.27735v1-a-sparse-glimpse-of-the-whole-train-free-self-speculative-decoding)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：面向长上下文LLM推理的自投机解码与动态稀疏KV缓存
+4. [CURE: Local Uncertainty Repair for Block-Parallel Speculative Decoding](/202608/07/2608.00531v1-cure-local-uncertainty-repair-for-block-parallel-speculative-decoding)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：预算感知动态修复树修复高不确定性令牌，降低块并行投机解码的验证拒绝率
+5. [From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding](/202608/07/2608.02123v1-from-chains-to-trees-parent-conditioned-drafting-for-semi-autoregressive-speculative-decoding)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：父条件草稿树提升半自回归投机解码的验证存活率
+6. [RUTA: Principled Visual Token Allocation via Rate-Utility Optimization](/202608/07/2608.04132v1-ruta-principled-visual-token-allocation-via-rate-utility-optimization)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：通过速率-效用优化在LLM前缩减视觉token以加速VLM
+7. [Deltoris: Enabling Real-time VLA Inference in Embodied AI via Bit-level Sparsity and Speculative Inference](/202608/07/2608.04428v1-deltoris-enabling-real-time-vla-inference-in-embodied-ai-via-bit-level-sparsity-and-speculative-inference)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：通过位级稀疏性与投机推理实现实时视觉语言动作模型推理
+8. [SpecRoll: Fast-Slow Verifier-Feedback Adaptation for Speculative Reinforcement Learning Rollouts](/202608/07/2608.04962v1-specroll-fast-slow-verifier-feedback-adaptation-for-speculative-reinforcement-learning-rollouts)  
+   标签：评分：9.0/10、query:llm
+   evidence：面向更快大模型推理的投机解码
 
 ### 速读区论文标签
-1. [Beyond Prefill-Decode Disaggregation: Dissecting LLM Inference for Heterogeneous Platforms via Dynamic Operator Scheduling](/202608/05/2607.25498v1-beyond-prefill-decode-disaggregation-dissecting-llm-inference-for-heterogeneous-platforms-via-dynamic-operator-scheduling)  
+1. [Bole: Efficient Tree Speculation for Hybrid-Attention Language Models](/202608/07/2608.01651v1-bole-efficient-tree-speculation-for-hybrid-attention-language-models)  
    标签：评分：8.0/10、query:llm
-   evidence：面向异构平台的LLM推理动态算子调度加速
-2. [DualDecoder: Accelerate Long Context LLM Inference by Predictive Prefetch](/202608/05/2607.26475v1-dualdecoder-accelerate-long-context-llm-inference-by-predictive-prefetch)  
-   标签：评分：8.0/10、query:llm
-   evidence：通过预测性预取和KV缓存卸载加速长上下文LLM推理
-3. [SlimVLM: Sensitivity-aware Dynamic Structured Pruning with Adaptive Visual Token Selection for Efficient Vision-Language Models](/202608/05/2608.03580v1-slimvlm-sensitivity-aware-dynamic-structured-pruning-with-adaptive-visual-token-selection-for-efficient-vision-language-models)  
+   evidence：面向混合注意力大语言模型的树状投机解码
+2. [DIVE: Dynamic Iterative Visual Evidence Construction for Efficient Vision-Language Models](/202608/07/2608.04496v1-dive-dynamic-iterative-visual-evidence-construction-for-efficient-vision-language-models)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：面向VLM的结构化剪枝与自适应视觉Token选择，降低计算开销
-4. [DeVIT: Low-Power Vision Transformer Acceleration Using Delta Computation](/202608/05/2608.01343v1-devit-low-power-vision-transformer-acceleration-using-delta-computation)  
+   evidence：动态迭代视觉Token剪枝用于高效VLM推理
+3. [AsymSpec: Efficient Cloud-Edge Speculative Decoding over Asymmetric Networks](/202608/07/2608.04974v1-asymspec-efficient-cloud-edge-speculative-decoding-over-asymmetric-networks)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向非对称网络的异步验证投机解码
+4. [Decoupling semantics from vision: A framework for faithful visual-text compression evaluation](/202608/07/2608.01848v1-decoupling-semantics-from-vision-a-framework-for-faithful-visual-text-compression-evaluation)  
    标签：评分：6.0/10、query:vlm-spec
-   evidence：通过增量计算加速视觉Transformer，可望降低VLM视觉编码器成本
+   evidence：面向长上下文多模态大模型的视觉-文本压缩评估
+5. [ParVL: Parallel Scaling and Expandable Compute Allocation for Multimodal LLMs](/202608/07/2608.04010v1-parvl-parallel-scaling-and-expandable-compute-allocation-for-multimodal-llms)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：多模态LLM并行扩展与计算分配，降低推理延迟和内存开销
+6. [Persistent Object Narratives for Token-Efficient Video Language Models](/202608/07/2608.04866v1-persistent-object-narratives-for-token-efficient-video-language-models)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：面向视频语言模型的标记高效接口，降低视觉标记密度
 
 
 <div class="dpr-home-promo-card">

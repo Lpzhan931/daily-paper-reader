@@ -1,0 +1,1972 @@
+Title: SpecRoll: Fast-Slow Verifier-Feedback Adaptation for Speculative Reinforcement Learning Rollouts
+
+URL Source: https://arxiv.org/pdf/2608.04962v1
+
+Published Time: Thu, 06 Aug 2026 01:09:22 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+# SpecRoll: Fast-Slow Verifier-Feedback Adaptation for Speculative Reinforcement Learning Rollouts 
+
+Nhat Minh Pham 1,2,* Duy Tung Doan 2,* Thi Duyen Ngo 1
+
+Vinh Van Nguyen 1 Khac-Hoai Nam Bui 21VNU University of Engineering and Technology, Vietnam National University, Hanoi, Vietnam 
+
+> 2
+
+Viettel AI, Viettel Group, Hanoi, Vietnam 
+
+{minhpn.266, duytunghanam}@gmail.com 
+
+> *
+
+Equal contribution 
+
+Abstract 
+
+Reinforcement learning (RL) post-training im-proves the reasoning capabilities of large lan-guage models, but autoregressive rollout gen-eration remains a major efficiency bottleneck. Speculative decoding can accelerate genera-tion, yet applying it during RL is difficult be-cause the target policy continually evolves: static proposers become stale, while frequent drafter updates add substantial overhead. We introduce SpecRoll , a speculative rollout en-gine that preserves the target model’s sampling distribution while adapting at two timescales. Lightweight future-token heads generate par-allel proposals, while our proposed Reflex 
+
+module uses delayed verifier feedback to per-form bounded, trajectory-local hidden-state corrections without backpropagation. A com-plementary slow path updates the head pa-rameters only when sustained degradation is detected. SpecRoll combines these mecha-nisms with concurrency-aware sparse-tree ver-ification and exact target verification, leaving the target rollout distribution and GRPO ob-jective unchanged. Across five models from 1.5B to 14B and three mathematical reason-ing datasets, SpecRoll achieves 1.26 ×–2.15 ×
+
+generation speedup and 1.21 ×–2.04 × end-to-end speedup over vanilla GRPO. It also out-performs FastGRPO in both generation and end-to-end time across all 15 matched set-tings, with an average pairwise end-to-end gain of 1.18 ×. Controlled ablations show that the fast and slow adaptation paths pro-vide complementary benefits. Our source code is available at https://anonymous.4open. science/r/SpecRoll-26062006 .
+
+1 Introduction 
+
+Reinforcement learning with verifiable rewards has become a standard approach for improving mathematical reasoning in large language models. Group Relative Policy Optimization (GRPO) is particularly attractive because it forms relative ad-Train Faster. Spend Less. 
+
+> (Llama-3.1-8B on DAPO-Math-17K)
+> Wall-clock training time
+> SpecRoll (Ours)
+> FastGRPO
+> GRPO
+> 45.3 h
+> $311.7
+> 47.4 h
+> $326.1
+> 92.5 h
+> $636.6
+> vs FastGRPO
+> = 2.1 GPU-hours
+> vs GRPO
+> save $325
+> = 47.2 GPU-hours
+> save $14
+
+Figure 1: SpecRoll delivers plug-and-play rollout ac-celeration for RL. On a single NVIDIA B200 at $6.88 per GPU-hour, SpecRoll saves approximately $14 and $325 per run relative to FastGRPO and GRPO, respec-tively. 
+
+vantages from groups of sampled responses with-out requiring a learned value model (Shao et al., 2024; DeepSeek-AI, 2025). However, each up-date still requires multiple long autoregressive re-sponses, making rollout generation a major wall-clock bottleneck. Pipeline systems such as PipelineRL improve utilization by overlapping generation and opti-mization through asynchronous execution and in-flight weight updates (Piché et al., 2025). Such methods reduce inter-stage idle time but not the token-by-token cost of generating each response. Decoder acceleration is therefore complementary: it reduces the rollout work itself rather than hiding it across pipeline stages. Speculative decoding attacks this cost by proposing multiple future tokens and verifying them in parallel. Exact target correction pre-serves the target sampling distribution, but apply-arXiv:2608.04962v1 [cs.LG] 5 Aug 2026 ing speculation to RL presents two challenges. First, rollout concurrency decreases as responses finish, making a fixed verification tree inefficient across the full rollout. Second, policy updates continually shift the target distribution, causing a static proposer to become stale. FastGRPO addresses these challenges through concurrency-aware verification and online training of a stan-dalone EAGLE-style drafter (Zhang et al., 2025b). While effective, this approach requires backward computation, optimizer state, and synchronization for an additional autoregressive model, and does not distinguish transient local mismatch from per-sistent policy drift. We explore a different design based on the ob-servation that delayed verifier errors can remain predictive over nearby positions within a trajec-tory. This motivates Reflex , a gradient-free fast path that converts mature verifier feedback into bounded, trajectory-local hidden-state corrections. Reflex activates only when a conservative align-ment gate indicates that past errors predict future ones, with candidate-boundary safeguards sup-pressing harmful interventions. Because local memory cannot absorb recurring drift, SpecRoll adapts at two timescales: Reflex corrects transient mismatch without backpropaga-tion, while a slow path updates persistent proposal parameters only after sustained degradation is de-tected. SpecRoll implements this design using lightweight future-token heads that predict multi-ple horizons from the target hidden state, avoiding a separate autoregressive drafter and KV cache. Their proposals form a concurrency-aware sparse tree whose budget increases as active concurrency decreases. Exact target verification remains au-thoritative, preserving the rollout distribution and GRPO objective. Across five models from 1.5B to 14B and three mathematical reasoning datasets, SpecRoll achieves 1.26 ×–2.15 × generation speedup and 1.21 ×–2.04 × end-to-end speedup over vanilla GRPO. It outperforms FastGRPO in both gener-ation and end-to-end time across all 15 matched model–dataset settings, with an average pairwise end-to-end gain of 1.18 ×. Controlled ablations show that the fast and slow adaptation paths are individually beneficial and strongest when com-bined. Our main contributions are: • We introduce Reflex and a two-timescale adaptation mechanism that corrects transient proposal mismatch without backpropagation and reserves persistent updates for sustained drift. • We develop SpecRoll , a lightweight ex-act speculative rollout framework combining future-token heads, Reflex, selective persis-tent adaptation, and concurrency-aware veri-fication. Experiments across five models and three datasets demonstrate consistent end-to-end gains and validate the complementary roles of the two adaptation timescales. 
+
+2 Related Work 
+
+Efficient RL post-training systems. 
+
+DeepSpeed-Chat and OpenRLHF improve RL post-training through integrated training– inference optimizations, scheduling, and resource utilization (Yao et al., 2023; Hu et al., 2024). ReaL dynamically reallocates parameters and parallelization strategies, HybridFlow supports flexible orchestration and efficient resharding, and PipelineRL overlaps rollout generation with optimization (Mei et al., 2024; Sheng et al., 2025; Piché et al., 2025). These systems mainly reduce communication, placement, resharding, and inter-stage idle costs. SpecRoll instead reduces sequential target-model decoding within rollout generation, making decoder-level acceleration complementary to system-level optimization. 
+
+Speculative decoding and online adaptation. 
+
+Classical speculative decoding combines alightweight autoregressive drafter with exact tar-get correction (Leviathan et al., 2023; Chen et al., 2023). Medusa introduces parallel future-token heads, while EAGLE and HASS improve feature prediction, draft-tree construction, and target alignment (Cai et al., 2024; Li et al., 2024b,a, 2025; Zhang et al., 2025a). Online Speculative Decoding, OnlineSpec, and Test-Time Specula-tion reuse verifier feedback to adapt proposers under changing requests or targets (Liu et al., 2024; Qian et al., 2026; Kumar et al., 2026), primarily through persistent parameter optimiza-tion. SpecRoll instead uses Reflex for immediate, trajectory-local hidden-state correction without backpropagation, reserving parameter updates for sustained degradation. Figure 2: Overview of SpecRoll across one GRPO iteration. Future-token heads construct proposals from the current target hidden state, and Reflex optionally applies trajectory-local corrections before sparse-tree verification. Mature verifier feedback updates the fast memory and reliability records, while persistent head parameters are updated only after sustained drift is detected. Reward computation and the GRPO policy update remain unchanged. 
+
+Speculative decoding for RL rollouts. Fast-GRPO combines concurrency-aware verification with continuous online training of a standalone EAGLE-style drafter (Zhang et al., 2025b). RL-HFSpec couples workload-aware drafting with sample reallocation, while other work integrates speculation into synchronous and asynchronous RL pipelines (Wang et al., 2025; Iso et al., 2026). Distribution-Aware Speculative Decoding builds a nonparametric suffix-tree drafter from previous rollouts, whereas EfficientRollout derives a quan-tized self-drafter from the target (Shao et al., 2026; Kim et al., 2026). SpecRoll focuses on lightweight future-token heads and separates adaptation across two timescales: gated, gradient-free memory han-dles transient mismatch, while recurring drift is selectively consolidated into persistent parame-ters. Exact target verification remains authorita-tive, preserving the rollout distribution and GRPO objective. 
+
+3 Method 
+
+3.1 Problem Formulation 
+
+At optimization stage s, GRPO samples response groups from the current policy πθs and updates its parameters using within-group relative advantages (Shao et al., 2024). We consider an exact specula-tive proposal engine E within this sampling stage. Let At denote the accepted progress at verification round t. An ideal engine should provide substan-tial accepted progress at low computational cost while preserving the target rollout distribution: 
+
+max 
+
+> E
+
+E[At]Cost( E) subject to X ∼ πθs .
+
+(1) Thus, useful speculation must jointly maintain low proposal overhead, sufficient acceptance, and un-biased target sampling. Finding an optimal proposal engine online is generally intractable and could itself dominate the rollout critical path. Instead, SpecRoll starts from a lightweight proposal family and asks: how can the errors of an inexpensive proposer be corrected with minimal delay, while reserving persistent pa-rameter updates for mismatch that genuinely sur-vives across trajectories? This question is espe-cially important in GRPO, where successive up-dates continually move πθs and make proposal ac-curacy inherently non-stationary. Figure 2 summarizes the two-timescale adapta-tion design within the overall GRPO training loop. 
+
+SpecRoll instantiates the proposal engine with lightweight MEDUSA-style future-token heads that produce a sparse draft tree. Concurrency-aware construction adapts this tree within each verification round; gradient-free Reflex corrects transient errors within a trajectory; and a slow path consolidates persistent mismatch across trajecto-ries. Exact target verification remains authoritative throughout, so these mechanisms improve rollout efficiency without changing the committed-token distribution, rewards, or GRPO objective. 
+
+3.2 Concurrency-Aware Exact Rollout 
+
+At prefix x≤t, the target backbone produces 
+
+ht = fθs (x≤t),pt = softmax( W h t), xt+1 ∼ pt. (2) where xt+1 is an exact target-sampled anchor. From the same hidden state, H lightweight hori-zon heads predict subsequent positions in parallel: 
+
+zt,h = gϕh (ht) + ht,qt,h = softmax( W z t,h ), h = 1 , . . . , H. (3) where head h predicts xt+h+1 and reuses the tar-get vocabulary projection W . Their candidates form a prefix-closed sparse tree Tt rooted at the an-chor, avoiding a second autoregressive backbone and drafter KV cache. Low proposal cost alone does not guarantee ef-ficient rollout. Under the high and varying con-currency of GRPO, a fixed verification tree may add unnecessary work when many responses are active and underuse the hardware as responses fin-ish (Zhang et al., 2025b). Let Bt be the num-ber of unfinished responses and Chw the profiled verification capacity of the model–hardware pair. SpecRoll assigns each response the node budget 
+
+Nt = clip 
+
+ Chw 
+
+Bt
+
+
+
+, N min , N max 
+
+
+
+. (4) If nt,h nodes are allocated to horizon h, the result-ing tree satisfies 
+
+|T t| = 1 + 
+
+> H
+
+X
+
+> h=1
+
+nt,h ≤ Nt, (5) b Coverage error                                                   
+
+> Target pProposal q
+> 0.45
+> 0.60
+> 0.35
+> 0.15 0.15
+> 0.05 0.05
+> t1t2t3t4
+> ✓×
+> C= { }()
+> normalized mass within C
+> 0.20
+> ×✓
+> ddist
+> dcov  (0.00, 0.20) b
+> pC
+> qC
+> t10.56 t20.44
+> t10.75 t30.25
+> t10.75 t30.25
+> aDistribution error
+> Target pProposal q
+> 0.45
+> 0.60
+> 0.35
+> 0.20 0.15 0.15
+> 0.05 0.05
+> t1t2t3t4
+> ✓✓××
+> C= { }()
+> normalized mass within C
+> ddist
+> dcov
+> a
+> (0.19, 0.00)
+> pCt10.56 t20.44
+> qCt10.75 t20.25
+
+Figure 3: Two proposal errors under a fixed candidate budget. Top: The correct candidates are selected, but the proposal mass is misallocated, producing distribu-tion error. Bottom: A target-important token is omit-ted, producing coverage error. 
+
+where the anchor is counted once. The ra-tio Chw /B t captures the batch-wide envelope 
+
+Bt|T t| ≤ Chw within the profiled operating range. The tree determines only which target con-ditionals are evaluated together. At every vis-ited node, exact rejection sampling and target-residual fallback remain authoritative. Conse-quently, concurrency-aware construction changes verification cost and accepted progress, but not the committed-token distribution. 
+
+3.3 Verifier-Guided Proposal Error Analysis 
+
+When a horizon-h proposal matures, exact verifi-cation exposes the target distribution p alongside the retained proposal distribution q. We use this feedback to analyze proposal quality in terms of two complementary sources of acceptance loss: distribution error and coverage error. 
+
+Conservative acceptance surrogate. Consider a matured proposal node with candidate set C ⊆V, where |C| = K. The maximum target mass attainable under the same candidate budget is achieved by 
+
+C⋆K ∈ arg max 
+
+> A⊆V |A|≤ K
+
+p(A) = Top K (p). (6) For p(C), q (C) > 0, define the conditional target and proposal distributions on C as 
+
+pC (v) = p(v)
+
+p(C) , qC (v) = q(v)
+
+q(C) , v ∈ C. 
+
+(7) Their overlap coefficient is 
+
+ΩC = X
+
+> v∈C
+
+min {pC (v), q C (v)} = 1 −TV( pC , q C ),
+
+(8) where 
+
+TV( pC , q C ) = 12
+
+X
+
+> v∈C
+
+|pC (v) − qC (v)| . (9) Because the realized multi-candidate acceptance probability is difficult to decompose directly, we use the following local surrogate. As shown in Ap-pendix B.4, if Aver  
+
+> C
+
+denotes the realized node-wise verifier acceptance probability, then 
+
+eAC := p(C)Ω C
+
+= p(C) [1 − TV( pC , q C )] 
+
+≤ Aver  
+
+> C
+
+≤ p(C).
+
+(10) Thus, eAC is a conservative local acceptance surro-gate that captures both the target mass covered by 
+
+C and the proposal–target agreement within that support. 
+
+Distribution–coverage decomposition. Under this surrogate, the gap from the budget-matched target ceiling decomposes exactly as 
+
+p(C⋆K ) − eAC = p(C) TV( pC , q C )
+
+| {z }
+
+> ddist
+
++ p(C⋆K ) − p(C)
+
+| {z }
+
+> dcov
+
+. (11) Here, ddist measures probability misallocation among the retained candidates, whereas dcov mea-sures target mass lost by omitting better candi-dates under the same budget. Figure 3 illustrates these complementary failure modes: the top panel isolates misallocation within the correct candidate set, while the bottom panel isolates missing target-important tokens despite correct allocation within the retained set. Motivated by this analysis, the next subsec-tion converts these signals into the correspond-ing hidden-space corrections rdist and rcov , which form the core design of Reflex. 
+
+3.4 Reflex: Immediate Trajectory-Local Correction 
+
+Reflex converts the two proposal errors into tem-porary hidden-space feedback that is reused only at later prefixes of the same trajectory. The proposal-head parameters remain unchanged. 
+
+Verifier feedback direction. Consider ahorizon-h proposal created at position τ of trajectory i. For feedback computation, we use the common sparse support 
+
+S = C ∪ TopK k(q) ∪ TopK k(p) ∪ { y⋆}, (12) where k is the support budget and y⋆ is the realized target token. Let pS and qS be the target and pro-posal distributions renormalized on S, and let WS
+
+contain the corresponding output-projection rows. Distribution feedback is 
+
+rdist  
+
+> i,τ,h
+
+= W ⊤ 
+
+> S
+
+(pS − qS ), (13) which moves the retained-token logits toward the target. For coverage, let O = C⋆K \ C contain the omitted target-important tokens and let b⋆ be the weakest retained candidate. We use 
+
+b⋆ = arg min  
+
+> b∈C
+
+q(b),rcov  
+
+> i,τ,h
+
+= X
+
+> y∈O
+
+pS (y) Wy − Wb⋆
+
+, (14) which promotes omitted tokens relative to the top-
+
+K selection boundary. We RMS-normalize each direction before com-bining them: 
+
+r xi,τ,h = rxi,τ,h 
+
+RMS( rxi,τ,h ) + ϵ , x ∈ { dist , cov },
+
+(15) where ϵ > 0 is a numerical stabilizer. The unified feedback is 
+
+gi,τ,h = ddist r dist  
+
+> i,τ,h
+
++ dcov r cov 
+
+> i,τ,h
+
+,ei,τ,h =  ddist + dcov 
+
+ gi,τ,h 
+
+RMS( gi,τ,h ) + ϵ . (16) Thus, ei,τ,h combines both correction directions 
+
+ddist + dcov .Trajectory-local recurrent memory. When a proposal record matures, Reflex updates its trajectory–horizon memory: 
+
+mi,h ← ρhmi,h + (1 − ρh)ei,τ,h , 0 ≤ ρh < 1,
+
+(17) where ρh controls decay. Consistent errors re-inforce one another, while inconsistent directions cancel; the memory is reset when trajectory i ends. 
+
+Reliability from delayed alignment. Because the current verifier error is delayed, Reflex esti-mates whether the memory remains useful from earlier matured records. At proposal time, it stores a normalized memory sketch sj . Once record 
+
+j matures, it computes the realized alignment 
+
+aj = cos( sj , ξ j ) against the normalized verifier-feedback sketch ξj , where aj > 0 means that the memory predicted the subsequent error direction. For each trajectory–horizon pair (i, h ), let ni,h ,
+
+¯ai,h , and sa,i,h be the count, mean, and sample standard deviation of matured alignments. With sufficient observations, the conservative reliability score is 
+
+dRel i,h = ¯ ai,h − zδ
+
+sa,i,h 
+
+√ni,h 
+
+, (18) where zδ > 0 penalizes noisy evidence. 
+
+Gated hidden-state correction. At a later pre-fix position t, let zi,t,h be the uncorrected state produced by horizon head h. Reflex applies the normalized memory only when its reliability lower bound is positive: 
+
+ui,h = mi,h 
+
+RMS( mi,h ) + ϵ ,
+
+∆zi,t,h = 1
+
+ndRel i,h > 0
+
+o
+
+αi,t,h RMS( zi,t,h )ui,h ,
+
+ezi,t,h = zi,t,h + ∆ zi,t,h .
+
+(19) Here αi,t,h is bounded, and relative-RMS scaling keeps the correction proportional to the current state magnitude. Reflex abstains when the memory is negligible, insufficient alignment observations have matured, or the reliability score is non-positive. It uses only detached feedback from earlier verified proposals, requiring no additional target forward or backward pass; exact target verification remains authorita-tive. Appendix C.1 gives the practical checks, while Appendices A and E analyze the feedback directions and reliability gate. 
+
+3.5 Drift-Triggered Persistent Consolidation 
+
+Reflex adapts within a trajectory, whereas mis-match that recurs across trajectories should up-date the proposal heads. For each horizon head 
+
+h, SpecRoll maintains a bounded reservoir Rh
+
+of matured verifier records. It compares the cur-rent sparse proposal–target discrepancy and ac-ceptance rate with calibrated per-head baselines, and updates a head only when both degradation signals persist across repeated checks. Evidence thresholds, cooldown, and head selection are spec-ified in Appendix C.1. For a selected head, a record j ∈ R h provides a sparse support Sj , a target distribution pSj ,j , and a head distribution qSj ,j (ϕh) renormalized on the same support, together with the realized target to-ken y⋆j . SpecRoll minimizes 
+
+Laux (ϕh) = Ej∼R h
+
+h
+
+λdist ℓdist 
+
+ pSj ,j , q Sj ,j (ϕh)
+
++ λtok 
+
+− log qj (y⋆j ; ϕh)i
+
++ λprox Ω( ϕh, ϕ before  
+
+> h
+
+).
+
+(20) Here ℓdist (p, q ) = DKL (p∥q) is the restricted-support distillation loss, whereas qj (y⋆j ; ϕh) de-notes the probability of the realized token under the head’s full-vocabulary proposal distribution. The nonnegative λ coefficients weight the three terms, while Ω( ϕh, ϕ before  
+
+> h
+
+) penalizes departure from the pre-update parameters. Only the heads are updated, and the target backbone, vocabulary projection, and GRPO policy are fixed and receive no gradient from Laux .
+
+4 Experiment 
+
+We evaluate SpecRoll through four research ques-tions: RQ1 Can it consistently reduce rollout-generation and end-to-end GRPO training time across model scales and reasoning datasets? RQ2 
+
+Do these gains result from more effective use of the proposal and verification budget, rather than simply from producing larger trees or longer ac-cepted continuations? RQ3 Do trajectory-local Reflex correction and reliability-triggered persis-tent consolidation provide complementary gains? 
+
+4.1 Setup 
+
+We evaluate Qwen2.5-1.5B, 3B, 7B, and 14B (Qwen Team, 2025), together with Llama-3.1-8B (Grattafiori et al., 2024). Each model is trained GSM8K SimpleRL L3–5 DAPO-Math-17K Average Model Measure Metric FastGRPO SpecRoll FastGRPO SpecRoll FastGRPO SpecRoll FastGRPO SpecRoll                                                                                                                                                                      
+
+> Qwen2.5-1.5B Speedup Gen. 1.33 1.59 1.07 1.29 1.27 1.46 1.22 1.45
+> E2E 1.30 1.53 1.02 1.24 1.25 1.42 1.19 1.40
+> Acceptance AAL 1.692 1.540 1.796 1.526 1.137 1.503 1.542 1.523 Acc. 0.086 0.111 0.082 0.102 0.108 0.101 0.092 0.105 Qwen2.5-3B Speedup Gen. 1.40 1.60 1.29 1.46 1.22 1.29 1.30 1.45
+> E2E 1.35 1.54 1.22 1.42 1.20 1.26 1.26 1.41
+> Acceptance AAL 2.240 1.730 1.779 1.726 1.950 1.640 1.990 1.699 Acc. 0.073 0.092 0.065 0.093 0.081 0.082 0.073 0.089 Qwen2.5-7B Speedup Gen. 1.08 1.94 1.24 1.49 1.38 1.53 1.23 1.65
+> E2E 1.06 1.85 1.20 1.43 1.33 1.46 1.20 1.58
+> Acceptance AAL 1.989 1.920 2.150 1.820 2.124 1.850 2.088 1.863 Acc. 0.060 0.113 0.096 0.103 0.101 0.107 0.086 0.108 Qwen2.5-14B Speedup Gen. 1.15 1.46 1.21 1.49 1.95 2.09 1.44 1.68
+> E2E 1.14 1.43 1.19 1.45 1.87 1.99 1.40 1.62
+> Acceptance AAL 2.050 2.110 2.110 1.970 1.954 1.875 2.038 1.985 Acc. 0.081 0.124 0.078 0.115 0.074 0.102 0.078 0.114 Llama-3.1-8B Speedup Gen. 1.18 1.38 1.15 1.26 1.98 2.15 1.44 1.60
+> E2E 1.16 1.33 1.13 1.21 1.95 2.04 1.41 1.53
+> Acceptance AAL 1.927 1.840 1.380 1.805 1.890 1.623 1.732 1.756 Acc. 0.055 0.108 0.068 0.093 0.061 0.076 0.061 0.092
+
+Table 1: Pairwise comparison between FastGRPO and SpecRoll . Gen. and E2E report generation and end-to-end speedups over matched vanilla-GRPO runs; bold denotes higher speedup. AAL is the number of accepted speculative tokens per target-verification round, and Acc. is the fraction of tested speculative candidates accepted by the verifier. Averages are arithmetic means across the three datasets. 
+
+on GSM8K (Cobbe et al., 2021), SimpleRL-Abel-Level3to5 (Zeng et al., 2025), and DAPO-Math-17K (Yu et al., 2025). All runs use NVIDIA B200 accelerators. We compare vanilla GRPO, FastGRPO, and four variants that share the same future-token heads and concurrency-aware verifier: Heads only , which disables both adaptation paths; Heads + Reflex , which enables only the gradient-free fast memory; Heads + Aux , which disables Reflex but retains reliability-triggered persistent head up-dates; and full SpecRoll , which combines both paths. The FastGRPO drafter and all SpecRoll 
+
+variants are pretrained on the same ShareGPT-derived data. Within each model–dataset pair, all methods share the target checkpoint, prompt or-der, reward function, group size, sampling tem-perature, response limit, stopping rules, and tar-get sampling implementation. Timings cover pro-posal construction, verification, feedback process-ing, and triggered auxiliary work. We report gen-eration and end-to-end speedups, average accep-tance length(AAL), and token acceptance rate. 
+
+4.2 Overall Training Efficiency RQ1: Does SpecRoll consistently accelerate GRPO training? Table 1 compares SpecRoll with vanilla GRPO and FastGRPO across 15 model–dataset settings. Relative to vanilla GRPO, SpecRoll achieves 1.26 ×–2.15 × gen-eration speedup and 1.21 ×–2.04 × end-to-end speedup, with averages of 1.57 × and 1.51 ×,respectively. By comparison, FastGRPO aver-ages 1.33 × generation speedup and 1.29 × end-to-end speedup. SpecRoll is faster than Fast-GRPO on both measures in every setting, although the magnitude of the gain varies across models and datasets rather than increasing monotonically with model size. Appendix D further shows that this advantage persists throughout a representative training run rather than arising from isolated tim-ing fluctuations. Overall, SpecRoll improves both generation and end-to-end efficiency in all 15 set-tings, showing that its rollout-level gains survive proposal, verification, and adaptation overheads. 
+
+RQ2: Where do the efficiency gains come from? SpecRoll does not uniformly maximize FastGRPO Heads only + Reflex + Aux Full SpecRoll Model Gen. E2E AAL AR Gen. E2E AAL AR Gen. E2E AAL AR Gen. E2E AAL AR Gen. E2E AAL AR 1.5B 1.07 1.02 1.796 0.082 1.07 1.06 1.439 0.085 1.21 1.19 1.473 0.089 1.13 1.12 1.468 0.088 1.29 1.24 1.526 0.102                                                             
+
+> 3B 1.29 1.22 1.779 0.065 1.19 1.17 1.570 0.071 1.39 1.35 1.617 0.078 1.28 1.25 1.584 0.072 1.46 1.42 1.726 0.093
+> 7B 1.24 1.20 2.150 0.096 1.21 1.18 1.610 0.076 1.37 1.32 1.623 0.087 1.24 1.21 1.617 0.081 1.49 1.43 1.820 0.103
+> 14B 1.21 1.19 2.110 0.078 1.18 1.16 1.740 0.083 1.40 1.36 1.780 0.089 1.31 1.27 1.750 0.086 1.49 1.45 1.970 0.115
+
+Table 2: FastGRPO and the four-way SpecRoll ablation on Qwen2.5 models using SimpleRL-Abel-Level3to5. The four SpecRoll variants share the pretrained future-token heads, tree budget, verifier, and target configuration; FastGRPO is included as an external drafter-based reference. Gen. and E2E are speedups over matched vanilla GRPO, AR denotes acceptance rate, and bold marks the best result for each model and metric. 
+
+average acceptance length. Instead, its higher to-ken acceptance rate indicates that a larger frac-tion of the tested proposal budget contributes to accepted progress. It achieves a higher accep-tance rate than FastGRPO in 14 of the 15 set-tings, even though FastGRPO occasionally at-tains a higher AAL . For example, on Qwen2.5-14B/SimpleRL, FastGRPO obtains a higher AAL 
+
+(2.110 versus 1.970) but a substantially lower ac-ceptance rate (0.0777 versus 0.115), while also re-maining slower end to end. This distinction arises because AAL measures committed progress per verification round, whereas acceptance rate mea-sures how efficiently the tested candidates are con-verted into accepted tokens. Thus, the results attribute SpecRoll’s advantage to more effective use of its proposal budget, rather than uniformly longer accepted continuations. 
+
+4.3 Complementarity of Fast and Slow Adaptation RQ3: Are fast and slow adaptation comple-mentary? Table 2 isolates the two adaptation paths while holding the heads, verifier, and train-ing setup fixed. Within the SpecRoll variants, either Reflex or auxiliary adaptation improves the Heads-only baseline at every scale, with Re-flex providing the larger individual gain. Their combination is consistently strongest on genera-tion speedup, end-to-end speedup, and acceptance rate. For Qwen2.5-14B, for example, end-to-end speedup rises from 1.16 × with Heads only to 1.36 × with Reflex and 1.27 × with Aux, while full SpecRoll reaches 1.45 ×; it also raises AAL from 1.740 to 1.970 and acceptance rate from 0.083 to 0.115. FastGRPO obtains higher AAL in all four set-tings, suggesting that its standalone draft model can produce longer accepted continuations. Our claim is therefore not that lightweight future-token heads always draft better. Rather, small heads combined with Reflex and Aux remain effective enough to achieve higher acceptance rates and end-to-end speedups in every row, while avoid-ing a separate autoregressive drafter. The ab-lation supports the intended division of labor: Reflex corrects immediate trajectory-local mis-match, whereas Aux consolidates errors that per-sist across trajectories. 
+
+5 Conclusion 
+
+We introduced SpecRoll , an exact speculative roll-out engine for GRPO that combines lightweight future-token heads with reliability-gated fast–slow adaptation. Reflex converts delayed verifier er-rors into temporary hidden-space corrections with-out backward computation, while a separate slow path absorbs persistent mismatch into the head parameters. Across five models and three rea-soning datasets, SpecRoll achieves 1.26 ×–2.15 ×
+
+generation speedup and 1.21 ×–2.04 × end-to-end speedup over vanilla GRPO, and it is faster in both generation and end-to-end time than FastGRPO in all 15 matched settings. Controlled ablations show that Reflex-only and auxiliary-only variants both improve the same future-token-head base-line, while their combination gives the strongest throughput, AAL, and acceptance rate. These results support a precise novelty claim: verifier feedback is split into a gradient-free trajectory-local memory and a selectively triggered persis-tent learner rather than being used only for online parameter training. 
+
+Limitations 
+
+Our experiments cover five models up to 14B and three mathematical reasoning datasets. Broader evaluation on larger models, more challenging and diverse tasks, and additional domains such as code and multilingual reasoning would further estab-lish the generality of SpecRoll. Runtime gains may also vary across hardware platforms, execu-tion stacks, concurrency settings, and response-length distributions, motivating additional profil-ing and system-specific tuning. Future work will study longer training runs and larger-scale deploy-ments. These extensions concern empirical cov-erage and systems optimization; the exact target-verification semantics remain unchanged. 
+
+References 
+
+Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple LLM inference accelera-tion framework with multiple decoding heads. In 
+
+Proceedings of the 41st International Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research , pages 5209–5235. PMLR. Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. 2023. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 .Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. arXiv preprint arXiv:2110.14168 .DeepSeek-AI. 2025. DeepSeek-R1: Incentivizing rea-soning capability in LLMs via reinforcement learn-ing. arXiv preprint arXiv:2501.12948 .Aaron Grattafiori et al. 2024. The Llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Jian Hu, Xibin Wu, Wei Shen, Jason Klein Liu, Zilin Zhu, Weixun Wang, Songlin Jiang, Haoran Wang, Hao Chen, Bin Chen, Weikai Fang, Xianyu, Yu Cao, Haotian Xu, and Yiming Liu. 2024. OpenRLHF: An easy-to-use, scalable and high-performance RLHF framework. arXiv preprint arXiv:2405.11143 .Hayate Iso, Tiyasa Mitra, Sudipta Mondal, Rasoul Shafipour, Venmugil Elango, Terry Kong, Yuki Huang, Seonjin Na, Izzy Putterman, Benjamin Chislett, Maor Ashkenazi, Joseph Guman, Ger-ald Shen, Tugrul Konuk, Ashwath Aithal, Ritika Borkar, Ran Zilberstein, and Bita Rouhani. 2026. Accelerating RL post-training rollouts via system-integrated speculative decoding. arXiv preprint arXiv:2604.26779 .Minseo Kim, Minjae Lee, Seunghyuk Oh, Kevin Galim, Donghoon Kim, Coleman Hooper, Harman Singh, Amir Gholami, Hyung Il Koo, and Wonjun Kang. 2026. EfficientRollout: System-aware self-speculative decoding for RL rollouts. arXiv preprint arXiv:2606.18967 .Avinash Kumar, Sujay Sanghavi, and Poulami Das. 2026. Test-time speculation. arXiv preprint arXiv:2605.09329 .Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via specu-lative decoding. In Proceedings of the 40th Inter-national Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research ,pages 19274–19286. PMLR. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024a. EAGLE-2: Faster inference of lan-guage models with dynamic draft trees. In Proceed-ings of the 2024 Conference on Empirical Meth-ods in Natural Language Processing , pages 7421– 7432, Miami, Florida, USA. Association for Com-putational Linguistics. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024b. EAGLE: Speculative sampling re-quires rethinking feature uncertainty. In Proceed-ings of the 41st International Conference on Ma-chine Learning , volume 235 of Proceedings of Machine Learning Research , pages 28935–28948. PMLR. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2025. EAGLE-3: Scaling up inference ac-celeration of large language models via training-time test. In Advances in Neural Information Pro-cessing Systems , volume 38. Xiaoxuan Liu, Lanxiang Hu, Peter Bailis, Alvin Che-ung, Zhijie Deng, Ion Stoica, and Hao Zhang. 2024. Online speculative decoding. In Proceedings of the 41st International Conference on Machine Learn-ing , volume 235 of Proceedings of Machine Learn-ing Research , pages 31131–31146. PMLR. Zhiyu Mei, Wei Fu, Kaiwei Li, Guangju Wang, Huanchen Zhang, and Yi Wu. 2024. ReaL: Efficient RLHF training of large language mod-els with parameter reallocation. arXiv preprint arXiv:2406.14088 .Alexandre Piché, Ehsan Kamalloo, Rafael Pardi-nas, Xiaoyin Chen, and Dzmitry Bahdanau. 2025. PipelineRL: Faster on-policy reinforcement learn-ing for long sequence generation. arXiv preprint arXiv:2509.19128 .Yu-Yang Qian, Hao-Cong Wu, Yichao Fu, Hao Zhang, and Peng Zhao. 2026. When drafts evolve: Specula-tive decoding meets online learning. arXiv preprint arXiv:2603.12617 .Qwen Team. 2025. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 .Zelei Shao, Vikranth Srivatsa, Sanjana Srivastava, Qingyang Wu, Alpay Ariyak, Xiaoxia Wu, Ameen Patel, Jue Wang, Percy Liang, Tri Dao, Ce Zhang, Yiying Zhang, Ben Athiwaratkun, Chenfeng Xu, and Junxiong Wang. 2026. Beat the long tail: Distribution-aware speculative decoding for RL training. In Proceedings of Machine Learning and Systems , volume 8. Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo. 2024. DeepSeekMath: Pushing the limits of mathematical reasoning in open language models. arXiv preprint arXiv:2402.03300 .Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2025. HybridFlow: A flexi-ble and efficient RLHF framework. In Proceedings of the Twentieth European Conference on Computer Systems . Association for Computing Machinery. Siqi Wang, Hailong Yang, Junjie Zhu, Xuezhu Wang, Yufan Xu, and Depei Qian. 2025. RL-HFSpec: Breaking the efficiency bottleneck in RLHF training via adaptive drafting. arXiv preprint arXiv:2512.04752 .Zhewei Yao, Reza Yazdani Aminabadi, Olatunji Ruwase, Samyam Rajbhandari, Xiaoxia Wu, Am-mar Ahmad Awan, Jeff Rasley, Minjia Zhang, Con-glong Li, Connor Holmes, Zhongzhu Zhou, Michael Wyatt, Molly Smith, Lev Kurilenko, Heyang Qin, Masahiro Tanaka, Shuai Che, Shuaiwen Leon Song, and Yuxiong He. 2023. DeepSpeed-Chat: Easy, fast and affordable RLHF training of ChatGPT-like models at all scales. arXiv preprint arXiv:2308.01320 .Qiying Yu et al. 2025. DAPO: An open-source LLM reinforcement learning system at scale. arXiv preprint arXiv:2503.14476 .Weihao Zeng, Yuzhen Huang, Qian Liu, Wei Liu, Keqing He, Zejun Ma, and Junxian He. 2025. SimpleRL-Zoo: Investigating and taming zero rein-forcement learning for open base models in the wild. 
+
+arXiv preprint arXiv:2503.18892 .Lefan Zhang, Xiaodan Wang, Yanhua Huang, and Rui-wen Xu. 2025a. Learning harmonized represen-tations for speculative sampling. In International Conference on Learning Representations .Yizhou Zhang, Ning Lv, Teng Wang, and Jisheng Dang. 2025b. FastGRPO: Accelerating policy op-timization via concurrency-aware speculative de-coding and online draft learning. arXiv preprint arXiv:2509.21792 .
+
+A Theoretical Analysis of Reflex 
+
+This section establishes three results. First, the in-stantaneous Reflex feedback is represented as the negative gradient of a pointwise surrogate with all data-dependent supports and weights held fixed. Second, a finite-sample bound is derived for an ex-ponentially weighted average of delayed feedback from a drifting predictable field; this bound yields a sufficient condition for descent of a current veri-fier surrogate. Third, descent of a conditional KL divergence on the verifier support is related to an explicit lower bound on first-slot acceptance. All statements concerning supports are conditional on the indicated supports remaining fixed. 
+
+A.1 Pointwise surrogate representation 
+
+Let V be a finite vocabulary, let W ∈ R|V|× dz , and denote by Wv ∈ Rdz the transpose of the row of 
+
+W indexed by v ∈ V . Fix z0 ∈ Rdz , a nonempty support S ⊆ V , a distribution pS on S, and a tem-perature τ > 0. Define 
+
+qS (z) = softmax( WS z/τ ),
+
+Ldist  
+
+> S
+
+(z) = DKL (pS ∥qS (z)) ,rdist  
+
+> S
+
+(z0) = W ⊤ 
+
+> S
+
+(pS − qS (z0)) . (21) Let O, B ⊆ V be finite sets with B̸ = ∅. Let 
+
+ωy ≥ 0 for y ∈ O, and let βb ≥ 0 for b ∈ B satisfy P 
+
+> b∈B
+
+βb = 1 . Define 
+
+W B = X
+
+> b∈B
+
+βbWb,rcov  
+
+> O,B
+
+= X
+
+> y∈O
+
+ωy
+
+ Wy − W B
+
+ . (22) The coverage direction in Equation 14 is recovered by taking ωy = p(y), B = {b⋆}, and βb⋆ = 1 . If a conditional target mass is used by the implementa-tion instead, then ωy must be defined by that same mass in both Equation 22 and the surrogate below. For y ∈ O, b ∈ B, and a fixed γ ∈ R, set 
+
+cy,b (z) = γ + W ⊤ 
+
+> b
+
+z − W ⊤ 
+
+> y
+
+z, ℓy,b (z) = log(1 + exp( cy,b (z))) ,κy,b (z0) = ωyβb
+
+sigmoid( cy,b (z0)) . (23) Since cy,b (z0) is finite, sigmoid( cy,b (z0)) ∈
+
+(0 , 1) ; hence every coefficient in Equation 23 is finite and nonnegative. The coefficients, together with O, B, and (βb)b∈B , are treated as constants with respect to z. Define 
+
+Lcov  
+
+> z0
+
+(z) = X
+
+> y∈O
+
+X
+
+> b∈B
+
+κy,b (z0)ℓy,b (z). (24) 
+
+Proposition A.1 (Pointwise surrogate representa-tion) . At z = z0,
+
+rdist  
+
+> S
+
+(z0) = −τ ∇z Ldist  
+
+> S
+
+(z0), (25) 
+
+rcov  
+
+> O,B
+
+= −∇ z Lcov  
+
+> z0
+
+(z0). (26) Consequently, for fixed λd, λ c ≥ 0, the vector 
+
+r = λdrdist  
+
+> S
+
+(z0) + λcrcov  
+
+> O,B
+
+(27) 
+
+satisfies 
+
+r = −∇ z Φz0 (z0),
+
+Φz0 (z) = λdτ Ldist  
+
+> S
+
+(z)+ λcLcov  
+
+> z0
+
+(z).
+
+(28) 
+
+If r̸ = 0 , then r is a strict descent direction for Φz0
+
+at z0.Proof. The z-dependent term in DKL (pS ∥qS (z)) 
+
+is 
+
+− X
+
+> v∈S
+
+pS (v) log qS (v; z). (29) The Jacobian of the temperature-scaled log-softmax gives 
+
+∇z Ldist  
+
+> S
+
+(z0) = 1
+
+τ W ⊤ 
+
+> S
+
+(qS (z0) − pS ) , (30) which proves Equation 25. For every (y, b ) ∈ O × B,
+
+∇z ℓy,b (z0) = sigmoid( cy,b (z0))( Wb − Wy).
+
+(31) It follows from Equation 23 that 
+
+−∇ z Lcov  
+
+> z0
+
+(z0) = X
+
+> y∈O
+
+X
+
+> b∈B
+
+ωyβb(Wy − Wb)= X
+
+> y∈O
+
+ωy Wy − X
+
+> b∈B
+
+βbWb
+
+!
+
+= rcov  
+
+> O,B
+
+, (32) which proves Equation 26. Linearity of the gradi-ent proves Equation 28. Finally, 
+
+∇z Φz0 (z0)⊤r = −∥ r∥22 < 0 (33) whenever r̸ = 0 .
+
+Corollary A.1 (RMS-normalized feedback) . Sup-pose that the distribution and coverage directions are evaluated at z0, and that the nonnegative severity weights and RMS denominators in Equa-tion 16 are held fixed. Then the pre-normalized combined vector in Equation 16 has the form 
+
+g = λdrdist  
+
+> S
+
+(z0) + λcrcov  
+
+> O,B
+
+(34) 
+
+for some λd, λ c ≥ 0. Hence g is the negative gra-dient at z0 of the surrogate in Equation 28. Any strictly positive scalar multiple of g is a strict de-scent direction for that surrogate whenever g̸ = 0 .Proof. In Equation 16, each direction is multiplied by its nonnegative severity weight and divided by a strictly positive scalar. The final RMS normaliza-tion multiplies the resulting vector by a nonnega-tive scalar. Proposition A.1 therefore applies. 
+
+A.2 Delayed-memory tracking under policy drift 
+
+Fix a trajectory–horizon pair and suppress these indices. Let (Fs)s≥0 be a filtration, and let Xs ∈
+
+Rdz be an integrable, Fs-measurable feedback vector associated with proposal round s. Define 
+
+gs = E[Xs | F s−1], ξs = Xs − gs. (35) Then (ξs)s≥0 is a martingale-difference sequence. The vector Xs may include the severity weighting and RMS normalizations in Equation 16. Fix integers d0 ≥ 1, H ≥ 1, and t ≥ d0 +H −1.Suppose that exactly one record matures per round after delay d0. For a fixed ρ ∈ [0 , 1) , the zero-initialized EMA after H matured records is 
+
+mt = (1 − ρ)
+
+> H−1
+
+X
+
+> j=0
+
+ρj Xt−d0−j = (1 − ρH ) ¯ mt,
+
+(36) 
+
+¯mt =
+
+> H−1
+
+X
+
+> j=0
+
+aH,j Xt−d0−j , aH,j = (1 − ρ)ρj
+
+1 − ρH .
+
+(37) The weights are deterministic, nonnegative, and sum to one. Define 
+
+ℓH (ρ, d 0) = 
+
+> H−1
+
+X
+
+> j=0
+
+aH,j (d0 + j)= d0 + ρ
+
+1 − ρ − Hρ H
+
+1 − ρH , (38) 
+
+νH (ρ) = 
+
+> H−1
+
+X
+
+> j=0
+
+a2
+
+> H,j
+
+= (1 − ρ)2(1 − ρ2H )(1 − ρH )2(1 − ρ2) . (39) Let Lt : Rdz → R be differentiable, let zt ∈
+
+Rdz , and set ht = −∇L t(zt). Assume the follow-ing conditions. (A1) Local smoothness. There exists L > 0 such that Lt is L-smooth on the segment {zt +
+
+s∆zt : s ∈ [0 , 1] }.(A2) Bounded predictable-field drift. For every consecutive pair of indices needed below, 
+
+∥gs+1 − gs∥2 ≤ Γ almost surely . (40) (A3) Conditional sub-Gaussian noise. For every unit vector v ∈ Rdz and every λ ∈ R,
+
+E
+
+h
+
+exp( λv ⊤ξs) | F s−1
+
+i
+
+≤ exp( λ2σ2/2) almost surely .
+
+(41) (A4) Current-field calibration. 
+
+∥ht − gt∥2 ≤ b almost surely . (42) Assumption (A4) is not implied by the point-wise identities in Proposition A.1: Xs may contain normalization, severity weighting, sparse-support restriction, coverage feedback, and randomness not present in the gradient of Lt.
+
+Theorem A.1 (Delayed-memory tracking and cur-rent-surrogate descent) . For a fixed pair (t, H )
+
+and δ ∈ (0 , 1) , define 
+
+ζδ = dz log 5 + log 2
+
+δ ,εt,H (δ) = Γ ℓH (ρ, d 0) + 2 σp2νH (ρ)ζδ, (43) 
+
+et,H (δ) = b + εt,H (δ). (44) 
+
+Under (A2)–(A3), there exists an event Et,H,δ sat-isfying P(Et,H,δ ) ≥ 1 − δ such that 
+
+∥ ¯mt − gt∥2 ≤ εt,H (δ) on Et,H,δ . (45) 
+
+Assume additionally (A1) and (A4), mt̸ = 0 ,and αt > 0. Write the Reflex perturbation as 
+
+∆zt = αtRMS( zt) mt
+
+RMS( mt) + ϵ = ηtdt, (46) 
+
+dt = mt
+
+∥mt∥2
+
+= ¯mt
+
+∥ ¯mt∥2
+
+, ηt = ∥∆zt∥2.
+
+(47) 
+
+On Et,H,δ ,
+
+Lt(zt + ∆ zt) − L t(zt)
+
+≤ − ηt
+
+
+
+∥ ¯mt∥2 − et,H (δ) − Lη t
+
+2
+
+
+
+. (48) 
+
+Consequently, on the same event, strict descent holds whenever 
+
+∥ ¯mt∥2 > e t,H (δ),
+
+0 < η t < 2( ∥ ¯mt∥2 − et,H (δ)) 
+
+L . (49) 
+
+The probability statement is pointwise in (t, H );a simultaneous statement over several proposal rounds requires an additional union bound or a time-uniform concentration inequality. Proof. By Equation 35, 
+
+¯mt − gt =
+
+> H−1
+
+X
+
+> j=0
+
+aH,j (gt−d0−j − gt)+
+
+> H−1
+
+X
+
+> j=0
+
+aH,j ξt−d0−j
+
+=: Bt + Nt. (50) For each j, repeated application of (A2) yields 
+
+∥gt−d0−j − gt∥2 ≤ Γ( d0 + j) almost surely .
+
+(51) The triangle inequality and the nonnegativity of the weights therefore give 
+
+∥Bt∥2 ≤ Γ
+
+> H−1
+
+X
+
+> j=0
+
+aH,j (d0 + j) = Γ ℓH (ρ, d 0).
+
+(52) Let N be a 1/2-net of the Euclidean unit sphere in Rdz with |N | ≤ 5dz . Fix v ∈ N . Since the coefficients aH,j are deterministic, iterated condi-tioning in increasing order of the time indices and (A3) imply 
+
+E exp( λv ⊤Nt)
+
+≤ exp 
+
+ λ2σ2
+
+2
+
+> H−1
+
+X
+
+> j=0
+
+a2
+
+> H,j
+
+
+
+= exp 
+
+ λ2σ2νH (ρ)2
+
+
+
+.
+
+(53) Thus, for every u > 0,
+
+P
+
+
+
+|v⊤Nt| ≥ u
+
+
+
+≤ 2 exp 
+
+
+
+− u2
+
+2σ2νH (ρ)
+
+
+
+. (54) Applying the union bound over N with u =
+
+σp2νH (ρ)ζδ gives an event of probability at least 
+
+1 − δ on which 
+
+max  
+
+> v∈N
+
+|v⊤Nt| ≤ σp2νH (ρ)ζδ. (55) For a 1/2-net, ∥x∥2 ≤ 2 max v∈N |v⊤x|. Hence, on this event, 
+
+∥Nt∥2 ≤ 2σp2νH (ρ)ζδ. (56) Equations 52 and 56 establish Equation 45. On Et,H,δ , (A4) and the triangle inequality im-ply 
+
+∥ht − ¯mt∥2 ≤ ∥ ht − gt∥2 + ∥gt − ¯mt∥2 ≤ et,H (δ).
+
+(57) Because mt = (1 − ρH ) ¯ mt and 1 − ρH > 0, the equality of the two unit directions in Equation 47 holds. Therefore, 
+
+h⊤ 
+
+> t
+
+dt = ¯ m⊤ 
+
+> t
+
+dt + ( ht − ¯mt)⊤dt
+
+≥ ∥ ¯mt∥2 − ∥ ht − ¯mt∥2
+
+≥ ∥ ¯mt∥2 − et,H (δ). (58) By the descent lemma, (A1), and ht = −∇L t(zt),
+
+Lt(zt + ηtdt) − L t(zt)
+
+≤ − ηth⊤ 
+
+> t
+
+dt + Lη 2
+
+> t
+
+2
+
+≤ − ηt
+
+
+
+∥ ¯mt∥2 − et,H (δ) − Lη t
+
+2
+
+
+
+. (59) This proves Equations 48 and 49. 
+
+Corollary A.2 (Sequential infinite-memory scal-ing) . For each fixed ρ ∈ [0 , 1) and fixed d0,
+
+lim  
+
+> H→∞
+
+ℓH (ρ, d 0) = d0 + ρ
+
+1 − ρ ,
+
+lim  
+
+> H→∞
+
+νH (ρ) = 1 − ρ
+
+1 + ρ .
+
+(60) 
+
+After taking this H → ∞ limit, set x = 1 − ρ.If Γ, σ > 0, then, as x ↓ 0, the limiting tracking radius satisfies 
+
+ε∞(x) = Γ
+
+x + Cδσ√x
+
++ Γ( d0 − 1) + O(σx 3/2),Cδ = 2 pζδ.
+
+(61) 
+
+The unique stationary point of the leading-order proxy f (x) = Γ /x + Cδσ√x is 
+
+xproxy =
+
+ 2Γ 
+
+Cδσ
+
+2/3
+
+. (62) 
+
+It is the minimizer of f on (0 , ∞). On the admis-sible interval x ∈ (0 , 1] , the corresponding proxy minimizer is min {1, x proxy }. Equation 62 is an asymptotic design rule when xproxy ≪ 1; it is not asserted to minimize the finite-H radius in Equa-tion 43. Proof. For fixed ρ < 1, Equation 60 follows di-rectly from Equations 38 and 39. Substituting 
+
+ρ = 1 − x into the limiting expressions gives 
+
+d0 + ρ
+
+1 − ρ = 1
+
+x + d0 − 1, 1 − ρ
+
+1 + ρ = x
+
+2 − x .
+
+(63) Consequently, 
+
+2σ
+
+r
+
+2ζδ
+
+x
+
+2 − x = 2 σpζδx (1 + O(x)) = Cδσ√x + O(σx 3/2), (64) which proves Equation 61. Finally, 
+
+f ′(x) = − Γ
+
+x2 + Cδσ
+
+2√x . (65) The equation f ′(x) = 0 has the unique solution in Equation 62. At this point, f ′′ (x) = 3Γ /(2 x3) >
+
+0, which proves the minimization claim. 
+
+A.3 Transfer to exact first-slot acceptance 
+
+Let p be a probability distribution on V, let ∅̸ =
+
+C ⊆ V , and let qC be a probability distribution supported on C, extended by zero on Cc. Assume 
+
+p(C) > 0 and supp( p|C ) ⊆ supp( qC ). Define 
+
+μC = p(Cc),pC (v) = p(v)1 − μC
+
+, v ∈ C, KC = DKL (pC ∥qC ). (66) 
+
+Proposition A.2 (Candidate-support acceptance certificate) . If the first proposal Y is dis-tributed according to qC and the exact ver-ifier accepts it with conditional probability 
+
+min {1, p (Y )/q C (Y )}, then its mean acceptance probability is 
+
+A1(p, q C ) = X
+
+> v∈V
+
+min {p(v), q C (v)}
+
+= 1 − TV( p, q C ).
+
+(67) 
+
+Moreover, 
+
+A1(p, q C ) ≥ (1 − μC )
+
+"
+
+1 −
+
+r KC
+
+2
+
+#
+
+> +
+
+. (68) 
+
+Proof. Since qC (v) > 0 for every v that can be sampled from qC ,
+
+A1(p, q C ) = X
+
+> v∈C
+
+qC (v) min 
+
+
+
+1, p(v)
+
+qC (v)
+
+
+
+= X
+
+> v∈V
+
+min {p(v), q C (v)}. (69) For probability distributions a and b on a common finite space, 
+
+X
+
+> v
+
+min {a(v), b (v)} = 1 − TV( a, b ). (70) This proves Equation 67. Let a = 1 − μC ∈ (0 , 1] . For all x, y ≥ 0,
+
+min {ax, y } ≥ a min {x, y }. Therefore, 
+
+A1(p, q C ) = X
+
+> v∈C
+
+min {ap C (v), q C (v)}≥ a X
+
+> v∈C
+
+min {pC (v), q C (v)}
+
+= a (1 − TV( pC , q C )) . (71) Pinsker’s inequality gives TV( pC , q C ) ≤pKC /2. Combining this inequality with 
+
+A1(p, q C ) ≥ 0 proves Equation 68. 
+
+Corollary A.3 (Fixed-support certificate transfer) .
+
+Suppose that p and C remain fixed during the Re-flex perturbation and define 
+
+Lt(z) = DKL (pC ∥qC (z)) . (72) 
+
+If Theorem A.1 applies to this loss and Equa-tion 49 holds on Et,H,δ , then 
+
+K′ 
+
+> C
+
+:= DKL (pC ∥qC (zt + ∆ zt)) 
+
+< K C on Et,H,δ . (73) 
+
+If KC < 2, define the certificate value 
+
+BC (K) = (1 − μC )
+
+h
+
+1 − pK/ 2
+
+i 
+
+> +
+
+. (74) 
+
+Then 
+
+BC (K′ 
+
+> C
+
+) − B C (KC )= (1 − μC )
+
+r KC
+
+2 −
+
+r K′
+
+> C
+
+2
+
+!
+
+> 0. (75) 
+
+This conclusion concerns the certified lower bound; it does not, by itself, imply A1(p, q C (zt +∆zt)) > A 1(p, q C (zt)) .Proof. The strict inequality K′ 
+
+> C
+
+< K C is Equa-tion 48 under Equation 49. Because p and C are fixed, μC is unchanged. Since K′ 
+
+> C
+
+< K C < 2, the clipping operation in BC is inactive at both argu-ments. Subtraction yields Equation 75. 
+
+Proposition A.3 (Failure of support-agnostic transfer) . If the diagnostic support S differs from the verifier support C, strict descent of 
+
+DKL (pS ∥qS ) does not, in general, imply either an increase in A1(p, q C ) or an increase in the certifi-cate associated with C, even when p and C remain fixed. Proof. Let V = {1, 2, 3} and 
+
+p =
+
+ 12 , 25 , 110 
+
+
+
+,S = {1, 2}, C = {1, 3}.
+
+(76) Let u = (1 , 1, 1/5) and u′ = (5 , 4, 10) . For every nonempty A ⊆ V , define 
+
+qA(v) = uv
+
+P 
+
+> w∈A
+
+uw
+
+,q′
+
+> A
+
+(v) = u′
+
+> v
+
+P 
+
+> w∈A
+
+u′
+
+> w
+
+, v ∈ A. 
+
+(77) These restricted distributions can be realized by a common softmax model. Specifically, take dz =3, W = I3, τ = 1 , and 
+
+z = (log u1, log u2, log u3),z′ = (log u′
+
+> 1
+
+, log u′
+
+> 2
+
+, log u′
+
+> 3
+
+). (78) Direct calculation gives 
+
+pS =
+
+ 59 , 49
+
+
+
+, qS =
+
+ 12 , 12
+
+
+
+, q′ 
+
+> S
+
+=
+
+ 59 , 49
+
+
+
+,pC =
+
+ 56 , 16
+
+
+
+, qC =
+
+ 56 , 16
+
+
+
+, q′ 
+
+> C
+
+=
+
+ 13 , 23
+
+
+
+.
+
+(79) Hence, by strict positivity of KL divergence away from equality, 
+
+DKL (pS ∥q′ 
+
+> S
+
+) = 0 < D KL (pS ∥qS ). (80) On the other hand, Equation 67 yields 
+
+A1(p, q C ) = min 
+
+ 12 , 56
+
+
+
++ min 
+
+ 110 , 16
+
+
+
+= 35 ,A1(p, q ′ 
+
+> C
+
+) = min 
+
+ 12 , 13
+
+
+
++ min 
+
+ 110 , 23
+
+
+
+= 13 30 .
+
+(81) Thus A1(p, q ′ 
+
+> C
+
+) < A 1(p, q C ) despite strict KL im-provement on S. Moreover, the initial candidate-support KL equals zero whereas the corrected candidate-support KL is strictly positive, so the certificate associated with C also decreases. This proves the claim. B Exact Tree Verification 
+
+This appendix specifies the sampling semantics used in all rollout experiments. The future-token tree is used to batch target evaluations; token com-mitment follows the stochastic node-wise proce-dure below, not longest-prefix matching or greedy branch selection. 
+
+B.1 Tree Proposal Law 
+
+Let a ∼ p0 = πθ(· | x≤t) be an exact target-sampled anchor token. The speculative tree is rooted at prefix x≤ta. A node u at speculative depth d ∈ { 0, . . . , K − 1} represents the unique prefix 
+
+path( u) = ( a, v 1, . . . , v d). (82) Its next speculative position is proposed by head 
+
+k = d + 1 . Let ¯qu denote that head’s base dis-tribution after Reflex. In the current implementa-tion, nodes at the same depth share the same head logits, so ¯qu may be numerically independent of 
+
+path( u). This does not affect correctness: an arbi-trary distribution that ignores part of its condition-ing context is still a valid conditional proposal. The tree builder selects a finite support Cu un-der the concurrency budget and samples an or-dered list of mu distinct children without replace-ment. If yu, 1: j−1 have already been drawn, define the remaining set 
+
+Ru,j = Cu \ { yu, 1, . . . , y u,j −1} (83) and the slot-specific conditional proposal 
+
+qu,j (v) = 1[v ∈ Ru,j ]¯ qu(v)
+
+P 
+
+> w∈Ru,j
+
+¯qu(w) . (84) Then yu,j ∼ qu,j . The probability of the ordered child list is 
+
+Pr( yu, 1: mu ) = 
+
+> mu
+
+Y
+
+> j=1
+
+qu,j (yu,j ), (85) and the proposal factor associated with a branch that accepts slot jℓ at node uℓ is Q 
+
+> ℓ
+
+quℓ,j ℓ (vℓ). Ex-actness is nevertheless established node by node and does not require forming a single branch-level acceptance ratio. Within a parent, sampling without replacement prevents duplicate token children. The same to-ken label may appear below different parents be-cause those nodes represent different autoregres-sive prefixes. If an implementation generates du-plicate aliases for an identical full prefix, they are canonicalized before target evaluation and retain parent-specific proposal bookkeeping. For every node u, the packed target verification forward computes 
+
+pu(v) = πθ(v | x≤t, path( u)) . (86) Tree packing is valid only when these logits equal the logits from an ordinary autoregressive target forward at the same prefix, up to numerical preci-sion. 
+
+B.2 Node-Wise Acceptance and Residuals 
+
+At node u, initialize the target residual r(0)  
+
+> u
+
+= pu.Candidate yu,j is accepted with probability 
+
+Au,j = min 1, r(j−1)  
+
+> u
+
+(yu,j )
+
+qu,j (yu,j )
+
+!
+
+. (87) After rejection, update the full-vocabulary residual 
+
+r(j) 
+
+> u
+
+(v) = [r(j−1)  
+
+> u
+
+(v) − qu,j (v)] +
+
+Zu,j 
+
+,Zu,j = X
+
+> w
+
+[r(j−1)  
+
+> u
+
+(w) − qu,j (w)] +. (88) If a candidate is accepted, the verifier commits it and recurses into its child. If all siblings are re-jected, it samples one fallback token from the final residual and ends the round. When the deepest speculative candidate is accepted, it samples one bonus token from the target distribution at the re-sulting leaf. 
+
+Algorithm 1 Exact node-wise tree verification                                                            
+
+> 1: function VERIFY NODE (u)2: r←pu
+> 3: for j= 1 , . . . , m udo
+> 4: y←yu,j and q←qu,j
+> 5: Draw U∼Uniform(0 ,1)
+> 6: if U≤min {1, r (y)/q (y)}then
+> 7: Commit y
+> 8: if yhas a speculative child subtree then
+> 9: return y∥VERIFY NODE (child( u, y ))
+> 10: else
+> 11: Draw bonus b∼pchild( u,y )
+> 12: return (y, b )
+> 13: end if
+> 14: else
+> 15: r(v)←[r(v)−q(v)] +/P
+> w[r(w)−q(w)] +
+> 16: end if
+> 17: end for
+> 18: Draw fallback f∼r
+> 19: return f
+> 20: end function
+
+B.3 Sampling Exactness Proposition B.1 (One-node correction) . Condi-tioned on the prefix represented by u, Algorithm 1 emits its first committed token from pu.Proof. Consider slot k conditioned on all previous candidate draws and rejections. The candidate is distributed as Yj ∼ qu,j . Its accepted contribution to output token v is 
+
+qu,j (v) min 1, r(j−1)  
+
+> u
+
+(v)
+
+qu,j (v)
+
+!
+
+= min {qu,j (v), r (j−1)  
+
+> u
+
+(v)}. (89) The probability of rejection is Zu,j , and the con-ditional continuation distribution in Equation 88 contributes 
+
+Zu,j r(j) 
+
+> u
+
+(v) = [ r(j−1)  
+
+> u
+
+(v) − qu,j (v)] +. (90) The sum of the accepted and rejected contributions is exactly r(j−1)  
+
+> u
+
+(v). Backward induction over the remaining slots, with the final fallback sampled from the last residual, shows that the node emits 
+
+r(0)  
+
+> u
+
+= pu.
+
+Theorem B.1 (Exact target continuation) . Let all node probabilities satisfy Equation 86, and let candidate lists be generated according to Equa-tion 84. The anchor followed by Algorithm 1 has the same joint distribution as ordinary autoregres-sive sampling from πθ for every committed token in the round. Proof. The anchor is sampled from the target by construction. Proposition B.1 shows that the first speculative or fallback token below any vis-ited node has target conditional distribution pu.Conditional on accepting token v at node u,the child represents exactly the extended prefix 
+
+(path( u), v ), and the same proposition applies recursively. A rejected node terminates with a target-residual fallback whose marginal is already included in pu; an accepted deepest node termi-nates with a direct target bonus sample. Induction on remaining tree depth and the autoregressive chain rule therefore give the target joint distribu-tion for the complete committed continuation. 
+
+Sampling versus greedy decoding. The exact-ness claim applies to the stochastic verifier above. A longest-accepted-branch or greedy tree rule may preserve a greedy output under separate condi-tions, but it is not used for the sampled GRPO roll-outs reported here. 
+
+B.4 Justification of the Conditional-Overlap Surrogate 
+
+We first recall the maximal-coupling interpretation of the overlap coefficient and then relate the pro-posed surrogate to the exact node-wise verifier. 
+
+Proposition B.2 (Conditional overlap and verifier acceptance) . Let C ⊆ V satisfy p(C), q (C) > 0,and write s = p(C). Let Aver  
+
+> C
+
+be the probability that the exact node-wise verifier accepts at least one speculative candidate from C, conditioned on reaching the node. Suppose that the first candidate is drawn from qC , as in Equation 84. Then 
+
+p(C)Ω C ≤ Aver  
+
+> C
+
+≤ p(C), (91) 
+
+where 
+
+ΩC = X
+
+> v∈C
+
+min {pC (v), q C (v)} = 1 −TV( pC , q C ).
+
+(92) 
+
+Consequently, 
+
+0 ≤ Aver  
+
+> C
+
+− p(C)Ω C ≤ p(C) TV( pC , q C ). (93) 
+
+Moreover, ΩC is the largest agreement probability attainable by any coupling of pC and qC .Proof. For any nonnegative a and b,
+
+min {a, b } = a + b − | a − b|
+
+2 . (94) Because both pC and qC sum to one, 
+
+ΩC = 12
+
+X
+
+> v∈C
+
+(pC (v) + qC (v) − | pC (v) − qC (v)|)= 1 − 12
+
+X
+
+> v∈C
+
+|pC (v) − qC (v)|
+
+= 1 − TV( pC , q C ). (95) To prove the coupling statement, consider any coupling (X, Y ) with marginals pC and qC . For each v ∈ C,
+
+Pr( X = Y = v) ≤ min {pC (v), q C (v)}. (96) Summing over v gives 
+
+Pr( X = Y ) ≤ ΩC . (97) This bound is achievable. Assign common proba-bility mass 
+
+m(v) = min {pC (v), q C (v)} (98) to the event X = Y = v. The remaining pC - and 
+
+qC -masses have disjoint supports and can there-fore be coupled without further agreement. This constructs a coupling satisfying Pr( X = Y ) = P 
+
+> v
+
+m(v) = Ω C .It remains to relate this overlap to verifier ac-ceptance. Let A(1)  
+
+> C
+
+be the probability that the first candidate is accepted. Because the first candidate 
+
+Y is distributed as qC and is accepted using the exact rejection-sampling rule, 
+
+A(1)  
+
+> C
+
+= X
+
+> v∈C
+
+qC (v) min 
+
+
+
+1, p(v)
+
+qC (v)
+
+
+
+= X
+
+> v∈C
+
+min {qC (v), p (v)}. (99) Since p(v) = sp C (v) for v ∈ C and s ≤ 1, we have qC (v) ≥ sq C (v). Hence, 
+
+A(1)  
+
+> C
+
+≥ X
+
+> v∈C
+
+min {sq C (v), sp C (v)}
+
+= s X
+
+> v∈C
+
+min {qC (v), p C (v)}
+
+= p(C)Ω C . (100) Acceptance at the first slot implies acceptance somewhere in the node, so 
+
+Aver  
+
+> C
+
+≥ A(1)  
+
+> C
+
+≥ p(C)Ω C . (101) For the upper bound, let X be the first token emitted by the exact node-wise verifier. By exact verification, X ∼ p. Whenever a speculative can-didate is accepted, the emitted token belongs to C.Therefore, 
+
+Aver  
+
+> C
+
+≤ Pr( X ∈ C) = p(C). (102) Combining the two bounds proves Equation 91. Finally, 
+
+Aver  
+
+> C
+
+− p(C)Ω C ≤ p(C) − p(C) [1 − TV( pC , q C )] = p(C) TV( pC , q C ), (103) which proves Equation 93. 
+
+C End-to-End Algorithm and Implementation 
+
+Algorithm 2 One exact speculative round for se-quence i                                                      
+
+> 1: Compute ht=fθ(x≤t)and sample anchor a∼πθ(· |
+> x≤t).2: for h= 1 , . . . , H do
+> 3: Predict position t+h+ 1 with zt,h =gϕh(ht).4: if feedback, alignment, and coherence gates pass
+> then
+> 5: Form bounded ∆zt,h from mi,h and apply the boundary safeguard. 6: else
+> 7: ∆zt,h ←0.8: end if
+> 9: Form the corrected head distribution and store a de-tached proposal record. 10: end for
+> 11: Set Ntfrom active concurrency; build ordered, without-replacement child lists using Equation 84. 12: Evaluate pufor every unique tree prefix in one packed target forward. 13: Append a∥VERIFY NODE (root) using Algorithm 1. 14: for each record whose target position has matured do
+> 15: Build S;compute rdist , r cov , w ;update memory, alignment statistics, and reservoir. 16: end for
+> 17: If persistent drift and guardrails pass, run the bounded auxiliary update.
+
+C.1 Implementation and Reproducibility Details Training protocol. We train Qwen2.5-1.5B, 3B, 7B, and 14B and Llama-3.1-8B on GSM8K, SimpleRL-Abel-Level3to5, and DAPO-Math-17K. For each dataset, training uses seed 42 and proceeds for one epoch. Each prompt produces eight responses. Rollouts use stochastic sampling with temperature 1.0, nucleus threshold 0.95 ,no top-k truncation, a maximum prompt length of 2048 tokens, and a maximum total sequence length of 2048 tokens. The per-device prompt batch sizes for Qwen2.5-1.5B, 3B, 7B, 14B, and Llama-3.1-8B are 16 ,
+
+8, 8, 4, and 8, respectively. The corresponding gradient-accumulation factors are 2, 4, 4, 8, and 
+
+4, yielding an effective batch of 32 prompts, or 
+
+256 sampled responses, per policy update. Groups with zero reward variance do not contribute to the GRPO update. The reward is 
+
+R(x) = Racc (x) + 0 .2Rfmt (x), (104) where Racc is symbolic answer correctness and 
+
+Rfmt indicates compliance with the prescribed rea-soning format. The target policy is optimized with AdamW at learning rate 10 −6. GRPO uses KL coefficient 
+
+β = 0 .04 and clipping parameter ϵ = 0 .1. Policy adaptation is restricted to LoRA parameters with rank 64 , scale 32 , and zero dropout. LoRA mod-ules are attached to the query, key, value, output, gating, up-projection, and down-projection trans-formations. These target-side settings are identical for vanilla GRPO, FastGRPO, and all SpecRoll 
+
+variants. 
+
+Future-token proposer. We instantiate three horizon-specific heads for positions t+2 , t+3 , and 
+
+t + 4 . Each head applies a residual transformation 
+
+gϕh (h) = h + SiLU( Ah LN( h) + bh) (105) and uses the frozen target vocabulary projection to obtain proposal logits. The target backbone and vocabulary projection are not updated during head pretraining or auxiliary adaptation. The heads are pretrained for one epoch on the complete ShareGPT-V4.3-derived corpus using assistant-token cross-entropy. The three horizon losses are weighted by 1, 0.8, and 0.82. Pretrain-ing uses AdamW with learning rate 3 × 10 −4, zero weight decay, 100 linear warm-up steps, gradient-norm bound 1.0, and maximum sequence length 
+
+1024 . The model-specific microbatch and accu-mulation pairs are (16 , 2) , (8 , 4) , (4 , 8) , (2 , 16) ,and (4 , 8) in the model order stated above, giving a common effective pretraining batch size of 32 .For comparison, the FastGRPO drafter is pre-trained independently on the same ShareGPT-derived corpus for one epoch, with maximum se-quence length 2048 , learning rate 5 × 10 −5, and a 5% linear warm-up fraction. Its online drafter learning rate is 10 −4. Thus, the two proposers share their pretraining data source, although their architectures, objectives, and sequence lengths differ. 
+
+Concurrency-aware sparse tree verification. 
+
+The per-response tree budget is adapted to the number of unfinished responses Bt as 
+
+Nt = clip( ⌊Cpeak /B t⌋ , N min , N max ) . (106) We set Cpeak = 512 , Nmin = 1 , and Nmax = 10 ,with the root included in Nt. The nominal non-root allocation across the three prediction hori-zons is (5 , 4, 0) and is truncated when necessary to satisfy the available budget. All represented prefixes are evaluated jointly in a single packed target-model forward pass. 
+
+Verifier-derived feedback. For each matured proposal, the feedback support is the deduplicated union of the proposal top-48 tokens, target top-48 
+
+tokens, the realized target token, and the raw can-didate identifiers. The union is truncated to at most 
+
+48 entries. Both target and proposal distributions are renormalized on this common support. Distri-bution and coverage directions are combined with respective weights 0.15 and 1.25 . Feedback sever-ity is 
+
+w = clip  0.3 TV( pS , q S ) + 0 .7 pout , 0, 1 ,
+
+(107) and observations with w < 0.03 are discarded. The coverage term uses the four proposal to-kens nearest the selection boundary, and the candidate-boundary safeguard requires a positive logit-margin change with margin 0.15 .
+
+Reflex configuration. Reflex maintains an in-dependent FP32 memory for every trajectory– horizon pair. Its memory update uses horizon-specific decay ρk. Proposal-time and verifier-derived directions are represented by normalized random projections of rank 24 , generated with seed 29 . Alignment means and variances are accu-mulated using the exact online sample moments; no exponential averaging is applied to these align-ment statistics. Let [αmin  
+
+> k
+
+, α max  
+
+> k
+
+] denote the base relative-RMS interval. Conditional on an eligible reliability score, the correction ratio lies in 
+
+[αmin  
+
+> k
+
+, α max  
+
+> k
+
+], (108) before any counterfactual safety reduction. Ta-ble 3 reports the shared horizon-specific configu-ration. The quantities nfb  
+
+> k
+
+and nalign  
+
+> k
+
+are the mini-mum effective feedback and alignment counts, re-spectively. Counterfactual safety statistics compare raw and corrected candidate mass and candidate wins. The minimum probe count is 128 for all mod-els. The candidate mass and net-win deadbands are 5 × 10 −4 and 2 × 10 −3. One adverse window reduces the active ratio by a factor of 0.5; two fa-vorable windows permit gradual recovery. 
+
+Auxiliary head adaptation. Auxiliary adapta-tion updates only the horizon-specific proposal heads using detached verifier records; the tar-get backbone and vocabulary projection remain frozen. An auxiliary-update event is triggered only Models (ρ1, ρ 2, ρ 3) (nfb 1 , n fb 2 , n fb 3 ) (nalign 1 , n align 2 , n align 3 ) Correction intervals (%) zδ Feedback stride All models (.85,.90,.95) (1,2,4) (6,16,48) (1.0–2.5, .4–1.0, .25–.6) .60 4
+
+Table 3: Shared horizon-specific Reflex hyperparameters. Correction intervals are expressed as percentages of the proposal hidden-state RMS. 
+
+if there exists a horizon k satisfying all of the fol-lowing conditions: (i) drift is detected in three consecutive monitoring windows of 64 matured records, where restricted TV exceeds its calibrated baseline and either acceptance falls below its base-line or candidate regret rises above its baseline; (ii) the reservoir contains at least Nmin = 64 matured records for horizon k; (iii) at least Gmin = 10 
+
+complete rollout batches have elapsed since the preceding auxiliary-update event; and (iv) the pro-jected cumulative auxiliary time does not exceed 
+
+1.8% of rollout-generation time. Formally, 
+
+Eligible k = D(3)  
+
+> k
+
+∧ [Nk ≥ 64] ∧ [g − glast ≥ 10] 
+
+∧
+
+ Taux + bcupd 
+
+Troll 
+
+≤ 0.018 
+
+
+
+.
+
+(109) where g is the current completed-rollout-batch in-dex, glast is the index of the most recent auxiliary update, and bcupd is the estimated cost of the pend-ing update. If multiple horizons are eligible, only the one with the largest calibrated degradation is updated. The selected update uses at most 256 ma-ture records. For the selected horizon, we minimize 
+
+Laux = DKL (pS ∥qraw  
+
+> S
+
+) + 0 .1DKL (pS ∥qeff  
+
+> S
+
+)+ 1 .5Lrank + λpLprox , (110) using temperature 1.0 and ranking margin 0.20 .Each event performs one AdamW step with zero weight decay, numerical constant 10 −6, and gradient-norm bound 1.0. The resulting parameter displacement is contracted by 1/(1 + λp).After three warm-up updates, the record budget is multiplied by 0.75 after two consecutive budget violations and by 1.20 after four consecutive com-pliant updates. 
+
+Metrics and timing. Let Tr be the candidate tree and Pr the committed target-consistent path in verification round r, both including the target-sampled root. The reported metrics are 
+
+AAL = 1
+
+R
+
+> R
+
+X
+
+> r=1
+
+|P r|, (111) 
+
+AR = 
+
+PRr=1 (|P r| − 1) 
+
+PRr=1 (|T r| − 1) . (112) Thus, AAL includes the exact root, whereas ac-ceptance rate excludes the root but counts every non-root candidate placed in the tree. All experiments use a single NVIDIA B200. Generation time includes target prefill, future-token-head evaluation, tree construction, packed target evaluation, accepted-path cache extraction, verifier feedback, and Reflex bookkeeping. Com-plete wall-clock time is measured from the first training batch through the final checkpoint and further includes reward computation, policy opti-mization, auxiliary head updates, and checkpoint-ing; model and dataset initialization are excluded. Each reported table entry corresponds to one com-pleted matched run and is normalized by the cor-responding vanilla-GRPO run. 
+
+D Runtime Scaling with Training Progress 
+
+To examine whether the reported end-to-end measurements reflect stable runtime accumula-tion throughout training, rather than an advan-tage concentrated in a particular training phase, we record cumulative wall-clock time at 20% intervals for Qwen2.5-1.5B on SimpleRL-Abel-Level3to5. FastGRPO and SpecRoll use the same target checkpoint, training examples and their or-der, GRPO configuration, response limit, reward computation, and hardware environment. The roll-out engine is the only method-level difference. Figure 4 shows that cumulative runtime grows approximately linearly with the number of pro-cessed training examples for both rollout engines. A least-squares linear fit over the five checkpoints gives R2 = 0 .998 for SpecRoll and R2 = 0 .988 
+
+for FastGRPO. SpecRoll remains faster at every observed checkpoint, and the cumulative runtime gap increases from 0.74 hours after 20% of the Model LR Records Rollout gap Buffer Batch Overhead λp                                   
+
+> Qwen2.5-1.5B 8×10 −5256 10 4096 64 1.8% .020 Qwen2.5-3B 7×10 −5256 10 4096 64 1.8% .020 Qwen2.5-7B 5×10 −5256 10 4096 64 1.8% .020 Qwen2.5-14B 3×10 −5256 10 4096 64 1.8% .020 Llama-3.1-8B 4×10 −5256 10 4096 64 1.8% .020
+
+Table 4: Auxiliary-adaptation hyperparameters. Records denotes the maximum number of mature records used per update. 
+
+Figure 4: Cumulative end-to-end runtime as a function of the fraction of training examples processed for Qwen2.5-1.5B on SimpleRL-Abel-Level3to5. Runtime is recorded at 20% intervals from the same matched training run. Both methods exhibit approximately linear cumulative scaling, while SpecRoll remains faster than FastGRPO at every checkpoint. 
+
+data to 4.49 hours after the complete run. Thus, the final throughput advantage is not caused by a short-lived gain or a late-stage timing anomaly. The near-linear traces also make partial-run completion estimates possible, although such esti-mates should be interpreted as approximate rather than exact. Fitting a line to the observations avail-able through 40% of training predicts completion times of 23.53 hours for SpecRoll and 28.19 hours for FastGRPO, compared with the observed 21.41 and 25.90 hours. Using observations through 60% predicts 22.67 and 29.95 hours, respectively. These estimates recover both the ordering and the approximate scale of the final runtimes, but their accuracy can still be affected by changes in re-sponse length, active-batch composition, and the timing of auxiliary updates. 
+
+E Predictive Validity of the Reflex Reliability Gate 
+
+The reliability gate is designed to reuse a stored memory direction only when past delayed feed-back suggests that it will remain useful for future proposals. To test this claim, we run a Reflex-only diagnostic on Qwen2.5-1.5B with SimpleRL-Abel-Level3to5, with auxiliary adaptation dis-abled. We use the first prediction horizon and keep the target model, pretrained proposal heads, can-didate budget, verifier, and training configuration fixed. For each proposal record j, we save the reliabil-ity score and a normalized sketch sj of the mem-ory direction before its verifier error is available. When the record later matures, we obtain the raw [-inf, 0)  
+
+> [0, 0.01)
+> [0.01, 0.03)
+> [0.03, 0.05)
+> [0.05, 0.07)
+> [0.07, 0.1)
+> [0.1, 0.15)
+> [0.15, 0.2)
+> [0.2, inf)
+> Proposal-time gate score
+> 0.35
+> 0.40
+> 0.45
+> 0.50
+> 0.55
+> 0.60
+> 0.65
+> 0.70
+> 0.75
+> Mean raw-error cosine
+> (a) Predictive alignment
+> Mean raw-error cosine
+> Positive-alignment rate
+> [-inf, 0)
+> [0, 0.01)
+> [0.01, 0.03)
+> [0.03, 0.05)
+> [0.05, 0.07)
+> [0.07, 0.1)
+> [0.1, 0.15)
+> [0.15, 0.2)
+> [0.2, inf)
+> Proposal-time gate score
+> 0.45
+> 0.50
+> 0.55
+> 0.60
+> 0.65
+> Mean  restricted KL
+> (b) Counterfactual shadow utility
+> Mean KL
+> Beneficial rate
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> Positive rate
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Beneficial rate
+
+Figure 5: Predictive validity of the proposal-time Reflex reliability score on Qwen2.5-1.5B with SimpleRL-Abel-Level3to5. Panel (a): alignment between the stored memory direction and the verifier error observed after the proposal record matures. Panel (b): restricted-KL improvement from a counterfactual shadow correction. Points show averages within each proposal-time score bin, and the dashed line marks the operational threshold dRel = 0 .
+
+verifier-error direction eraw  
+
+> j
+
+and measure 
+
+craw  
+
+> j
+
+= cos  sj , e raw 
+
+> j
+
+ . (113) A positive value means that the stored memory di-rection predicted the direction of the error revealed later. We also test whether following the stored direc-tion would improve the proposal distribution. For this purpose, we construct a small shadow correc-tion 
+
+zshadow  
+
+> j
+
+= zraw  
+
+> j
+
++ αshadow RMS( zraw  
+
+> j
+
+)
+
+× mj
+
+RMS( mj ) + ϵ , (114) with αshadow = 0 .005 , and compute 
+
+∆KL shadow  
+
+> j
+
+= DKL 
+
+ pS ∥qraw 
+
+> S,j
+
+
+
+− DKL 
+
+
+
+pS ∥qshadow 
+
+> S,j
+
+
+
+. (115) A positive ∆KL shadow  
+
+> j
+
+means that the shadow step moves the proposal distribution closer to the tar-get. This state is used only for analysis and never affects the actual rollout. As shown in Figure 5, proposals in the highest score bin exhibit the strongest subsequent align-ment, reaching a mean cosine of about 0.62 and a positive-alignment rate of about 0.78 . The same bin also produces the largest counterfactual gain, with a mean restricted-KL improvement of about 
+
+0.59 and a beneficial rate close to 0.78 . The low-and intermediate-score bins show smaller differ-ences, while the clearest separation appears for 
+
+Top-k Gen. E2E AAL AR 16 1.43 1.39 1.720 0.089 24 1.44 1.40 1.724 0.090 32 1.35 1.33 1.723 0.087 48 1.46 1.42 1.726 0.093 
+
+64 1.43 1.39 1.722 0.089 
+
+Table 5: Sparse-support sensitivity on Qwen2.5-3B with SimpleRL-Abel-Level3to5. Speedups are relative to matched vanilla GRPO; AR denotes acceptance rate. 
+
+strongly positive scores. These results indicate that the reliability score can identify memory di-rections that are more likely to remain useful when delayed verifier feedback arrives, supporting its use as a conservative trigger for Reflex. 
+
+F Sparse-Support Top-k Ablation 
+
+We vary the support top-k budget in Equation 12 on Qwen2.5-3B with SimpleRL-Abel-Level3to5. The k = 48 row is the setting used in the main re-sult. All other components, including candidate-tree budget and Reflex configuration, are un-changed. The quality diagnostics remain within a narrow range but are no longer flat. Increasing k from 16 to 24 raises AAL by 0.004 and acceptance rate by 0.001; at k = 48 , the gains relative to k = 16 
+
+reach 0.006 AAL and 0.004 acceptance rate. The 
+
+k = 32 run instead drops to 0.087 acceptance rate, and k = 64 returns to the k = 16 acceptance rate. Across the sweep, AAL varies by 0.006 and ac-0 10 20 30 40 50 60 70             
+
+> Training step
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Mean reward
+> Qwen2.5-1.5B GSM8K Raw Reward
+> Vanilla GRPO
+> SpecRoll
+> 010 20 30 40 50 60 70 80 90 100
+> Training step
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Mean reward
+> Qwen2.5-3B GSM8K Raw Reward
+> Vanilla GRPO
+> SpecRoll
+
+Figure 6: Training-reward dynamics on GSM8K. SpecRoll and vanilla GRPO exhibit comparable raw-reward trajectories for Qwen2.5-1.5B and Qwen2.5-3B. 
+
+ceptance rate by 0.006. This suggests that the sup-port budget has a modest, non-monotonic effect on the restricted error geometry and candidate accep-tance. Runtime is likewise non-monotonic. Relative to k = 16 , k = 24 improves end-to-end speed by about 0.7%, and k = 48 by about 2.2%. The 
+
+k = 32 run is approximately 4.3% slower end to end and also has the lowest acceptance rate, while 
+
+k = 64 returns to the k = 16 timing. The k = 48 
+
+configuration is best on both throughput and ac-ceptance diagnostics, although the absolute differ-ences remain small and the intermediate settings are not ordered by support size. We therefore use 
+
+k = 48 in the main experiments because it gives the strongest observed generation speedup, end-to-end speedup, AAL, and acceptance rate in this sweep. The non-monotonic pattern should never-theless be interpreted as a sensitivity result rather than a general scaling law. 
+
+G Training-Reward Dynamics 
+
+SpecRoll and vanilla GRPO on GSM8K. Across both Qwen2.5-1.5B and Qwen2.5-3B, the two methods exhibit comparable reward trajectories and similar overall learning trends. This result in-dicates that replacing the standard rollout proce-dure with SpecRoll does not visibly alter or de-
+
+Dataset Triggers Median Mean Maximum GSM8K 46 0.247 s 0.844 s 12.596 s SimpleLR Abel L3–5 53 0.519 s 0.830 s 2.879 s DAPO Math 54 0.052 s 0.333 s 2.988 s 
+
+Table 6: Frequency and latency of auxiliary updates. 
+
+grade the underlying GRPO optimization dynam-ics. 
+
+H Auxiliary-Update Overhead 
+
+Figure 7 visualizes the latency of individual aux-iliary updates, while Table 6 summarizes their frequency and latency statistics. The auxiliary path is triggered only occasionally, with 46 up-dates on GSM8K, 53 on SimpleLR Abel L3– 5, and 54 on DAPO Math. The median update times are 0.247 s, 0.519 s, and 0.052 s, respec-tively, while the mean remains below 0.85 s for all three datasets. The larger maximum of 12 .596 son GSM8K results from a rare outlier rather than persistent overhead. Overall, auxiliary adaptation introduces sparse and predominantly sub-second computation. 0.0 0.8 1.6 2.4 3.2 
+
+Elapsed time (h) 
+
+0
+
+3
+
+6
+
+9
+
+12 
+
+> Aux update time (s)
+
+(a) GSM8K  
+
+> Updates ( n= 46 )
+> Mean 0.844 s
+> Median 0.247 s
+
+0 3 6 9 12 
+
+Elapsed time (h) 
+
+0.0 
+
+0.8 
+
+1.6 
+
+2.4 
+
+(b) SimpleLR Abel L3-5  
+
+> Updates ( n= 53 )
+> Mean 0.830 s
+> Median 0.519 s
+
+0 4 8 12 16 
+
+Elapsed time (h) 
+
+0.0 
+
+0.8 
+
+1.6 
+
+2.4 
+
+(c) DAPO Math  
+
+> Updates ( n= 54 )
+> Mean 0.333 s
+> Median 0.052 s
+
+Figure 7: Wall-clock latency of triggered auxiliary updates. Each point denotes one update; dashed and dotted lines indicate the mean and median latency, respectively.
