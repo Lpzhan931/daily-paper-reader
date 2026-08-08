@@ -6,56 +6,49 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-07
-- 运行时间：2026-08-07 20:20:22 UTC
+- 最新运行日期：2026-08-08
+- 运行时间：2026-08-08 20:22:53 UTC
 - 运行状态：成功
-- 本次总论文数：12
+- 本次总论文数：9
 - 精读区：6
-- 速读区：6
+- 速读区：3
 
 ### 今日简报（AI）
-今日推荐12篇论文，含6篇精读与6篇速读，聚焦推测解码与视觉token优化。最值得关注两篇9.0分精读：无需训练的自我推测解码，以及块并行推测解码的局部不确定性修复。建议优先精读这两篇，速读可留意视觉token剪枝与实时VLA推理。
-- 详情：[/202608/07/README](/202608/07/README)
+今日精读聚焦投机解码优化，9篇论文中6篇精读，重点覆盖块并行与近似解码方案。  
+最值得看的是两篇9分工作：《CURE》用局部不确定性修复提升块并行解码质量，《Approximate Speculative Decoding》探索近似加速路径。  
+建议优先精读这两篇高分论文，再结合速读中的树形半自回归drafting方法，可系统把握投机解码的前沿改进思路。
+- 详情：[/202608/08/README](/202608/08/README)
 
 ### 精读区论文标签
-1. [A Sparse Glimpse of the Whole: Train-Free Self-Speculative Decoding](/202608/07/2607.27735v1-a-sparse-glimpse-of-the-whole-train-free-self-speculative-decoding)  
+1. [CURE: Local Uncertainty Repair for Block-Parallel Speculative Decoding](/202608/08/2608.00531v1-cure-local-uncertainty-repair-for-block-parallel-speculative-decoding)  
    标签：评分：9.0/10、query:llm
-   evidence：免训练自投机解码，结合稀疏可召回KV缓存加速大语言模型推理
-2. [CURE: Local Uncertainty Repair for Block-Parallel Speculative Decoding](/202608/07/2608.00531v1-cure-local-uncertainty-repair-for-block-parallel-speculative-decoding)  
+   evidence：面向块并行投机解码，在验证阶段定位高不确定性令牌并动态修复，降低拒绝率、提升加速比
+2. [Approximate Speculative Decoding](/202608/08/2608.03447v1-approximate-speculative-decoding)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：提出免训练的近似投机解码验证器，采用预算化最长前缀选择，即一种宽松验证策略
+3. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/08/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
    标签：评分：9.0/10、query:llm
-   evidence：面向LLM快速推理的投机解码，结合不确定性驱动的修复与验证开销控制
-3. [Bole: Efficient Tree Speculation for Hybrid-Attention Language Models](/202608/07/2608.01651v1-bole-efficient-tree-speculation-for-hybrid-attention-language-models)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：面向混合注意力语言模型的树投机解码与内核-运行时协同设计
-4. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/07/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
-   标签：评分：9.0/10、query:llm-sd
-   evidence：面向随机非贪心采样的依赖块草稿投机解码，提升大模型推理加速
-5. [AOSpec: Action and Observation Co-Speculation for Low-Latency Agent Serving](/202608/07/2608.00881v1-aospec-action-and-observation-co-speculation-for-low-latency-agent-serving)  
+   evidence：面向注意力漂移鲁棒的长上下文解码的可恢复量化KV驱逐，属于大语言模型KV缓存优化核心方向
+4. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/08/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
+   标签：评分：9.0/10、query:llm
+   evidence：面向随机投机解码的依赖块草稿生成，核心方法用于大语言模型推理加速
+5. [AOSpec: Action and Observation Co-Speculation for Low-Latency Agent Serving](/202608/08/2608.00881v1-aospec-action-and-observation-co-speculation-for-low-latency-agent-serving)  
    标签：评分：8.0/10、query:llm
-   evidence：面向LLM智能体的投机解码方法，降低服务延迟
-6. [From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding](/202608/07/2608.02123v1-from-chains-to-trees-parent-conditioned-drafting-for-semi-autoregressive-speculative-decoding)  
-   标签：评分：8.0/10、query:llm-sd
-   evidence：改进LLM投机解码中草稿的生成与验证存活率，属于半自回归投机解码核心方法
+   evidence：面向低延迟LLM智能体服务的无损动作与观察协同投机，直接涉及投机解码与推理加速
+6. [Bole: Efficient Tree Speculation for Hybrid-Attention Language Models](/202608/08/2608.01651v1-bole-efficient-tree-speculation-for-hybrid-attention-language-models)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向混合注意力LLM的树投机解码协同设计，优化验证延迟与内存开销
 
 ### 速读区论文标签
-1. [DiffPrune: differentiable information throttling for token pruning in vision-language models](/202608/07/2608.01985v1-diffprune-differentiable-information-throttling-for-token-pruning-in-vision-language-models)  
+1. [Coverage-Driven Adaptive Keyframe Selection for Video Understanding](/202608/08/2608.00714v1-coverage-driven-adaptive-keyframe-selection-for-video-understanding)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：可微信息节流用于VLM视觉token剪枝，降低计算成本
-2. [RUTA: Principled Visual Token Allocation via Rate-Utility Optimization](/202608/07/2608.04132v1-ruta-principled-visual-token-allocation-via-rate-utility-optimization)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：面向VLM推理加速的视觉token分配
-3. [Deltoris: Enabling Real-time VLA Inference in Embodied AI via Bit-level Sparsity and Speculative Inference](/202608/07/2608.04428v1-deltoris-enabling-real-time-vla-inference-in-embodied-ai-via-bit-level-sparsity-and-speculative-inference)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：明确使用投机推理与比特级稀疏性加速VLA推理，符合视觉语言模型推理加速要求
-4. [DIVE: Dynamic Iterative Visual Evidence Construction for Efficient Vision-Language Models](/202608/07/2608.04496v1-dive-dynamic-iterative-visual-evidence-construction-for-efficient-vision-language-models)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：通过动态视觉token剪枝加速视觉语言模型推理
-5. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/07/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
+   evidence：通过基于覆盖度和相关性的自适应关键帧选择，降低大型视觉语言模型的推理开销
+2. [From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding](/202608/08/2608.02123v1-from-chains-to-trees-parent-conditioned-drafting-for-semi-autoregressive-speculative-decoding)  
    标签：评分：8.0/10、query:llm
-   evidence：直接针对LLM推理的KV缓存内存优化，提出可恢复的驱逐策略
-6. [ParVL: Parallel Scaling and Expandable Compute Allocation for Multimodal LLMs](/202608/07/2608.04010v1-parvl-parallel-scaling-and-expandable-compute-allocation-for-multimodal-llms)  
+   evidence：面向LLM推理加速的投机解码方法，使用父条件草稿树
+3. [Distill What the Student Can See: Fisher-Projected On-Policy Distillation for Vision-Language Models](/202608/08/2608.01263v1-distill-what-the-student-can-see-fisher-projected-on-policy-distillation-for-vision-language-models)  
    标签：评分：6.0/10、query:vlm-spec
-   evidence：面向多模态大模型的并行扩展与计算分配，降低推理开销
+   evidence：VLM生成中的token级师生分布匹配，与投机解码草稿模型训练相关
 
 
 <div class="dpr-home-promo-card">
