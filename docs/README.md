@@ -6,49 +6,45 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-08
-- 运行时间：2026-08-08 20:22:53 UTC
+- 最新运行日期：2026-08-09
+- 运行时间：2026-08-09 19:37:37 UTC
 - 运行状态：成功
-- 本次总论文数：9
+- 本次总论文数：7
 - 精读区：6
-- 速读区：3
+- 速读区：1
 
 ### 今日简报（AI）
-今日精读聚焦投机解码优化，9篇论文中6篇精读，重点覆盖块并行与近似解码方案。  
-最值得看的是两篇9分工作：《CURE》用局部不确定性修复提升块并行解码质量，《Approximate Speculative Decoding》探索近似加速路径。  
-建议优先精读这两篇高分论文，再结合速读中的树形半自回归drafting方法，可系统把握投机解码的前沿改进思路。
-- 详情：[/202608/08/README](/202608/08/README)
+今日精读聚焦混合注意力模型的高效树投机与长上下文量化KV驱逐，速读关注三元LLM的查找表加速，共7篇论文。
+
+最值得看的两大方向：Bole通过树投机显著提升混合注意力模型的解码效率；QEvict以可恢复量化KV驱逐应对注意力漂移，兼顾长上下文性能与显存占用。
+
+下一步建议普通读者优先关注KV缓存压缩技术，这对实际部署长上下文LLM的显存与速度优化最直接。
+- 详情：[/202608/09/README](/202608/09/README)
 
 ### 精读区论文标签
-1. [CURE: Local Uncertainty Repair for Block-Parallel Speculative Decoding](/202608/08/2608.00531v1-cure-local-uncertainty-repair-for-block-parallel-speculative-decoding)  
+1. [Bole: Efficient Tree Speculation for Hybrid-Attention Language Models](/202608/09/2608.01651v1-bole-efficient-tree-speculation-for-hybrid-attention-language-models)  
    标签：评分：9.0/10、query:llm
-   evidence：面向块并行投机解码，在验证阶段定位高不确定性令牌并动态修复，降低拒绝率、提升加速比
-2. [Approximate Speculative Decoding](/202608/08/2608.03447v1-approximate-speculative-decoding)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：提出免训练的近似投机解码验证器，采用预算化最长前缀选择，即一种宽松验证策略
-3. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/08/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
+   evidence：面向混合注意力大语言模型的树结构投机解码，直接加速LLM推理
+2. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/09/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
    标签：评分：9.0/10、query:llm
-   evidence：面向注意力漂移鲁棒的长上下文解码的可恢复量化KV驱逐，属于大语言模型KV缓存优化核心方向
-4. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/08/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向随机投机解码的依赖块草稿生成，核心方法用于大语言模型推理加速
-5. [AOSpec: Action and Observation Co-Speculation for Low-Latency Agent Serving](/202608/08/2608.00881v1-aospec-action-and-observation-co-speculation-for-low-latency-agent-serving)  
+   evidence：面向注意力漂移的长上下文解码的量化KV驱逐方法，直接涉及LLM推理的KV缓存优化
+3. [CURE: Local Uncertainty Repair for Block-Parallel Speculative Decoding](/202608/09/2608.00531v1-cure-local-uncertainty-repair-for-block-parallel-speculative-decoding)  
    标签：评分：8.0/10、query:llm
-   evidence：面向低延迟LLM智能体服务的无损动作与观察协同投机，直接涉及投机解码与推理加速
-6. [Bole: Efficient Tree Speculation for Hybrid-Attention Language Models](/202608/08/2608.01651v1-bole-efficient-tree-speculation-for-hybrid-attention-language-models)  
+   evidence：面向并行块投机解码的局部不确定性修复，降低拒绝率并提升加速，直接推进大模型推理加速。
+4. [AOSpec: Action and Observation Co-Speculation for Low-Latency Agent Serving](/202608/09/2608.00881v1-aospec-action-and-observation-co-speculation-for-low-latency-agent-serving)  
    标签：评分：8.0/10、query:llm
-   evidence：面向混合注意力LLM的树投机解码协同设计，优化验证延迟与内存开销
+   evidence：面向低延迟LLM智能体服务的动作与观察协同投机
+5. [From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding](/202608/09/2608.02123v1-from-chains-to-trees-parent-conditioned-drafting-for-semi-autoregressive-speculative-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向半自回归投机解码的父条件草稿树，提高草稿存活率并加速大模型推理。
+6. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/09/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向随机采样的投机解码，通过依赖块草稿缓解接受长度退化，推动大模型推理加速。
 
 ### 速读区论文标签
-1. [Coverage-Driven Adaptive Keyframe Selection for Video Understanding](/202608/08/2608.00714v1-coverage-driven-adaptive-keyframe-selection-for-video-understanding)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：通过基于覆盖度和相关性的自适应关键帧选择，降低大型视觉语言模型的推理开销
-2. [From Chains to Trees: Parent-Conditioned Drafting for Semi-Autoregressive Speculative Decoding](/202608/08/2608.02123v1-from-chains-to-trees-parent-conditioned-drafting-for-semi-autoregressive-speculative-decoding)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向LLM推理加速的投机解码方法，使用父条件草稿树
-3. [Distill What the Student Can See: Fisher-Projected On-Policy Distillation for Vision-Language Models](/202608/08/2608.01263v1-distill-what-the-student-can-see-fisher-projected-on-policy-distillation-for-vision-language-models)  
-   标签：评分：6.0/10、query:vlm-spec
-   evidence：VLM生成中的token级师生分布匹配，与投机解码草稿模型训练相关
+1. [Unified Lookup-Table Inference with Signed-Digit K/V Caches for Ternary LLMs](/202608/09/2608.03229v1-unified-lookup-table-inference-with-signed-digit-kv-caches-for-ternary-llms)  
+   标签：评分：7.0/10、query:llm
+   evidence：面向三值大语言模型的高效查找表推理与带符号数字键值缓存，降低注意力内存与计算开销
 
 
 <div class="dpr-home-promo-card">
