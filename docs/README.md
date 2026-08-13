@@ -6,47 +6,41 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-12
-- 运行时间：2026-08-12 20:28:43 UTC
+- 最新运行日期：2026-08-13
+- 运行时间：2026-08-13 21:13:19 UTC
 - 运行状态：成功
-- 本次总论文数：9
+- 本次总论文数：7
 - 精读区：6
-- 速读区：3
+- 速读区：1
 
 ### 今日简报（AI）
-今日精选9篇论文，聚焦推测解码与KV缓存优化。最值得关注DBLAST的依赖块草稿方案和OasisKV的前瞻稀疏预取技术，显著提升解码效率与缓存扩展。建议进一步探索KV缓存机制在视觉语言模型中的适配与应用。
-- 详情：[/202608/12/README](/202608/12/README)
+今日精读两篇高分论文，并速读一篇扩散模型解码新方法，共推荐7篇文献。最值得关注的是KV缓存稀疏预取技术（OasisKV，9.0分）与嵌套语言模型套件（Matryoshka，9.0分），分别解决长上下文推理效率和多粒度表示学习。建议优先阅读这两篇精读论文，速读论文可作为扩散模型并行解码的补充参考。
+- 详情：[/202608/13/README](/202608/13/README)
 
 ### 精读区论文标签
-1. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/12/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
+1. [OasisKV: Scaling In-Decode KV Cache Beyond HBM with Lookahead Sparse Prefetching](/202608/13/2608.08097v1-oasiskv-scaling-in-decode-kv-cache-beyond-hbm-with-lookahead-sparse-prefetching)  
    标签：评分：9.0/10、query:llm
-   evidence：面向LLM随机投机解码的依赖块草拟方法
-2. [OasisKV: Scaling In-Decode KV Cache Beyond HBM with Lookahead Sparse Prefetching](/202608/12/2608.08097v1-oasiskv-scaling-in-decode-kv-cache-beyond-hbm-with-lookahead-sparse-prefetching)  
+   evidence：面向LLM解码吞吐的KV缓存扩展与优化管理
+2. [Matryoshka Language Model Suites](/202608/13/2608.09703v1-matryoshka-language-model-suites)  
    标签：评分：9.0/10、query:llm
-   evidence：面向LLM推理的KV缓存管理，通过前视稀疏预取将缓存扩展到HBM之外
-3. [LibraSpec: Dynamic Diffusion-Based Speculative Decoding via Marginal-Gain-Driven Optimization](/202608/12/2608.08721v1-libraspec-dynamic-diffusion-based-speculative-decoding-via-marginal-gain-driven-optimization)  
+   evidence：内置草稿模型的嵌套模型系列，面向投机解码并降低推理成本
+3. [MemSpec: Memory-Aware Runtime for Adaptive Draft Scheduling in Speculative Decoding on Edge Devices](/202608/13/2608.10362v1-memspec-memory-aware-runtime-for-adaptive-draft-scheduling-in-speculative-decoding-on-edge-devices)  
    标签：评分：9.0/10、query:llm
-   evidence：面向大语言模型推理加速的动态扩散式投机解码
-4. [MemSpec: Memory-Aware Runtime for Adaptive Draft Scheduling in Speculative Decoding on Edge Devices](/202608/12/2608.10362v1-memspec-memory-aware-runtime-for-adaptive-draft-scheduling-in-speculative-decoding-on-edge-devices)  
-   标签：评分：9.0/10、query:llm
-   evidence：用于投机解码中自适应草稿调度的内存感知运行时
-5. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/12/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
+   evidence：面向边缘设备投机解码的自适应草稿调度，提升大语言模型推理吞吐
+4. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/13/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
    标签：评分：8.0/10、query:llm
-   evidence：面向注意力漂移鲁棒长上下文解码的可恢复量化KV驱逐方法
-6. [Not All Visual Tokens Are Equally Safe to Remove:Consequence-Sensitive Visual Token Compression](/202608/12/2608.09176v1-not-all-visual-tokens-are-equally-safe-to-removeconsequence-sensitive-visual-token-compression)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：面向VLM推理效率的后果敏感视觉标记压缩
+   evidence：面向高效LLM推理的KV缓存逐出与量化，直接匹配KV缓存优化需求
+5. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/13/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向大语言模型随机投机解码的相关块草稿生成
+6. [LibraSpec: Dynamic Diffusion-Based Speculative Decoding via Marginal-Gain-Driven Optimization](/202608/13/2608.08721v1-libraspec-dynamic-diffusion-based-speculative-decoding-via-marginal-gain-driven-optimization)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向大语言模型推理加速的动态扩散式投机解码
 
 ### 速读区论文标签
-1. [When Vision Becomes Text: Visual Token Pruning via Cross-Modal Residual Guidance in VLMs](/202608/12/2608.10489v1-when-vision-becomes-text-visual-token-pruning-via-cross-modal-residual-guidance-in-vlms)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：视觉令牌剪枝以降低视觉语言模型推理成本
-2. [Neural Introspection Gating for Adaptive KV-Cache Reuse in Vision-Language-Action Models](/202608/12/2608.10824v1-neural-introspection-gating-for-adaptive-kv-cache-reuse-in-vision-language-action-models)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：通过神经内省门控的KV缓存自适应复用来加速视觉-语言-动作模型推理
-3. [Dynamic Context Adapters: Efficiently Infusing History into Vision-and-Language Models](/202608/12/2608.10525v1-dynamic-context-adapters-efficiently-infusing-history-into-vision-and-language-models)  
-   标签：评分：7.0/10、query:vlm-spec
-   evidence：通过动态压缩高效地将历史信息注入视觉语言模型
+1. [Ripple-Pivot Search: Active Parallel Decoding for Diffusion Large Language Models](/202608/13/2608.11742v1-ripple-pivot-search-active-parallel-decoding-for-diffusion-large-language-models)  
+   标签：评分：7.0/10、query:llm
+   evidence：面向扩散LLM的并行解码加速，提升推理效率
 
 
 <div class="dpr-home-promo-card">
