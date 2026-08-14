@@ -6,41 +6,53 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-13
-- 运行时间：2026-08-13 21:13:19 UTC
+- 最新运行日期：2026-08-14
+- 运行时间：2026-08-14 20:52:35 UTC
 - 运行状态：成功
-- 本次总论文数：7
-- 精读区：6
-- 速读区：1
+- 本次总论文数：11
+- 精读区：7
+- 速读区：4
 
 ### 今日简报（AI）
-今日精读两篇高分论文，并速读一篇扩散模型解码新方法，共推荐7篇文献。最值得关注的是KV缓存稀疏预取技术（OasisKV，9.0分）与嵌套语言模型套件（Matryoshka，9.0分），分别解决长上下文推理效率和多粒度表示学习。建议优先阅读这两篇精读论文，速读论文可作为扩散模型并行解码的补充参考。
-- 详情：[/202608/13/README](/202608/13/README)
+今日聚焦推测解码与KV缓存优化，11篇论文中7篇精读、4篇速读。最值得关注的两篇9分工作：《DBLAST》改进随机推测解码，而《OasisKV》通过前瞻稀疏预取突破HBM限制。建议优先精读这两篇，并留意边缘设备上的内存自适应推测调度方向。
+- 详情：[/202608/14/README](/202608/14/README)
 
 ### 精读区论文标签
-1. [OasisKV: Scaling In-Decode KV Cache Beyond HBM with Lookahead Sparse Prefetching](/202608/13/2608.08097v1-oasiskv-scaling-in-decode-kv-cache-beyond-hbm-with-lookahead-sparse-prefetching)  
+1. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/14/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
    标签：评分：9.0/10、query:llm
-   evidence：面向LLM解码吞吐的KV缓存扩展与优化管理
-2. [Matryoshka Language Model Suites](/202608/13/2608.09703v1-matryoshka-language-model-suites)  
+   evidence：面向LLM随机投机解码的依赖块草稿方法
+2. [OasisKV: Scaling In-Decode KV Cache Beyond HBM with Lookahead Sparse Prefetching](/202608/14/2608.08097v1-oasiskv-scaling-in-decode-kv-cache-beyond-hbm-with-lookahead-sparse-prefetching)  
    标签：评分：9.0/10、query:llm
-   evidence：内置草稿模型的嵌套模型系列，面向投机解码并降低推理成本
-3. [MemSpec: Memory-Aware Runtime for Adaptive Draft Scheduling in Speculative Decoding on Edge Devices](/202608/13/2608.10362v1-memspec-memory-aware-runtime-for-adaptive-draft-scheduling-in-speculative-decoding-on-edge-devices)  
+   evidence：通过KV缓存与HBM解耦及前瞻稀疏预取优化大语言模型推理
+3. [LibraSpec: Dynamic Diffusion-Based Speculative Decoding via Marginal-Gain-Driven Optimization](/202608/14/2608.08721v1-libraspec-dynamic-diffusion-based-speculative-decoding-via-marginal-gain-driven-optimization)  
    标签：评分：9.0/10、query:llm
-   evidence：面向边缘设备投机解码的自适应草稿调度，提升大语言模型推理吞吐
-4. [QEvict: Recoverable Quantized KV Eviction for Attention-Drift-Robust Long-Context Decoding](/202608/13/2608.05326v1-qevict-recoverable-quantized-kv-eviction-for-attention-drift-robust-long-context-decoding)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向高效LLM推理的KV缓存逐出与量化，直接匹配KV缓存优化需求
-5. [DBLAST: Dependent Block Drafting for Stochastic Speculative Decoding](/202608/13/2608.05448v1-dblast-dependent-block-drafting-for-stochastic-speculative-decoding)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向大语言模型随机投机解码的相关块草稿生成
-6. [LibraSpec: Dynamic Diffusion-Based Speculative Decoding via Marginal-Gain-Driven Optimization](/202608/13/2608.08721v1-libraspec-dynamic-diffusion-based-speculative-decoding-via-marginal-gain-driven-optimization)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向大语言模型推理加速的动态扩散式投机解码
+   evidence：面向扩散草稿模型的LLM投机解码动态推测长度优化
+4. [DistillCache: KL-Guided Adaptive KV-Cache Eviction for Memory-Efficient LLM Inference](/202608/14/2608.08878v1-distillcache-kl-guided-adaptive-kv-cache-eviction-for-memory-efficient-llm-inference)  
+   标签：评分：9.0/10、query:llm
+   evidence：基于强化学习的KV缓存逐出，降低LLM推理内存，符合大模型高效推理主题
+5. [FlashDrive: Flash Vision-Language-Action Inference for Autonomous Driving](/202608/14/2608.12932v1-flashdrive-flash-vision-language-action-inference-for-autonomous-driving)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：VLA推理加速框架，针对串行token生成等多个瓶颈
+6. [SPADE: Speculative Decoding for Precise and Low Cost Distributed Edge Cloud Inference](/202608/14/2608.13076v1-spade-speculative-decoding-for-precise-and-low-cost-distributed-edge-cloud-inference)  
+   标签：评分：9.0/10、query:llm
+   evidence：面向大语言模型高效推理的边云协同投机解码框架
+7. [DARTree: Speculative Diffusion Decoding with Autoregressive Draft Trees](/202608/14/2608.13524v1-dartree-speculative-diffusion-decoding-with-autoregressive-draft-trees)  
+   标签：评分：9.0/10、query:llm
+   evidence：基于自回归草稿树的免训练投机解码方法，用于加速大语言模型推理
 
 ### 速读区论文标签
-1. [Ripple-Pivot Search: Active Parallel Decoding for Diffusion Large Language Models](/202608/13/2608.11742v1-ripple-pivot-search-active-parallel-decoding-for-diffusion-large-language-models)  
-   标签：评分：7.0/10、query:llm
-   evidence：面向扩散LLM的并行解码加速，提升推理效率
+1. [MemSpec: Memory-Aware Runtime for Adaptive Draft Scheduling in Speculative Decoding on Edge Devices](/202608/14/2608.10362v1-memspec-memory-aware-runtime-for-adaptive-draft-scheduling-in-speculative-decoding-on-edge-devices)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向边缘设备投机解码的自适应草稿调度内存感知运行时
+2. [Reduced Matrix Multiplication: Input-Adaptive Matrix-Product Reduction for LLM Inference](/202608/14/2608.13426v1-reduced-matrix-multiplication-input-adaptive-matrix-product-reduction-for-llm-inference)  
+   标签：评分：8.0/10、query:llm
+   evidence：输入自适应的矩阵乘法缩减，无需训练即可加速LLM推理
+3. [Ripple-Pivot Search: Active Parallel Decoding for Diffusion Large Language Models](/202608/14/2608.11742v1-ripple-pivot-search-active-parallel-decoding-for-diffusion-large-language-models)  
+   标签：评分：6.0/10、query:llm
+   evidence：面向扩散大语言模型的并行解码加速
+4. [Alignment Drift in Single-Model Speculative Decoding for ASR: Mechanism, Correction, and Cost](/202608/14/2608.12703v1-alignment-drift-in-single-model-speculative-decoding-for-asr-mechanism-correction-and-cost)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：投机解码的接受与纠正机制
 
 
 <div class="dpr-home-promo-card">
