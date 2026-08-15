@@ -1,0 +1,753 @@
+Title: Reduced Matrix Multiplication: Input-Adaptive Matrix-Product Reduction for LLM Inference
+
+URL Source: https://arxiv.org/pdf/2608.13426v1
+
+Published Time: Fri, 14 Aug 2026 01:22:14 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# Reduced Matrix Multiplication: Input-Adaptive Matrix-Product Reduction for LLM Inference 
+
+Zixuan Lan 
+
+University of Chicago 
+
+> zixuanlan@uchicago.edu
+
+Yanhong Li 
+
+Independent Researcher 
+
+> yanhong.lbh@gmail.com
+
+Jiawei Zhou 
+
+Stony Brook University 
+
+> jiawei.zhou.1@stonybrook.edu
+
+Abstract 
+
+Transformer-based language models achieve strong performance but incur substantial in-ference cost due to repeated high-dimensional matrix multiplications. We propose Reduced Matrix Multiplication (RMM), a training-free, input-adaptive inference method that re-duces Transformer matrix products by select-ing informative slices along their contrac-tion dimensions, without modifying model weights. Under a simple retention-ratio con-trol, RMM provides a smooth and predictable accuracy–efficiency trade-off.Across language models ranging from 1B to 70B parame-ters, we find that reduction tolerance depends on the model family, task, component, and retention ratio, although it often improves with model scale. Under moderate reduc-tion, RMM remains robust across the evalu-ated discriminative, autoregressive-generation, and long-context settings. We further show that the same principle extends to multimodal vision–language inference. Mechanistic ab-lations reveal a structural asymmetry within Transformers: attention-side computations are substantially more reducible than MLP compo-nents. Finally, wall-clock benchmarks with custom kernels on an NVIDIA A100 show that these computational savings can trans-late into practical runtime gains, especially at longer sequence lengths. Together, these re-sults position RMM as a scalable direction for input-adaptive inference-time optimization. Code and project resources will be available at 
+
+https://github.com/Zesearch/rmm-llm .
+
+1 Introduction 
+
+Transformer models (Vaswani et al., 2017) con-tinue to improve with scale (Kaplan et al., 2020), but their inference cost also grows rapidly. As model size increases, efficient inference becomes increasingly important in practice. A major source of this cost is the repeated high-dimensional matrix products in attention and feed-forward layers. This raises a basic question: during inference, do all in-dices along the shared multiplication axes of these matrix products need to be evaluated for every in-put, or can part of this computation be reduced adaptively while preserving model behavior? Prior work has explored redundant computation in Transformer inference from several angles (Liu et al., 2021; Peng et al., 2023; Sajjad et al., 2023). One line of work simplifies model computation through structured pruning, low-rank approxima-tion, or dimension reduction (Sun et al., 2024; Ma et al., 2023; Frantar and Alistarh, 2023; Ashkboos et al., 2024; Gao et al., 2024). Another line of work reduces context-level redundancy through token compression, KV-cache management, or decoding-time scheduling (Li et al., 2023b; Pan et al., 2024; Zhang et al., 2023; Xiao et al., 2024; Fu et al., 2025; Shah et al., 2024; Yuan et al., 2025). These methods reduce inference cost by modifying fixed model structures, shortening inputs or caches, or changing execution flow, but they do not directly ask whether the contracted computation inside each Transformer matrix product can be reduced adap-tively for the current input. A closely related direc-tion exploits activation sparsity by skipping small-magnitude activation entries during inference (Liu et al., 2025; Lee et al., 2024). Although such meth-ods also use input-dependent activation informa-tion, their primary object is the sparsification of activation tensors or hidden states. Our focus is dif-ferent: rather than sparsifying hidden states them-selves, we reduce the shared multiplication axis of each matrix product. Depending on the opera-tion, this axis may correspond to hidden channels in linear or MLP projections, attention-head fea-ture dimensions in attention-score computation, or token positions in the attention-value product. This framing distinguishes RMM from fixed compo-nent pruning, activation-state sparsification, and token pruning: the goal is to reduce the contracted computation performed by each matrix product at arXiv:2608.13426v1 [cs.LG] 13 Aug 2026 inference time. In this work, we propose Reduced Matrix Mul-tiplication (RMM), a training-free, input-adaptive method for Transformer inference. Rather than ex-ecuting the full matrix products in attention and MLP layers, RMM dynamically selects and com-putes informative indices along the shared multi-plication axis of each product, without modifying model weights. Beyond acceleration, RMM pro-vides a controllable way to reduce computation through a simple retention ratio, enabling a system-atic study of redundancy in Transformer inference. Across models ranging from 1B to 70B parame-ters and diverse downstream tasks, we observe a general trend that larger models tolerate more ag-gressive reduction, although reduction robustness remains model- and task-dependent. We further observe a clear structural asymmetry within Trans-formers: attention-side computations are substan-tially more reducible, whereas MLP components are much more sensitive to reduction. We also show that RMM extends to multimodal vision–language inference, and implement Triton kernels to verify that the reduced matrix products can translate into practical wall-clock speedups. 
+
+2 Related Work 
+
+Prior work has shown that Transformer inference contains substantial redundancy across neurons, layers, attention heads, and larger structural units: models can often tolerate pruning or reduction while preserving performance (Peng et al., 2023; Sajjad et al., 2023). These findings suggest that not all inference-time computation is equally indis-pensable. One major direction reduces computation by modifying or compressing model structure, includ-ing structured pruning, unstructured pruning, low-rank approximation, and dimension reduction (Sun et al., 2024; Ma et al., 2023; Frantar and Alistarh, 2023; Ashkboos et al., 2024; Gao et al., 2024). Such methods typically determine the reduction pattern before inference and operate on a fixed model structure, answering which parts of the model can be removed or compressed in advance rather than whether computation should vary with the current input. Another direction reduces redundancy in the input context, cache, attention pattern, or execu-tion process through token compression, KV-cache management, decoding-time skipping, sparse at-tention, efficient attention kernels, or scheduling optimization (Li et al., 2023b; Pan et al., 2024; Zhang et al., 2023; Xiao et al., 2024; Shah et al., 2024; Yuan et al., 2025). These methods can re-duce latency or memory overhead, especially in long-context settings, but they mainly act on inputs, cached tokens, attention patterns, or execution flow rather than directly reducing the high-dimensional matrix products inside attention and feed-forward layers. Closely related to our work are training-free activation-sparsity methods, including TEAL (Liu et al., 2025) and CATS (Lee et al., 2024), which skip or mask low-magnitude activation entries during inference. These methods are also input-dependent and often training-free. For linear and MLP projections, RMM shares a related mecha-nism with activation sparsity, since both use the current activations to retain a subset of input di-mensions. The main distinction lies in formulation and scope: activation-sparsity methods define spar-sity over activation entries supplied to projection layers, whereas RMM defines reduction over the shared contraction axis of a general matrix product. This matrix-product formulation applies not only to linear and MLP projections, but also to attention-internal products such as QK ⊤ and P V , where the contracted axes correspond to attention-head fea-ture dimensions and token positions, respectively. Thus, RMM overlaps with activation sparsity in the projection setting while extending the same re-duction principle to a broader set of Transformer matrix products. Our work is also related to classical random-ized approximate matrix multiplication (Drineas et al., 2006), which approximates a matrix prod-uct by sampling column-row pairs according to importance distributions. Such estimators can in principle be used within a single Transformer for-ward pass. However, under a fixed reduction bud-get, stochastic sampling introduces per-instance approximation variance; reducing this variance gen-erally requires more sampled pairs, which weak-ens the achievable computational savings. RMM adopts the same matrix-product perspective while using deterministic, activation-aware index selec-tion along the shared multiplication axis, yield-ing predictable reduced products whose effects we evaluate across Transformer components. Overall, RMM takes a direct computational perspective: it reduces matrix products themselves. 3 Methodology 
+
+3.1 Preliminaries 
+
+Transformer inference is mainly composed of matrix multiplications in self-attention and feed-forward networks (MLPs). Let the input hid-den states at layer l be X(l) ∈ RL×d, where L
+
+is the sequence length and d is the hidden di-mension. In self-attention, the input is linearly projected to queries, keys, and values as Q =
+
+X(l)WQ, K = X(l)WK , and V = X(l)WV ,where WQ, W K , W V ∈ Rd×dh , and dh is the fea-ture dimension of each attention head. Attention scores are computed by QK ⊤, and the output is ob-tained by softmax( QK ⊤)V . Similarly, the MLP block consists of large linear transformations be-tween activations and weight matrices. Although these computations arise in different modules, their core can be written in the unified form Y = AB ,where A ∈ Rn×d denotes the activation matrix de-termined by the current input, B ∈ Rd×m denotes a weight matrix or intermediate representation, and 
+
+Y ∈ Rn×m is the output. 
+
+3.2 Reduced Matrix Multiplication 
+
+Classical approximate matrix multiplication estab-lishes that the product AB can be approximated via Monte Carlo sampling: one repeatedly draws column-row pairs from the shared dimension ac-cording to a probability distribution derived from both matrices, rescales them, and averages over independent draws to obtain a low-error estimate in expectation (Drineas et al., 2006). However, Trans-former inference performs only a single forward pass per input, leaving no opportunity to average over repeated samples, so such randomized estima-tors cannot be directly applied with reliable per-instance quality. This motivates a deterministic, input-adaptive approach. Based on the unified ma-trix multiplication form above, we define Reduced Matrix Multiplication(RMM) as follows. For a matrix product Y = AB , where A ∈ Rn×d and 
+
+B ∈ Rd×m, RMM selects an index set I ⊆ [d]
+
+with |I| = ⌈ρd ⌉, where ρ ∈ (0 , 1] is a user-controlled retention ratio, and computes 
+
+RMM ρ(A, B ) ≜ A:,I BI,:.
+
+Activation-aware dimension selection. To se-lect I, we assign each feature dimension j ∈ [d]
+
+an importance score sj ≜ ∥A:,j ∥2, which mea-sures the magnitude of feature j under the cur-rent input. Given a retention ratio ρ, we select 
+
+I = TopK( {sj }dj=1 , ⌈ρd ⌉). This procedure is fully deterministic. Since the selection depends on the current activations, the resulting subspace may vary across inputs, layers, attention heads, and de-coding steps. RMM adapts its computation to each input by selecting dimensions based on current ac-tivation magnitudes. This choice is theoretically grounded: we prove in Appendix E.1 that TopK selection by column norm is minimax optimal, min-imizing the worst-case approximation error over all possible B at any given retention budget. Our ablation experiments (Section 6) further confirm that both dynamic selection and activation-aware scoring are essential to the effectiveness of RMM. 
+
+3.3 Applying RMM to Attention and MLPs 
+
+We apply RMM to Attention and MLP layers as follows (Figure 1). 
+
+Attention. Consider a single attention head with queries Q ∈ RLq ×dh , keys K ∈ RLk ×dh ,and values V ∈ RLk ×dh . We compute fea-ture scores sj = ∥Q:,j ∥2 and select I =TopK( {sj }dh
+
+> j=1
+
+, ⌈ρddh⌉), yielding reduced atten-tion scores eS = 1√dh
+
+Q:,I K⊤ 
+
+> :,I
+
+. Attention weights are then obtained as P = softmax( eS + M ), where 
+
+M denotes the optional causal or attention mask. For grouped-query attention, dimension selection is performed per head on Q, with the corresponding dimensions gathered from the shared K and V ten-sors. We further optionally sparsify the attention– value multiplication P V over the token dimension by computing token scores at = ∥P:,t ∥2, select-ing T = TopK( {at}Lk
+
+> t=1
+
+, ⌈ρtLk⌉), and evaluating 
+
+eO = P:,T VT ,:.
+
+MLP and linear projections. Given activations 
+
+X ∈ RL×d and weights W ∈ Rd×d′
+
+, we compute feature scores sj = ∥X:,j ∥2, select 
+
+I = TopK( {sj }dj=1 , ⌈ρdd⌉), and evaluate eY =
+
+X:,I WI,:. The same rule applies to linear projec-tions as well as to feed-forward layers. 
+
+3.4 Complexity 
+
+For a matrix multiplication A ∈ Rn×d and 
+
+B ∈ Rd×m, dense computation costs O(ndm ).With feature retention ratio ρd, RMM evaluates 
+
+A:,I BI,: with |I| = ⌈ρdd⌉, reducing the cost to 
+
+O(nρ dd m ). In attention, reducing QK ⊤ over the head dimension lowers the cost from O(LqLkdh)
+
+to O(LqLkρddh). If token selection is also applied [Seq,  Reduced _Dim]              
+
+> [Reduced _Dim, Inter_Dim] Input
+> Gate Proj
+> [Reduced _Dim, Inter_Dim]
+> Up Proj Gate*Up
+> [Seq, Reduced _Inter_Dim] Intermediate
+> Hidden States Down Proj [Reduced _Inter_Dim, Dim] [Seq, Dim] MLP Output
+> [Seq, Reduced _Dim] [Reduced _Dim, Seq]
+> QKTAttention Weights
+> Attention Weights V
+> [Seq, Reduced _Seq] [Reduced _Seq, Dim]
+> [Seq, Seq]
+> Attention Output
+> (Prefilling)
+> [Seq, Dim]
+> (Decoding)
+> [1, Reduced _Dim]
+> Q
+> Attention Weights
+> [Reduced _Dim, Seq] [1, Seq]
+> [1, Reduced _Seq]
+> Q
+> [Reduced _Seq, Dim] [1, Dim]
+
+Attention with Reduced Matrix ‑Multiplication 
+
+MLP with Reduced Matrix ‑Multiplication 
+
+> Attention Output
+> (Prefilling)
+> KT
+> KT
+
+Figure 1: Application of RMM in major computations of Transformer language models. 
+
+to the attention–value product, the cost of P V is re-duced from O(LqLkdh) to O(LqρtLkdh). RMM additionally requires computing feature scores and selecting top-k indices: computing sj = ∥A:,j ∥2
+
+costs O(nd ), while top-k selection over d (or Lk)is a lightweight vector-level operation. In prac-tice, these overheads are small relative to the dense matrix multiplications that RMM replaces. 
+
+4 Experimental Setup 
+
+Overview. Our experiments are structured to val-idate both the effectiveness of dynamic, activation-aware pruning and the empirical insights it enables under controlled retention ratios. We first estab-lish the necessity of dynamic selection by com-paring RMM against representative weight-level static pruning methods under matched sparsity bud-gets on LLaMA 3.1 8B. We then sweep retention ratios across model scales from 1B to 70B to ex-amine how performance degrades as computation is reduced and how redundancy varies with scale. Next, we test robustness under more realistic in-ference settings, including autoregressive genera-tion and long-context reasoning. We further per-form component-wise pruning analyses on atten-tion and MLP blocks to identify which computa-tions are more redundant and which are more criti-cal. Finally, we evaluate generalization on a vision– language model and report wall-clock latency on an NVIDIA A100 GPU to verify that the computa-tional savings translate into actual runtime improve-ments. Additional experiments, including com-parisons with TEAL, compute-normalized com-ponent analysis, evaluations on additional VLM backbones, INT8 compatibility, and LLaMA-70B latency, are provided in Appendix B. 
+
+Models and tasks We evaluate RMM on a wide spectrum of pre-trained LLMs, including Llama 3.1 70B, Llama 3.1 8B, Llama 3.2 3B, Llama 3.2 1.5B (Grattafiori et al., 2024), Qwen3 32B and Qwen 3.1 7B (Yang et al., 2025), and Qwen2.5-VL-7B-Instruct (Bai et al., 2025). The benchmarks span multiple capabilities: (i) general QA and reasoning, including C OPA (Gor-don et al., 2012), PIQA (Bisk et al., 2020), COMMONSENSE QA (Talmor et al., 2019), ARC-EASY , ARC-C HALLENGE (Clark et al., 2018), and MMLU (Hendrycks et al., 2021); (ii) language modeling evaluation on W IKI TEXT (Merity et al., 2016) and B OOK CORPUS (Zhu et al., 2015); (iii) mathematics and coding tasks, including GSM8K (Cobbe et al., 2021) and H UMAN EVAL (Chen et al., 2021); (iv) long-context reasoning, including RULER -CWE and R ULER -H OTPOT (Hsieh et al., 2024); (v) summarization on CNN/D AILY MAIL 
+
+(Nallapati et al., 2016); and (vi) vision–language tasks, including POPE (Li et al., 2023a), Blink Art Style, Blink Forensic Detection, and Blink Count-ing (Fu et al., 2024). All tasks are evaluated in the zero-shot setting without task-specific fine-tuning. For a more controlled analysis, the main-paper re-sults apply reduction to attention-side matrix multi-plications. Full detailed result tables are provided in the appendix. 
+
+Baselines. We compare RMM against repre-sentative pruning and inference-time optimiza-tion baselines. Static pruning methods in-clude SparseGPT (Frantar and Alistarh, 2023), Wanda (Sun et al., 2024), SliceGPT (Ashkboos et al., 2024), and magnitude pruning (Han et al., 2015). For dynamic inference-time baselines , we include H2O (Zhang et al., 2023), which dynami-cally manages the KV cache during decoding but does not modify the feature dimensions involved in matrix multiplications. As control baselines, we also include a static variant of RMM , which se-lects a fixed subset of feature dimensions during prefill based on activation statistics and reuses the same subset for all subsequent tokens. And ran-dom pruning retains feature dimensions uniformly at random at each decoding step under the same sparsity budget as RMM. Together, these baselines allow us to compare RMM against static pruning, non-adaptive activation-based selection, random se-lection, and dynamic methods operating at different levels of the inference stack. 
+
+5 Main Results 
+
+5.1 Controlled comparison of Pruning behavior 
+
+We first compare pruning strategies on a single model under a controlled setting to isolate the effect of different pruning strategies. All experiments in this stage are conducted on LLaMA 3.1 8B with a fixed retention ratio of RR = 0 .5. We consider two inference settings: 
+
+Discriminative question answering We first evaluate zero-shot QA performance on standard reasoning benchmarks (Table 1). Performance is measured by comparing the log-likelihoods of candidate answers. We compare RMM against representative static pruning baselines, including SparseGPT, Wanda, SliceGPT, and magnitude pruning. RMM achieves the best average accu-racy among all pruning methods and shows more consistent degradation across tasks. In contrast, static baselines suffer substantially larger and less uniform drops across benchmarks. These results suggest that fixed, non-adaptive pruning decisions are insufficient to maintain stable performance in practical downstream tasks. 
+
+Abstractive summarization We further evaluate pruning strategies on the abstractive summarization task, a token-by-token generation setting (Table 2). In addition to the static baselines, we include two dynamic baselines in this setting: (i) random prun-ing, which selects retained dimensions uniformly at random at each decoding step, and (ii) H2O, which dynamically manages the KV cache at the token level. All methods are evaluated under iden-tical retention ratios. At RR = 0 .8, RMM remains close to the full model while substantially reducing computation. When the retention ratio is reduced to RR = 0 .5, RMM continues to outperform all baselines by a clear margin. Static pruning meth-ods degrade rapidly in generation quality, while random pruning, despite being dynamic, fails to maintain coherent and semantically consistent sum-maries. H2O performs better than static pruning in this setting, but remains consistently weaker than activation-aware matrix-level pruning. 
+
+Summary Under a fixed model and retention ratio, the relative behavior of pruning strategies differs markedly between discriminative and gen-erative inference settings. Static and activation-agnostic methods exhibit less stable degradation, while RMM maintains a clear advantage across both settings. Additional detailed results are re-ported in Table 10. 
+
+5.2 Scaling across models and retention ratios 
+
+We next examine how pruning tolerance changes with model scale under different retention ratios. We evaluate RMM on a range of model sizes. For each model, we sweep the retention ratio over 
+
+RR ∈ { 0.9, 0.8, 0.7, 0.6, 0.5}. We use the same zero-shot discriminative evaluation setup, cover-ing commonsense and reasoning benchmarks as well as more structured tasks including GSM8K, MMLU, and H UMAN EVAL .Method (RR = 0.5) ARC-C ARC-E COPA PIQA CommQA Avg Full model (RR = 1.0) 49.5 76.3 77.2 79.9 66.0 69.8 RMM 36.8 63.0 70.6 76.6 51.9 59.8 SparseGPT 31.4 64.2 70.4 71.0 43.4 56.1 Wanda 28.1 60.7 67.2 68.9 38.4 52.7 SliceGPT 20.7 31.8 56.0 53.4 23.1 37.0 Magnitude 22.7 33.7 57.2 57.6 25.0 39.3 
+
+Table 1: Zero-shot QA performance on LLaMA 3.1 8B under a fixed retention ratio ( RR = 0 .5). All pruning methods operate at the same retention ratio, while the full model ( RR = 1 .0) is shown for reference.                                                             
+
+> Model Method RR ROUGE-1 ROUGE-2 ROUGE-L ROUGE-Lsum BERTScore LLaMA 3.1 8B Full model (RR = 1.0) –37.4 15.6 24.3 31.3 86.8 RMM 0.8 37.5 15.7 24.2 31.4 86.7 RMM 0.5 34.2 13.6 22.0 28.7 85.8
+> Static 0.8 37.4 15.6 24.2 31.2 86.7 Static 0.5 28.0 9.9 19.3 24.3 84.0 Random 0.8 6.9 0.6 6.2 6.7 78.0 Random 0.5 5.7 0.2 5.2 5.5 81.4 H2O 0.8 24.4 9.3 16.3 21.9 82.7 H2O 0.5 24.4 9.3 16.3 21.9 82.7
+
+Table 2: Abstractive summarization performance on CNN/DailyMail using LLaMA 3.1 8B under different pruning strategies. All pruning methods are evaluated under the same retention ratios. H2O maintains a fixed token budget and therefore yields identical results across retention ratios. 
+
+Table 3 summarizes the results across models and retention ratios. At matched retention lev-els, larger models generally retain stronger per-formance under moderate reduction, although the trend varies across model families and tasks. For example, at RR = 0.8, LLaMA 3.1 70B re-mains close to the full model on most bench-marks, whereas smaller models show more pro-nounced degradation, especially on challenging tasks such as GSM8K and H UMAN EVAL . As the retention ratio decreases further, all models degrade, but smaller models exhibit an earlier per-formance inflection—with noticeable drops already at RR = 0 .7—while larger models degrade more gradually and maintain higher absolute accuracy even under aggressive pruning ( RR ≤ 0.6). Over-all, the results suggest a broad scaling trend in which larger models often tolerate stronger reduc-tion, while also showing that robustness remains model- and task-dependent. Additional results and alternative models are provided in Appendix B. 
+
+5.3 Stability and robustness under generation and long-context settings 
+
+While the previous sections focus on discriminative benchmarks, practical inference also requires stable long-form generation and reliable reasoning over extended contexts. We therefore further evaluate RMM under both generative and long-context set-tings to assess whether dynamic pruning remains stable beyond discriminative task evaluation. 
+
+Qualitative generation behavior We next exam-ine how pruning affects autoregressive generation. Table 5 shows representative outputs from the full model and RMM under different retention ratios. At RR = 0 .8, the outputs of RMM remain largely consistent with those of the full model in both se-mantic content and overall structure. At RR = 0 .6,the generated text begins to show simplification and stylistic drift, but remains coherent and seman-tically aligned with the prompt. In these examples, stronger reduction introduces simplification and stylistic drift rather than an abrupt loss of coher-ence. 
+
+Long-context reasoning We further evaluate RMM on long context benchmarks to test whether pruning remains reliable over long sequences. As shown in Table 4, RMM achieves performance comparable to the full model across all tested con-text lengths at both RR = 0 .8 and RR = 0 .5. We do not observe a systematic increase in degradation as context length grows, suggesting that dynamic pruning does not disproportionately impair long-range dependency modeling within this regime. 
+
+Summary Across generative and long-context settings, RMM remains robust across a wide range of retention ratios, with degradation that is smooth rather than abrupt under stronger pruning. These results show that the benefits of dynamic pruning are not limited to discriminative benchmarks, but also extend to more realistic inference scenarios. 
+
+5.4 Vision-language generalization 
+
+We further evaluate whether RMM generalizes be-yond text-only models by testing it on the vision– language model. As shown in Table 6, the core Model Method RR Copa ARC-C ARC-E PiQA CommQA GSM8K MMLU HumanEval                                                                                                                                                                                                                         
+
+> Qwen3.1 7B Baseline –72.8 39.8 69.8 72.7 47.6 39.9 55.5 40.2 RMM 0.9 66.0 33.8 64.6 69.4 46.7 24.9 52.7 39.6 RMM 0.8 64.0 29.8 57.2 67.2 47.6 17.6 47.3 38.4 RMM 0.7 60.8 28.1 46.8 63.5 39.6 5.8 33.6 31.1 RMM 0.6 58.4 25.4 37.0 59.6 29.9 2.5 26.0 20.7 RMM 0.5 49.4 20.7 32.1 53.2 24.5 1.7 23.8 9.8 Llama3.1 8B Baseline –77.2 49.5 76.3 79.9 66.0 26.2 63.5 35.4 RMM 0.9 76.6 48.2 75.3 79.2 65.4 24.6 62.2 35.4 RMM 0.8 77.2 47.5 75.1 79.1 64.7 23.7 60.3 34.8 RMM 0.7 77.0 46.8 72.8 77.5 62.7 23.2 55.2 32.3 RMM 0.6 73.4 37.5 68.6 77.5 59.4 14.9 38.6 26.2 RMM 0.5 70.6 36.8 63.0 76.7 51.9 5.9 24.8 23.2 Qwen3 32B Baseline –81.4 57.9 78.3 80.9 61.6 62.6 80.8 37.8 RMM 0.9 83.6 55.2 76.1 80.7 62.2 62.7 80.0 40.2 RMM 0.8 83.2 51.8 72.6 80.2 61.0 58.0 78.6 42.1 RMM 0.7 82.6 48.5 69.5 80.6 60.6 55.1 77.5 42.7 RMM 0.6 82.6 50.8 70.5 80.4 58.7 50.9 73.2 45.1 RMM 0.5 82.2 46.2 67.2 77.8 54.9 39.9 65.1 46.1 Llama3.1 70B Baseline –84.4 56.2 78.3 83.2 58.0 53.7 75.3 51.2 RMM 0.9 84.4 54.5 78.8 83.5 58.0 51.5 75.0 53.7 RMM 0.8 84.6 56.9 76.8 82.6 59.7 48.1 72.6 47.0 RMM 0.7 81.4 53.2 74.7 82.5 59.9 42.8 67.0 39.6 RMM 0.6 76.6 50.5 74.9 77.7 60.4 34.5 53.8 34.8 RMM 0.5 70.2 41.5 64.2 73.6 56.8 19.9 29.7 18.9
+
+Table 3: Performance comparison across different models and retention ratios on various benchmarks. 
+
+Task Cond. 5K 15K 30K CWE Base 98.2 94.0 29.6 0.8 98.1 94.1 29.3 0.5 98.0 94.0 28.9 Hotpot Base 53.6 56.4 51.2 0.8 53.6 55.8 50.8 0.5 53.6 55.6 50.5 
+
+Table 4: Long-context results on Ruler. 
+
+trend observed in text-only models also holds in the multimodal setting: RMM remains close to the full model under mild pruning and continues to outper-form static and random pruning under more aggres-sive reduction. At RR = 0 .8, RMM achieves per-formance nearly identical to the full model across all benchmarks. At RR = 0 .5, it still retains strong performance and substantially outperforms both static and random pruning under the same reten-tion ratio. Figure 2 provides qualitative support by visualizing the attention maps for the first output token. Both the full model and RMM attend to semantically relevant visual regions, whereas static pruning under-attends to these regions and random pruning produces scattered, less focused patterns. These qualitative observations are consistent with the quantitative results in Table 6, showing that RMM better preserves the visual grounding needed for multimodal inference. 
+
+6 Ablation and Mechanistic Analysis 
+
+6.1 Validating the key design choices of RMM 
+
+We validate the two key design choices of RMM: dynamic selection(Table 2) and activation-aware scoring(Table 6). Rather than relying on a single-BaselineAnswer: Yes  RMM: Yes  Static Prunning: No  Random Prunning: No    
+
+> Question: Is there a cup in the image?
+> Question: Is there a Teddy Bear in the image?
+> Baseline Answer: Yes RMM: Yes Static Prunning: No Random Prunning: No
+
+Figure 2: First-output-token attention maps on Qwen 2.5-VL-7B at RR = 0 .5. RMM preserves dense-like attention to relevant objects and correct answers, while static and random pruning produce less aligned patterns and incorrect answers. 
+
+task ablation, we draw evidence from comparisons across multiple tasks. The importance of dynamic selection is reflected in the consistent gap between RMM and its static variant, which fixes the retained feature subset across tokens. It widens substan-tially at more aggressive retention ratios, as seen in both summarization and vision–language tasks. This suggests that adapting the retained dimensions to input-dependent activation changes is critical for preserving performance under stronger prun-ing. The importance of activation-aware scoring is supported by comparisons against random prun-ing. Although random pruning also changes the re-tained subset dynamically, it performs much worse under the same retention ratios. This shows that the gains of RMM do not arise merely from changing the retained subset over time, but from selecting informative dimensions according to the current ac-tivation pattern. Taken together, these results show Prompt Base Model RMM Inference RR 0.8 RR 0.6    
+
+> Ex.1 The future of artificial intelligence is here, and it’s already changing the way we live and work. From self-driving cars to virtual assistants. here, and it’s already changing the way we live and work. From self-driving cars to virtual assistants. here. It’s called ChatGPT. This AI chatbot can write essays, poems, and even code. Ex.2 Tell me something about Boston. Boston is a city in the state of Massachusetts, in the United States of America. Boston is a city in the state of Massachusetts, in the United States of America. I’m a native New Yorker, and I’ve been here for 10 years.
+
+Table 5: Generation comparison between base model (Llama-3.1-8B) and RMM inference under different retention ratios. 
+
+Method RR Pope Art. Foren. Count. Baseline – 83.7 100.0 100.0 100.0 RMM 0.8 82.0 100.0 100.0 100.0 
+
+Static 0.8 81.0 100.0 100.0 100.0 Random 0.8 10.3 43.6 58.3 54.2 RMM 0.5 67.3 97.4 97.7 99.2 
+
+Static 0.5 63.0 91.3 43.3 79.2 Random 0.5 1.3 41.9 53.0 43.3 
+
+Table 6: Performance on Qwen 2.5-VL-7B. 
+
+that both dynamic selection and activation-aware scoring are essential to the effectiveness of RMM. 
+
+6.2 Different components Mechanistic Analysis 
+
+We next examine where pruning can be applied most safely within the Transformer. We analyze the sensitivity of different modules to reduction on LLaMA 3.1 8B by separately pruning attention-side components (Q projection, QKV projection, and attention output), MLP-side components (up, gate, and down projections), and their combina-tions. Due to space limitations, we report the full pruning matrix in Appendix Table 16. Across all 
+
+L Op. Dense RMM Speedup 1024 QK ⊤ 0.120 0.089 1.36 ×
+
+1024 AV 0.065 0.039 1.67 ×
+
+2048 QK ⊤ 0.433 0.336 1.29 ×
+
+2048 AV 0.207 0.114 1.81 ×
+
+4096 QK ⊤ 1.675 1.071 1.56 ×
+
+4096 AV 0.753 0.399 1.89 ×
+
+Table 7: GEMM kernel latency (ms). 
+
+settings, attention-side computations are substan-tially more robust to pruning than MLP-side com-ponents. When pruning only attention-related oper-ations, performance degrades gradually as the reten-tion ratio decreases and remains close to the base-line even at moderate reduction levels. In contrast, pruning MLP components leads to much sharper performance dropping across tasks. In particular, pruning the entire MLP block leads to severe per-formance collapse even at relatively high retention ratios, showing the structural importance of MLP layers for preserving representation capacity. By contrast, different attention-side components ex-hibit greater functional redundancy: pruning their combinations leads to more moderate degradation. These results reveal a clear structural asymmetry within the Transformer: attention-side computa-tions contain higher redundancy, whereas MLP components are more rigid and harder to prune. This suggests that practical deployments should pri-oritize pruning attention modules and apply more conservative reduction to the MLP. 
+
+6.3 Practical Viability: Wall-Clock Latency 
+
+To evaluate whether the computational savings of RMM translate into practical runtime gains, we measure both kernel-level and end-to-end wall-clock latency on LLaMA 3.1 8B using an NVIDIA A100 GPU with a batch size of 1 and a retention ratio of ρ = 0 .8. All latency numbers are averaged 
+
+Seq. Len. Dense RMM Speedup 1024 109.39 103.91 1.05 ×
+
+2048 264.67 208.93 1.27 ×
+
+4096 661.36 473.21 1.40 ×
+
+Table 8: End-to-end latency (ms). 
+
+over 10 runs. We follow the latency evaluation protocol of (Sun et al., 2024). For kernel-level benchmarks (Table 7), we measure the full cost of each RMM operation, including norm computation, top-k selection, and the reduced matrix multiplica-tion, to verify that the selection overhead does not offset the computational savings. For end-to-end evaluation (Table 8), the dense baseline uses Hug-gingFace generate with SDPA as the attention backend, and the RMM variant replaces the atten-tion kernels with custom Triton implementations. Overall, these results show that the computational savings of RMM can translate into tangible run-time benefits, especially when sequence lengths are sufficiently large. 7 Conclusion 
+
+We introduced Reduced Matrix Multiplication 
+
+(RMM), a training-free and input-adaptive method that reduces Transformer inference computation by selecting informative indices along the shared multiplication axis of each matrix product. Across model scales and diverse tasks, RMM yields con-trollable accuracy–efficiency trade-offs, remains stable in generative and long-context settings, and extends to vision–language inference. Our analy-ses further reveal that attention-side computations are substantially more reducible than MLP compo-nents, and wall-clock benchmarks show that these reductions can translate into practical runtime gains. More broadly, these results highlight that redun-dancy in Transformer inference is not uniformly distributed across components, suggesting that ef-ficient inference methods should account for such structural differences. These findings suggest that matrix-product-level adaptive reduction is a promis-ing direction for efficient Transformer inference. 
+
+Limitations 
+
+This work focuses on a training-free formulation of input-adaptive matrix-level reduction for Trans-former inference. Our emphasis is on establishing the core algorithmic idea and evaluating it in a con-trolled setting. We have not explored extensions beyond the training-free setting considered here. Another promising direction concerns multimodal models. While our results suggest that the frame-work is applicable beyond pure language modeling, we have not conducted a detailed study of how dy-namic reduction behaves across the different com-ponents of vision–language models. It would be valuable to test whether their components exhibit different redundancy patterns under dynamic prun-ing. 
+
+References 
+
+Saleh Ashkboos, Maximilian L. Croci, Marcelo Gennari do Nascimento, Torsten Hoefler, and James Hens-man. 2024. Slicegpt: Compress large language models by deleting rows and columns. Preprint ,arXiv:2401.15024. Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wen-bin Ge, Sibo Song, Kai Dang, Peng Wang, Shi-jie Wang, Jun Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang, Zhaohai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren Fu, Yiheng Xu, and 8 oth-ers. 2025. Qwen2.5-vl technical report. Preprint ,arXiv:2502.13923. Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, and 1 others. 2020. Piqa: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI conference on artificial intelligence , vol-ume 34, pages 7432–7439. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. Preprint , arXiv:2107.03374. Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question answering? try arc, the ai2 reasoning challenge. 
+
+Preprint , arXiv:1803.05457. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. Preprint , arXiv:2110.14168. Petros Drineas, Ravi Kannan, and Michael W Mahoney. 2006. Fast monte carlo algorithms for matrices ii: Computing a low-rank approximation to a matrix. 
+
+SIAM Journal on computing , 36(1):158–183. Elias Frantar and Dan Alistarh. 2023. Sparsegpt: Mas-sive language models can be accurately pruned in one-shot. Preprint , arXiv:2301.00774. Xingyu Fu, Yushi Hu, Bangzheng Li, Yu Feng, Haoyu Wang, Xudong Lin, Dan Roth, Noah A. Smith, Wei-Chiu Ma, and Ranjay Krishna. 2024. Blink: Multi-modal large language models can see but not perceive. 
+
+Preprint , arXiv:2404.12390. Yichao Fu, Xuewei Wang, Yuandong Tian, and Jiawei Zhao. 2025. Deep think with confidence. Preprint ,arXiv:2508.15260. Shangqian Gao, Chi-Heng Lin, Ting Hua, Tang Zheng, Yilin Shen, Hongxia Jin, and Yen-Chang Hsu. 2024. Disp-llm: Dimension-independent struc-tural pruning for large language models. Preprint ,arXiv:2410.11988. Andrew Gordon, Zornitsa Kozareva, and Melissa Roem-mele. 2012. SemEval-2012 task 7: Choice of plau-sible alternatives: An evaluation of commonsense causal reasoning. In *SEM 2012: The First Joint Conference on Lexical and Computational Seman-tics – Volume 1: Proceedings of the main conference and the shared task, and Volume 2: Proceedings of the Sixth International Workshop on Semantic Eval-uation (SemEval 2012) , pages 394–398, Montréal, Canada. Association for Computational Linguistics. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 542 others. 2024. The llama 3 herd of models. Preprint , arXiv:2407.21783. Song Han, Jeff Pool, John Tran, and William J. Dally. 2015. Learning both weights and connections for ef-ficient neural networks. Preprint , arXiv:1506.02626. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring massive multitask language under-standing. Preprint , arXiv:2009.03300. Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-tanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. Ruler: What’s the real context size of your long-context language models? 
+
+Preprint , arXiv:2404.06654. Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. 2020. Scaling laws for neural language models. Preprint ,arXiv:2001.08361. Donghyun Lee, Je-Yong Lee, Genghan Zhang, Mo Tiwari, and Azalia Mirhoseini. 2024. Cats: Contextually-aware thresholding for sparsity in large language models. Preprint , arXiv:2404.08763. Yifan Li, Yifan Du, Kun Zhou, Jinpeng Wang, Wayne Xin Zhao, and Ji-Rong Wen. 2023a. Eval-uating object hallucination in large vision-language models. Preprint , arXiv:2305.10355. Yucheng Li, Bo Dong, Chenghua Lin, and Frank Guerin. 2023b. Compressing context to enhance inference efficiency of large language models. arXiv preprint arXiv:2310.06201 .Andy T. Liu, Shang-Wen Li, and Hung-yi Lee. 2021. Tera: Self-supervised learning of transformer en-coder representation for speech. IEEE/ACM Trans-actions on Audio, Speech, and Language Processing ,29:2351–2366. James Liu, Pragaash Ponnusamy, Tianle Cai, Han Guo, Yoon Kim, and Ben Athiwaratkun. 2025. Training-free activation sparsity in large language models. 
+
+Preprint , arXiv:2408.14690. Xinyin Ma, Gongfan Fang, and Xinchao Wang. 2023. Llm-pruner: On the structural pruning of large lan-guage models. Preprint , arXiv:2305.11627. Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. 2016. Pointer sentinel mixture mod-els. Preprint , arXiv:1609.07843. Ramesh Nallapati, Bowen Zhou, Cicero dos Santos, Ça˘ glar Gu ˙lçehre, and Bing Xiang. 2016. Abstrac-tive text summarization using sequence-to-sequence RNNs and beyond. In Proceedings of the 20th SIGNLL Conference on Computational Natural Lan-guage Learning , pages 280–290, Berlin, Germany. Association for Computational Linguistics. Zhuoshi Pan, Qianhui Wu, Huiqiang Jiang, Menglin Xia, Xufang Luo, Jue Zhang, Qingwei Lin, Victor Rühle, Yuqing Yang, Chin-Yew Lin, H. Vicky Zhao, Lili Qiu, and Dongmei Zhang. 2024. Llmlingua-2: Data distil-lation for efficient and faithful task-agnostic prompt compression. Preprint , arXiv:2403.12968. Yifan Peng, Kwangyoun Kim, Felix Wu, Prashant Sridhar, and Shinji Watanabe. 2023. Structured pruning of self-supervised pre-trained models for speech recognition and understanding. Preprint ,arXiv:2302.14132. Hassan Sajjad, Fahim Dalvi, Nadir Durrani, and Preslav Nakov. 2023. On the effect of dropping layers of pre-trained transformer models. Computer Speech & Language , 77:101429. Jay Shah, Ganesh Bikshandi, Ying Zhang, Vi-jay Thakkar, Pradeep Ramani, and Tri Dao. 2024. Flashattention-3: Fast and accurate atten-tion with asynchrony and low-precision. Preprint ,arXiv:2407.08608. Mingjie Sun, Zhuang Liu, Anna Bair, and J. Zico Kolter. 2024. A simple and effective pruning approach for large language models. Preprint , arXiv:2306.11695. Alon Talmor, Jonathan Herzig, Nicholas Lourie, and Jonathan Berant. 2019. Commonsenseqa: A question answering challenge targeting commonsense knowl-edge. Preprint , arXiv:1811.00937. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing systems , 30. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In The Twelfth International Conference on Learning Representa-tions .An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Day-iheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, and 41 others. 2025. Qwen3 technical report. Preprint ,arXiv:2505.09388. Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan Zhang, Zhenda Xie, Y. X. Wei, Lean Wang, Zhiping Xiao, Yuqing Wang, Chong Ruan, Ming Zhang, Wenfeng Liang, and Wangding Zeng. 2025. Native sparse attention: Hardware-aligned and natively trainable sparse at-tention. Preprint , arXiv:2502.11089. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-dong Tian, Christopher Ré, Clark Barrett, and 1 oth-ers. 2023. H2o: Heavy-hitter oracle for efficient generative inference of large language models. Ad-vances in Neural Information Processing Systems ,36:34661–34710. Yukun Zhu, Ryan Kiros, Rich Zemel, Ruslan Salakhut-dinov, Raquel Urtasun, Antonio Torralba, and Sanja Fidler. 2015. Aligning books and movies: Towards story-like visual explanations by watching movies and reading books. In Proceedings of the IEEE in-ternational conference on computer vision , pages 19–27. Technical Appendices 
+
+A Implementation Details 
+
+Hardware and framework. The experiments were conducted on NVIDIA GPUs, including RTX A6000, RTX 6000 Ada, A100, and L40S devices. Unless otherwise specified, model inference uses PyTorch and Hugging Face Transformers with bfloat16 precision. All experiments use official pretrained checkpoints without task-specific fine-tuning or additional training. We integrate RMM by replacing the relevant attention and projection operations in the Hugging Face forward pass. The modified operations perform activation-aware index selection and execute the corresponding reduced matrix products without modifying the pretrained model weights. 
+
+Inference setup. Unless otherwise specified, we evaluate retention ratios from 0.9 to 0.5, together with the unreduced model at RR = 1 .0. When a configuration contains multiple target matrix products, the reported RR is applied to the contraction axis of every included product. RMM recomputes the retained indices at each affected layer and forward step using the current activations. During prefill, selection is computed from the activation block associated with the current input sequence. During autoregressive decoding, selection is updated using the current decoding state. The number of retained indices is determined by the specified RR and the size of the corresponding contraction dimension. Batch sizes are selected according to model size and available GPU memory, typically between 8 and 16 for 7B/8B models and between 1 and 2 for 70B models. Unless otherwise stated, comparisons within the same table use the same batch size and inference configuration. For long-context benchmarks such as RULER , we evaluate the context lengths specified by the benchmark, up to 30K tokens. 
+
+Evaluation protocols and metrics. For multiple-choice QA benchmarks, including C OPA , P IQA, COMMONSENSE QA, ARC-Easy, and ARC-Challenge, we compare the conditional likelihoods of can-didate answers and report accuracy. More structured language-model evaluations, including MMLU, GSM8K, H UMAN EVAL , and R ULER , use their corresponding task configurations through the evaluation harness or benchmark-specific evaluation pipeline. We report the standard metric for each task, including accuracy or exact match for reasoning tasks and pass@1 for H UMAN EVAL .For language modeling, we report perplexity on W IKI TEXT and B OOK CORPUS . For summarization on CNN/D AILY MAIL , we report ROUGE-1, ROUGE-2, ROUGE-L, ROUGE-Lsum, and BERTScore. For multimodal evaluation, we use the task-specific accuracy metrics defined by POPE, BLINK Art Style, BLINK Forensic Detection, and BLINK Counting. The INT8 compatibility experiment uses the same quantized loading and candidate-scoring protocol for all retention ratios within that comparison. All reported evaluations are performed without task-specific adaptation. 
+
+A.1 Why Dynamic Pruning 
+
+A natural starting point for reducing inference cost is static pruning: one identifies a fixed subset of weights or feature dimensions by analyzing model behavior on a reference dataset, and then permanently removes the remaining components. This paradigm has inspired many existing methods, and we initially explored similar directions. From a systems perspective, static pruning is particularly attractive: if a fixed low-dimensional subspace can be identified during prefilling, the same subspace could be reused during decoding, allowing a reduced KV cache and significantly lower memory bandwidth and I/O overhead. However, our empirical investigations revealed that this approach does not generalize. When a static subspace is derived from a specific dataset (e.g., WikiText), the resulting pruned model often performs well on that dataset, but degrades sharply when evaluated on other tasks or distributions. We observed similar behavior when attempting to identify “unimportant” dimensions within attention heads: while certain dimensions appear consistently inactive for a given task, such patterns are not stable across tasks, layers, or inputs. These findings suggest that high-dimensional representations in Transformers do not admit a single, globally valid low-dimensional subspace. Instead, the semantic information encoded in hidden states appears to migrate across dimensions depending on the input, the layer, and the decoding step. Con-sequently, any fixed pruning rule implicitly assumes a static allocation of information, and must either sacrifice generalization or incur severe accuracy loss under aggressive pruning. Even with dynamic selection, we observe that sufficiently aggressive pruning (e.g., 50% retention) can still lead to performance degradation on certain tasks. This highlights a broader limitation of training-free acceleration: it is unlikely that one can simultaneously achieve large speedups, no retraining, and negligible accuracy loss in all settings. Nevertheless, our results provide strong evidence that substantial redundancy exists in large language models, and that dynamic, input-adaptive subspace selection is a principled way to exploit this redundancy without assuming task-specific structure. More broadly, these observations point to a promising research direction: incorporating compressibility and adaptive computation directly into the pretraining objective, rather than relying solely on post-hoc pruning or scaling. RMM represents an initial step toward this goal by demonstrating that dynamic subspace computation can serve as a viable abstraction for inference-time efficiency. 
+
+A.2 A Speculative Theoretical Perspective on Dynamic Subspaces 
+
+The results in Section A.1 indicate that no single, fixed low-dimensional subspace can consistently approximate Transformer activations across different inputs, layers, and decoding steps. Here, we offer a speculative theoretical perspective that may help explain this phenomenon. We do not claim formal guarantees; rather, the following discussion is intended as an interpretive framework grounded in existing principles of representation learning and high-dimensional geometry. Let hℓt ∈ Rd denote the hidden state at layer ℓ and time step t. Static pruning implicitly assumes the existence of a global subspace U ⊂ Rd such that hℓt ≈ ΠU (hℓt ) for all (t, ℓ ) and all inputs. This corresponds to assuming a single low-rank structure shared across all inference contexts. Our observations suggest that such a global subspace does not exist. Instead, the effective representation subspace appears to vary with the input, the layer, and the decoding step. One possible explanation is that semantic information is not tied to fixed coordinate axes, but is encoded in a distributed manner across dimensions. As a result, the set of dimensions that carry the most information may change from one context to another. A complementary perspective arises from viewing deep Transformers as nonlinear dynamical systems, where each layer applies an input-dependent transformation, hℓ+1 = f ℓ(hℓ). Under this view, imposing a fixed low-dimensional projection at intermediate layers amounts to injecting a structured perturbation into the system. Because the subsequent transformations are nonlinear, small projection errors can be amplified across layers, causing deviations that depend strongly on the input trajectory. From a geometric viewpoint, one may imagine that the activations for a given input lie near a low-dimensional manifold whose local tangent space changes across inputs and layers. Static pruning corresponds to projecting onto a single global linear subspace, while RMM instead performs a local, input-dependent projection that adapts to the current tangent directions. Although this interpretation is heuristic, it provides an intuitive explanation for why dynamic selection generalizes more robustly than static pruning in our experiments. Taken together, these perspectives suggest that the effectiveness of RMM may stem from aligning computation with the evolving geometry of high-dimensional representations. We view this as an open direction for future work, including the possibility of incorporating adaptive subspace structure directly into model training. 
+
+B Supplementary Results 
+
+B.1 Additional Results on QA and Language Modeling 
+
+To complement the QA and generation analysis in Section 5, we provide full perplexity results on WIKITEXT and B OOK CORPUS for smaller-scale models. In addition to the 7B/8B/32B/70B models RR 1.0 0.9 0.8 0.7 0.6 0.5 
+
+WikiText Perplexity ↓
+
+Llama3.2 1B 20.04 20.66 22.77 31.29 68.52 151.64 Llama3.2 3B 15.89 16.23 17.01 18.82 25.04 42.54 Qwen3.1 7B 28.64 31.49 37.80 54.00 93.52 219.31 Llama3.1 8B 13.39 14.34 15.22 17.03 21.35 32.65 Qwen3 32B 13.97 14.62 15.41 15.71 15.99 18.53 Llama3.1 70B 7.24 7.46 8.38 14.14 42.62 167.78 
+
+BookCorpus Perplexity ↓
+
+Llama3.1 1B 21.18 22.03 24.39 39.63 96.81 192.81 Llama3.2 3B 17.79 18.07 18.86 21.84 34.47 54.53 Qwen3.1 7B 31.95 34.21 43.64 62.91 113.57 322.63 Llama3.1 8B 15.25 15.59 16.48 20.97 32.63 53.80 Qwen3 32B 17.43 17.72 18.12 18.93 22.21 29.68 Llama3.1 70B 12.20 12.29 13.06 19.55 36.55 126.18 
+
+Table 9: Perplexity matrix across RR 75                              
+
+> 70
+> 65
+> 60
+> 0.5 0.6 0.7 0.8 0.9 Baseline
+> 45
+> 40
+> 35
+> 30
+> 25
+> 0.5 0.6 0.7 0.8 0.9 Baseline
+> 75
+> 70
+> 65 60
+> 55
+> 50 45
+> 0.5 0.6 0.7 0.8 0.9 Baseline
+> 77.5
+> 75.0
+> 72.5 70.0
+> 67.5
+> 65.0 62.5 60.0
+> 0.5 0.6 0.7 0.8 0.9 Baseline
+> 60
+> 55
+> 50
+> 45
+> 40
+> 35
+> 0.5 0.6 0.7 0.8 0.9 Baseline Retention Ratio Accuracy
+> Copa ARC Challenge ARC Easy PiQA CommonsenseQA
+
+Figure 3: Llama-3.2-3B and Llama-3.2-1B of Different Tasks and RR. Red Line is Llama-3.2-3B 
+
+reported in the main paper, we include Llama-3.2-1B and Llama-3.2-3B. Figure 3 and Table 9 present the complete results under different retention ratios (RR). The results show the same trend as larger models: perplexity increases gradually as RR decreases, with a sharp degradation once RR drops below 0.6. Moreover, the 3B model consistently shows greater robustness than the 1B model (Figure 3), reinforcing our claim that representational redundancy grows with scale. 
+
+B.2 Additional Results on Summarization 
+
+We also expand the summarization results on CNN/D AILY MAIL beyond those in the main paper. Table 10 includes Llama-3.2-1B and 3B alongside the larger 7B/8B models. RMM matches the baseline at RR = 0.8 across all scales, while static and random pruning degrade severely. At RR = 0.5, smaller models drop more sharply, but RMM remains consistently better than all baselines. This confirms that our method preserves summarization quality even in small-scale models, while redundancy increases with size, enabling more aggressive pruning at larger scales. 
+
+B.3 Comparison with TEAL 
+
+TEAL (Liu et al., 2025) is a closely related training-free activation-sparsity method. It applies magnitude-based thresholding to activations supplied to projection layers. In the attention block, for example, TEAL can be applied to the inputs of the query, key, and value projections. However, it does not directly reduce the internal attention matrix products QK ⊤ or P V , where P denotes the attention-weight matrix. RMM overlaps with activation-sparsity methods when applied to linear or MLP projections, since both approaches use input-dependent activation information to retain a subset of dimensions. The main difference lies in formulation and scope. RMM defines the retained set over the shared contraction axis of a general matrix product. Consequently, the same reduction principle can be applied not only to projection layers, but also to QK ⊤ and P V , whose contracted axes correspond to attention-head feature dimensions Model Method RR Rouge-1 Rouge-2 Rouge-L Rouge-Lsum BERTScore Llama3.1 8B Baseline – 37.44 15.56 24.31 31.29 86.76 RMM 0.8 37.54 15.70 24.23 31.35 86.72                                                                                                                                                                                                             
+
+> RMM 0.5 34.15 13.60 22.03 28.70 85.75
+> Static 0.8 37.36 15.63 24.24 31.24 86.67 Static 0.5 28.01 9.85 19.28 24.34 84.02 Random 0.8 6.90 0.60 6.20 6.69 77.97 Random 0.5 5.67 0.20 5.23 5.54 81.42 H2O 0.8 24.38 9.26 16.28 21.88 82.72 H2O 0.5 24.38 9.26 16.28 21.88 82.72 Llama3.2 1B Baseline –36.51 15.24 23.55 30.59 86.41 RMM 0.8 37.27 15.71 23.62 30.96 86.35
+> RMM 0.5 11.90 2.35 9.80 11.15 79.55
+> Static 0.8 36.77 15.36 23.39 30.68 86.35 Static 0.5 4.73 0.07 4.26 4.58 75.53 Random 0.8 7.30 0.02 6.58 7.08 79.15 Random 0.5 6.26 0.40 5.53 6.01 76.85 H2O 0.8 23.22 8.12 15.56 20.30 83.76 H2O 0.5 23.22 8.12 15.56 20.30 83.76 Llama3.2 3B Baseline –36.72 15.08 23.56 30.63 86.55 RMM 0.8 36.72 15.16 23.58 30.66 86.54
+> RMM 0.5 28.31 9.83 19.45 24.60 84.74
+> Static 0.8 35.96 14.81 23.24 30.13 86.31 Static 0.5 19.91 6.06 14.69 17.83 82.06 Random 0.8 6.67 0.39 5.93 6.44 79.72 Random 0.5 5.85 0.04 5.33 5.70 77.09 H2O 0.8 19.49 6.32 13.83 17.03 82.78 H2O 0.5 19.49 6.32 13.83 17.03 82.78 Qwen3-1 7B Baseline –36.56 13.05 22.86 29.75 85.91 RMM 0.8 35.32 12.08 22.31 28.99 86.81
+> RMM 0.5 21.91 5.89 14.54 18.60 83.33
+> Static 0.8 34.43 11.63 22.05 28.47 86.67 Static 0.5 4.12 0.05 3.79 4.01 78.09 Random 0.8 10.23 0.03 8.04 9.66 76.31 Random 0.5 6.75 0.06 6.09 6.54 76.46 H2O 0.8 4.20 9.10 3.68 3.98 73.46 H2O 0.5 4.20 9.10 3.68 3.98 73.46
+
+Table 10: Performance comparison of different pruning methods on CNN summarization task. RMM consistently outperforms baseline methods across different models and retention ratios. 
+
+and token positions, respectively. We compare RMM with TEAL on LLaMA 3.1 8B using the same zero-shot evaluation protocol as in the main experiments. RMM uses a retention ratio of RR = 0 .7, and the TEAL threshold is calibrated to provide a matched nominal reduction level. We consider the following configurations. QKV-Pro-TEAL 
+
+applies TEAL to the inputs of the query, key, and value projection layers. QKV-Pro-RMM applies RMM to the corresponding projection matrix products. QKV-Attention-RMM applies RMM to the QKV projections together with the internal attention products QK ⊤ and P V . MLP-TEAL applies TEAL throughout the MLP block, whereas MLP-Whole-RMM applies RMM to the Up, Gate, and Down projections. Finally, MLP-Attention-RMM applies RMM to both the MLP block and the complete attention-side computation. RMM does not outperform TEAL in every individual setting. Across the evaluated tasks, however, RMM is competitive with or stronger than TEAL in most comparisons. More importantly, the matrix-product formulation allows RMM to extend the reduction scope beyond projection inputs to include the internal attention products QK ⊤ and P V . These results therefore demonstrate both the overlap between RMM and activation sparsity in projection layers and the broader operational coverage enabled by RMM. 
+
+B.4 Compute-Normalized Component Analysis 
+
+We compare the reducibility of different Transformer components on ARC-Easy using LLaMA 3.1 8B at a matched retention ratio of RR = 0 .7. For every targeted matrix product, RMM retains the same fraction of the contraction dimension. Because the theoretical multiplication cost of a matrix product scales linearly with its contraction dimension, this setting corresponds to a matched relative compute budget within each targeted operation. This normalization is relative to the dense computation of each targeted operation. It does not imply that different components remove the same absolute number of MACs or the same fraction of full-model computation, since the operations differ in shape, frequency, and sequence-length dependence. Method COPA ARC-C ARC-E PIQA CommonsenseQA Baseline 77.20 49.50 76.32 79.92 66.01 QKV-Pro-TEAL 75.40 43.81 75.09 77.24 59.46 QKV-Pro-RMM 77.00 46.82 72.81 77.48 62.65 QKV-Attention-RMM 77.00 46.80 72.80 78.10 62.70 MLP-TEAL 72.00 30.48 59.12 69.24 47.13 MLP-Whole-RMM 70.00 31.77 57.54 71.44 48.89 MLP-Attention-RMM 68.40 33.11 52.28 67.85 48.73 
+
+Table 11: Zero-shot comparison between RMM and TEAL on LLaMA 3.1 8B. RMM uses RR = 0 .7, while the TEAL threshold is calibrated to provide a matched nominal reduction level.                             
+
+> Pruning target Accuracy Accuracy drop RR Retained energy Baseline 76.32 –––Attention-side (full) 72.80 3.52 0.7 89.69% MLP Up 60.00 16.32 0.7 82.24% MLP Gate 69.12 7.20 0.7 84.61% MLP Down 72.81 3.51 0.7 99.02% MLP Whole 57.54 18.78 0.7 87.85%
+
+Table 12: Compute-normalized component analysis on ARC-Easy using LLaMA 3.1 8B. All reduction configurations use RR = 0 .7, corresponding to the same relative contraction-axis compute budget within each targeted matrix product. 
+
+In addition to accuracy, we report Retained Energy , defined as the fraction of activation squared norm preserved by the selected dimensions. This quantity provides a diagnostic of how much activation magnitude is captured by the retained subspace. Although all configurations use the same relative reduction level, their accuracy and retained-energy behavior differ substantially. The three individual MLP projections provide a particularly controlled comparison because they have the same matrix dimensions. Reducing the Up projection causes a 16 .32 -point accuracy drop, whereas reducing the Down projection causes only a 3.51 -point drop. The Gate projection lies between these two cases, with a 7.20 -point drop. These differences show that MLP reducibility is strongly projection-dependent rather than being determined by the retention ratio alone. Retained activation energy provides a useful diagnostic of this variation. MLP-Down retains 99 .02% 
+
+of the activation energy and exhibits the smallest drop among the individual MLP projections, whereas MLP-Up retains 82 .24% and exhibits the largest drop. Attention-side reduction retains 89 .69% of the activation energy and causes a 3.52 -point accuracy drop, indicating substantial robustness under the tested reduction setting. Retained energy alone, however, does not fully determine downstream performance. Reducing the complete MLP block retains 87 .85% of activation energy but causes a substantially larger accuracy drop than reducing any individual projection. This suggests that reduction errors can accumulate across multiple MLP projections and that the functional role of each projection also affects reducibility. Overall, the results support component-aware retention policies: attention-side computation is robust under the tested setting, while MLP reduction should be applied selectively across the Up, Gate, and Down projections. 
+
+B.5 Evaluation on Additional Vision–Language Models 
+
+To examine whether RMM transfers across different multimodal architectures, we additionally evaluate LLaVA-1.5-7B, Gemma 3 12B, and InternVL3-8B on POPE. These models represent different vision– language model families and complement the Qwen 2.5-VL evaluation presented in the main text. Table 13 reports accuracy for the dense models and RMM at retention ratios of 0.8 and 0.5.At RR = 0 .8, all three models remain close to their dense baselines. LLaVA-1.5-7B changes from 
+
+85 .00 to 86 .00 , Gemma 3 12B changes from 87 .00 to 86 .00 , and InternVL3-8B retains its baseline accuracy of 92 .33 . Together with the Qwen 2.5-VL results reported in the main text, these results show Model RR = 1 .0 RR = 0 .8 RR = 0 .5                 
+
+> LLaVA-1.5-7B 85.00 86.00 57.33 Gemma 3 12B 87.00 86.00 76.00 InternVL3-8B 92.33 92.33 92.33
+> Table 13: Accuracy on POPE using three additional vision–language model backbones under different retention ratios.
+> Method Retention ratio Accuracy INT8 baseline 1.0 81.40 INT8 + RMM 0.8 77.40 INT8 + RMM 0.5 73.00
+> Table 14: COPA accuracy of attention-side RMM applied to an INT8-quantized LLaMA 3.1 8B model. All configurations use the same quantized loading and evaluation protocol.
+
+that RMM is not tied to a single VLM architecture and can be applied across multiple multimodal model families while preserving dense-level performance under moderate reduction. Under the more aggressive RR = 0 .5 setting, the degree of tolerance varies across architectures. LLaVA-1.5-7B exhibits a larger drop, Gemma 3 12B remains moderately robust, and InternVL3-8B remains stable in this evaluation. Overall, these results support the cross-architecture applicability of the RMM matrix-product reduction principle, while indicating that the appropriate retention ratio should be selected according to the target model. 
+
+B.6 Compatibility with INT8 Weight Quantization 
+
+To examine whether RMM remains applicable when combined with weight quantization, we evaluate attention-side RMM on LLaMA 3.1 8B loaded using bitsandbytes INT8 weight quantization. All configurations are evaluated on COPA using the same quantized loading and evaluation protocol. The model weights remain quantized throughout inference, while RMM is applied only to the attention-internal matrix products QK ⊤ and P V . The unreduced configuration serves as the INT8 baseline. This setting directly tests whether RMM can operate on the attention activations produced by an INT8-quantized model without task-specific training or modification of the quantized weights. As shown in Table 14, attention-side RMM remains applicable when the model weights are quantized to INT8. Under moderate reduction, the quantized model retains most of its baseline performance. As the retention ratio decreases further, accuracy degrades accordingly, preserving the expected accuracy– reduction trade-off. These results show that the behavior of RMM remains controllable in the quantized setting. Overall, the experiment demonstrates that attention-side RMM can be used alongside INT8 weight quantization. The two methods act on different aspects of inference: weight quantization reduces the numerical precision used to store and process model weights, whereas RMM reduces the active contraction-axis computation in the attention-internal matrix products. This experiment establishes empirical compatibility rather than additional latency gains from a jointly optimized low-bit RMM kernel. Developing such fused quantized kernels is left for future work. 
+
+B.7 End-to-End Latency on LLaMA 3.1 70B 
+
+We additionally evaluate the end-to-end latency of RMM on LLaMA 3.1 70B using the same evaluation standard as in the main latency experiment. The evaluation uses a batch size of 1 and a retention ratio of 
+
+RR = 0 .8. The dense and RMM implementations use the same model precision, hardware allocation, device mapping, and parallelization configuration. The speedup is limited at sequence length 1024, where selection and kernel-launch overheads constitute a larger fraction of the total runtime. The benefit becomes more pronounced at sequence length 2048. At sequence length 4096, the dense implementation runs out of memory under the evaluated configuration, while the RMM implementation completes inference. Sequence length Dense RMM Speedup 1024 384.46 ms 373.29 ms 1.03 ×      
+
+> 2048 823.06 ms 584.21 ms 1.41 ×
+> 4096 OOM 1001.45 ms OOM avoided
+> Table 15: End-to-end latency of dense and RMM inference on LLaMA 3.1 70B. At sequence length 4096, the dense implementation runs out of memory under the evaluated hardware configuration.
+
+The 4096-token result should not be interpreted as model-weight compression. RMM reduces the active computation and may reduce the intermediate or workspace requirements of the affected matrix products, but it does not reduce the number of model parameters or the memory required to store the model weights. Our current implementation replaces selected attention operations with custom Triton kernels and is not yet fully fused with every Transformer component, inference framework, or quantized backend. Consequently, end-to-end gains depend on sequence length, hardware, backend, and kernel-integration overhead. More complete framework integration and dedicated low-bit kernels remain future work. 
+
+B.8 Selecting the Retention Ratio 
+
+RMM is training-free but not hyperparameter-free. The retention ratio specifies the desired accuracy– efficiency trade-off at deployment time, analogous to selecting a sparsity level in pruning or a bit-width in quantization. The appropriate retention ratio is therefore not expected to be universal across models, tasks, or Transformer components. When labeled downstream validation data are unavailable, the retention ratio can be selected using deployment constraints or unlabeled consistency measurements. If a target compute or latency budget is known, users can select a retention ratio based on the corresponding reduced contraction dimension and then verify whether the resulting model satisfies the deployment requirement. Alternatively, users can perform a small label-free consistency sweep. Given a collection of unlabeled prompts, the dense model and RMM are run using the same decoding configuration. Their generated outputs or output distributions are then compared, and the smallest retention ratio satisfying a desired agreement threshold is selected. As a preliminary example, we use 100 unlabeled Wikipedia passages with LLaMA 3.1 8B and generate up to 10 new tokens using greedy decoding. At RR = 0 .7, RMM produces exactly the same continuation as the dense model for 87 out of the 100 passages, corresponding to a sequence-level exact agreement of 87% . This provides a simple label-free diagnostic for identifying a retention ratio that preserves the behavior of the dense model under the evaluated generation setting. The component-wise results further suggest that a single retention ratio need not be shared across the entire model. Attention-side operations can often use a more aggressive reduction, whereas MLP projections may require more conservative and projection-specific ratios. We therefore view RR = 0 .7
+
+as a useful empirical starting point for attention-side reduction in the evaluated setting, rather than as a universal default. In practical deployment, we recommend a small unlabeled consistency sweep whenever representative unlabeled inputs are available. 
+
+C Ablation Study Details 
+
+Sensitivity to different components. We provide comprehensive component-wise ablation results on LLaMA 3.1 8B in Table 16. The experiments apply RMM to different projection and attention-internal matrix products, both individually and in combination, to examine how reducibility varies across Transformer components. 
+
+Definition of pruning targets. We define each pruning target according to the matrix products to which RMM is applied. Q Projection applies RMM only to the query projection XW Q. QKV Projection 
+
+applies RMM to all three query, key, and value projections, XW Q, XW K , and XW V . Attention applies RMM to the attention-internal matrix products QK ⊤ and P V , where P denotes the attention-weight matrix. The hybrid configurations apply RMM to the union of their corresponding targets. Attention&Q 
+
+combines the query projection with QK ⊤ and P V , while Attention&QKV combines all QKV projections with the two attention-internal matrix products. For the MLP block, MLP Up , MLP Gate , and MLP Down apply RMM only to the Up, Gate, and Down projection matrix products, respectively. Whole MLP applies RMM to all three MLP projections. Finally, 
+
+MLP&Attention combines Whole-MLP reduction with reduction of the attention-internal products QK ⊤
+
+and P V . In each hybrid configuration, the reported retention ratio is applied to every included matrix product. 
+
+Attention-side reduction. Attention-side operations are comparatively robust under the tested retention ratios. Applying RMM only to the query projection produces the most stable behavior, while extending reduction to all QKV projections or directly to the attention-internal products introduces a more noticeable but generally controlled degradation as the retention ratio decreases. The Attention&Q and Attention&QKV configurations closely follow their corresponding projection-only variants. This indicates that adding reduction to QK ⊤ and P V introduces limited additional degradation in these settings, providing further evidence that the attention-internal matrix products contain substantial reducibility. Overall, the results support attention-side computation as a comparatively robust target for moderate reduction. 
+
+MLP-side reduction. MLP reducibility is strongly projection-dependent. The Up projection is the most sensitive among the individual MLP projections, the Gate projection exhibits intermediate sensitivity, and the Down projection is substantially more robust. This variation shows that the MLP block should not be treated as a uniformly sensitive or uniformly reducible component. Applying RMM to the complete MLP block produces considerably larger degradation than reducing any individual MLP projection. This suggests that approximation effects accumulate when the Up, Gate, and Down projections are reduced simultaneously. MLP reduction should therefore be applied selectively, with retention ratios chosen according to the specific projection. 
+
+Hybrid strategies. Combining attention-side and Whole-MLP reduction produces stronger degradation than reducing either side selectively. This indicates that applying the same aggressive reduction uniformly across the entire Transformer is not an effective deployment strategy. Instead, hybrid configurations should use more aggressive reduction for robust attention-side operations and more conservative, projection-specific reduction for sensitive MLP components. 
+
+Takeaways. The ablations provide three main findings. First, attention-side matrix products exhibit substantial reducibility, particularly under moderate reduction. Second, MLP reducibility varies consid-erably across the Up, Gate, and Down projections, while simultaneously reducing the complete MLP block is substantially more damaging. Third, effective deployment should use heterogeneous retention policies rather than a single uniformly aggressive ratio across all components. These findings reveal a structural asymmetry in how redundancy is distributed across Transformer matrix products and motivate component-aware application of RMM. 
+
+D Efficiency Analysis 
+
+D.1 Complexity Analysis 
+
+We analyze how RMM affects the principal matrix products in attention and MLP computation. Let N
+
+denote the sequence length, D the attention-head dimension, dv the value dimension, d the model hidden dimension, and m the intermediate width of the MLP. For a matrix product whose contraction dimension has size s, we write ρ = k/s for the fraction of contraction-axis indices retained by RMM. The analysis below describes the arithmetic cost of the targeted matrix products; selection operations such as norm computation, TopK, and gather introduce additional overhead. 
+
+(i) Attention. Self-attention contains two principal matrix products: the attention-score computation 
+
+QK ⊤ and the value aggregation P V , where P = softmax( QK ⊤) denotes the attention-weight matrix. For a sequence of length N , computing QK ⊤ over a head dimension of size D has complexity O(N 2D).If RMM retains K = ρfeat D feature dimensions along the shared contraction axis, the arithmetic cost of the reduced score product becomes 
+
+O(N 2K) = O(ρfeat N 2D). (1) This reduces the theoretical MACs of the score matrix multiplication approximately in proportion to ρfeat ,while the output score matrix remains of size N × N .For value aggregation, P ∈ RN ×N is multiplied by V ∈ RN ×dv . The dense multiplication has complexity O(N 2dv). If RMM retains ℓ = ρtok N token positions along the shared token axis, the reduced multiplication has complexity 
+
+O(N ℓd v) = O(ρtok N 2dv). (2) Thus, the theoretical MACs of QK ⊤ and P V scale approximately with ρfeat and ρtok , respectively. These reductions apply to the targeted matrix products and do not include the cost of selection, softmax, or other attention operations. During autoregressive decoding at step t, the current query attends to t cached keys and values. The score-product cost decreases from O(tD ) to O(ρfeat tD ), while the value-aggregation cost decreases from 
+
+O(td v) to O(ρtok td v).With a suitable kernel and data layout, feature selection can reduce the key features used by the score product, and token selection can reduce the value vectors accessed during value aggregation. However, the attention scores must still be computed over the available keys before value-side token selection. Consequently, RMM does not reduce the size of the stored KV cache, and the K-cache access required for attention-score computation is not eliminated. The system-level reduction in cache traffic therefore depends on the specific operation, kernel implementation, and memory layout. 
+
+(ii) MLPs. RMM applies contraction-axis selection separately to each MLP projection. Consider a general projection 
+
+ApWp, Ap ∈ RN ×din ,p , Wp ∈ Rdin ,p ×dout ,p . (3) Its dense arithmetic cost is O(N d in ,p dout ,p ). Retaining kp = ρpdin ,p indices along the contraction axis reduces the target matrix-product cost to 
+
+O(N k pdout ,p ) = O(ρpN d in ,p dout ,p ). (4) For the gated MLP architecture evaluated in this work, the Up and Gate projections map from the model dimension d to the intermediate dimension m, whereas the Down projection maps from m back to 
+
+d. Accordingly, RMM selects from the model hidden dimension for the Up and Gate projections and from the intermediate dimension for the Down projection. Each projection uses a retained set determined from its own input activation; the Up, Gate, and Down projections do not share a single common index set. When the same retention ratio is applied to all three projections, the theoretical MACs of their targeted matrix multiplications are reduced by approximately the same relative fraction. The output dimensions of the projections remain unchanged, and the full model weights remain stored. 
+
+Comparison with other reduction strategies. Unlike token-level pruning, RMM does not shorten the input sequence. Unlike weight pruning, it does not permanently remove model parameters or reduce the memory required to store the full model weights. Instead, RMM reduces the active contraction-axis computation of selected matrix products using indices determined from the current activations. A shared retention ratio provides a simple control over the relative arithmetic cost of each targeted operation. Component-specific ratios can also be used because different Transformer components exhibit different reduction sensitivities. The resulting reduction in total model computation depends on which operations are targeted, their shapes and execution frequencies, and the sequence length. Practical implications. The theoretical complexity reductions above describe the reduced matrix multiplications themselves. Realizing wall-clock gains also requires efficient implementations of activation scoring, TopK selection, indexing, and the reduced products. Our latency experiments use custom Triton kernels for selected attention operations and show that the theoretical savings can produce practical speedups under the evaluated settings, particularly at longer sequence lengths. The magnitude of the end-to-end gain depends on sequence length, batch size, hardware, data layout, kernel fusion, and selection overhead. Our current implementation is not fully integrated with all Transformer operations, inference frameworks, or quantized backends. Moreover, RMM reduces active computation but does not reduce model parameter count or stored weight memory. 
+
+Summary. For each targeted matrix product, retaining a fraction ρ of the contraction dimension reduces its theoretical arithmetic cost to approximately a fraction ρ of the dense product, excluding selection overhead. In attention, this principle applies to the feature axis of QK ⊤ and the token axis of P V ; in MLP blocks, it applies separately to the contraction axis of each projection. The corresponding full-model and wall-clock benefits depend on the selected components and their system-level implementation. This provides a controllable, input-adaptive accuracy–efficiency trade-off without modifying or permanently removing model weights. 
+
+E Theoretical Analysis of RMM 
+
+We provide theoretical justification for the design of RMM. We first establish that TopK selection by column norm is minimax optimal under a natural constraint (Section E.1), then derive the approximation error bound (Section E.2). 
+
+E.1 Minimax Optimality of Activation-Aware Selection 
+
+In Transformer inference, the activation matrix A is observed, while the other operand B is not known at selection time. We show that under this information asymmetry, TopK selection by column norm is the optimal dimension selection strategy. We decompose the matrix product AB as a sum of rank-one terms over the shared dimension: 
+
+AB =
+
+> d
+
+X
+
+> j=1
+
+A:,j Bj, :. (5) Each term A:,j Bj, : contributes independently along dimension j, with contribution magnitude 
+
+∥A:,j Bj, :∥F = ∥A:,j ∥2 ∥Bj, :∥2. When we discard dimension j, the error contribution from that di-mension is ∥A:,j ∥2 ∥Bj, :∥2. Since we observe A but not B, we formulate the selection problem as a minimax game over independent per-dimension adversaries. 
+
+Theorem 1 (Minimax Optimality) . Let A ∈ Rn×d be a fixed activation matrix, and let k ∈ { 1, . . . , d }.Define 
+
+I∗ = arg min  
+
+> |I| =k
+
+max    
+
+> bj≥0, j =1 ,...,d
+> Pdj=1 b2
+> j≤1
+
+X
+
+> j / ∈I
+
+∥A:,j ∥2 bj , (6) 
+
+where bj = ∥Bj, :∥2 represents the unknown row energy of B. Then I∗ = TopK  {∥ A:,j ∥2}dj=1 , k .Proof. By Proposition 1, the approximation error satisfies 
+
+∥AB − A:,I BI,:∥F ≤ X
+
+> j / ∈I
+
+∥A:,j ∥2 ∥Bj, :∥2. (7) This upper bound depends on B only through the row norms bj = ∥Bj, :∥2. We therefore analyze the minimax problem over this upper bound, which yields a tractable upper-bound surrogate for the original approximation problem. Denote αj = ∥A:,j ∥2 and ¯I = [ d] \ I . For fixed I, the inner maximization is 
+
+max    
+
+> bj≥0
+> P
+> jb2
+> j≤1
+
+X
+
+> j∈¯I
+
+αj bj . (8) By the Cauchy–Schwarz inequality, P 
+
+> j∈¯I
+
+αj bj ≤  P  
+
+> j∈¯I
+
+α2
+
+> j
+
+1/2 P  
+
+> j∈¯I
+
+b2
+
+> j
+
+1/2, with equality when 
+
+bj ∝ αj for j ∈ ¯I and bj = 0 for j ∈ I . Since the adversary can place all energy on ¯I and set P 
+
+> j∈¯I
+
+b2 
+
+> j
+
+= 1 , the inner maximum equals 
+
+X
+
+> j∈¯I
+
+∥A:,j ∥22
+
+1/2
+
+= ∥A:,¯I ∥F . (9) The outer minimization then becomes 
+
+min  
+
+> |I| =k
+
+∥A:,¯I ∥F = min 
+
+> |I| =k
+
+X
+
+> j / ∈I
+
+∥A:,j ∥22
+
+1/2
+
+. (10) Minimizing P 
+
+> j / ∈I
+
+∥A:,j ∥22 over all subsets I of size k is equivalent to maximizing P 
+
+> j∈I
+
+∥A:,j ∥22, which is achieved by selecting the k dimensions with the largest column norms: 
+
+I∗ = TopK  {∥ A:,j ∥2}dj=1 , k . (11) 
+
+Remark 1 (Tightness). The inner maximization (9) is achieved by setting bj = αj /∥A:,¯I ∥F for j ∈ ¯I
+
+and bj = 0 otherwise. This corresponds to a matrix B whose row norms are proportional to the activation column norms in the discarded dimensions—precisely the worst case for any fixed selection. TopK selection minimizes the impact of this worst case. 
+
+Remark 2 (Interpretation). Theorem 1 states that among all deterministic selection rules that observe only A and retain k dimensions, TopK by column norm minimizes the worst-case error bound. The result holds for any B and does not require assumptions on the structure of B. This provides a principled justification for the design of RMM: the selection rule is minimax optimal for the stated activation-only upper-bound surrogate under the information asymmetry inherent in Transformer inference. 
+
+Remark 3 We note that the optimality established here is with respect to selection rules that depend only on A. If B were also observable at selection time, a jointly optimal rule could achieve lower error. However, in Transformer inference, the selection must be made before the matrix multiplication is executed, making the one-sided setting the natural formulation. 
+
+E.2 Approximation Error Bound Proposition 1 (RMM Approximation Error Bound) . Let A ∈ Rn×d and B ∈ Rd×m, and let I ⊆ [d]
+
+with |I| = ⌈ρd ⌉ be the index set selected by RMM. Denote the complement ¯I = [ d] \ I . Then the approximation error satisfies 
+
+∥AB − A:,I BI,:∥F ≤ X
+
+> j∈¯I
+
+∥A:,j ∥2 ∥Bj, :∥2. (12) 
+
+Proof. The full matrix product decomposes as AB = Pdj=1 A:,j Bj, :. The RMM approximation retains only the terms indexed by I, so the error is 
+
+AB − A:,I BI,: = X
+
+> j∈¯I
+
+A:,j Bj, :. (13) Applying the triangle inequality and ∥uv ⊤∥F = ∥u∥2∥v∥2 yields the bound. E.3 A Factorized Bound via Cauchy–Schwarz Corollary 1. Under the same notation as Proposition 1, 
+
+∥AB − A:,I BI,:∥F ≤ ∥ A:,¯I ∥F ∥B¯I,:∥F . (14) 
+
+Proof. Applying the Cauchy–Schwarz inequality to the right-hand side of Eq. (12): 
+
+X
+
+> j∈¯I
+
+∥A:,j ∥2 ∥Bj, :∥2 ≤
+
+X
+
+> j∈¯I
+
+∥A:,j ∥22
+
+ 
+
+> 1/2
+
+X
+
+> j∈¯I
+
+∥Bj, :∥22
+
+
+
+> 1/2
+
+= ∥A:,¯I ∥F ∥B¯I,:∥F . (15) 
+
+E.4 Interpretation 
+
+The bound in Corollary 1 admits a clear interpretation: the approximation error is controlled by the product of the residual energy in the discarded columns of A and the discarded rows of B. Define the 
+
+discarded energy ratio of A as 
+
+ϵA(ρ) ≜ ∥A:,¯I ∥2
+
+> F
+
+∥A∥2
+
+> F
+
+, (16) and analogously ϵB (ρ) for B. Then the relative error satisfies 
+
+∥AB − A:,I BI,:∥F
+
+∥A∥F ∥B∥F
+
+≤ pϵA(ρ) ϵB (ρ). (17) This bound, combined with Theorem 1, reveals two key properties: 
+
+(1) Energy concentration implies small error. When the activation energy of A is concentrated in a small number of dimensions—as is widely observed in Transformer hidden states—the discarded energy ratio ϵA(ρ) is small even at aggressive retention ratios. For instance, if the top 70% of dimensions capture 95% of the total energy, then ϵA(0 .7) = 0 .05 , and the relative error is bounded by p0.05 · ϵB (0 .7) .
+
+(2) TopK selection minimizes the A-side residual. By Theorem 1, RMM selects the index set that minimizes ∥A:,¯I ∥2 
+
+> F
+
+among all choices of size ⌈ρd ⌉. That is, for any alternative selection I′ with |I ′| = |I| ,
+
+∥A:,¯I ∥2 
+
+> F
+
+≤ ∥ A:,¯I′ ∥2 
+
+> F
+
+. (18) This means that among all activation-only selection rules at the same retention ratio, RMM achieves the tightest possible bound on the approximation error. Method Ratio Copa ARC-C ARC-E PiQA CommQA AVG Prune Q Projection 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 77.4 48.16 76.67 79.6 66.18 69.60 0.8 77.6 49.83 76.84 79.71 66.42 70.08 0.7 77.6 50.84 76.67 79.82 65.11 70.01 0.6 77.2 47.83 76.14 78.94 65.68 69.16 0.5 77.2 44.15 73.86 79.27 64.54 67.80 
+
+Prune QKV Projection 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 76.6 48.16 75.26 79.16 65.44 68.92 0.8 77.2 47.49 75.09 79.05 64.70 68.71 0.7 77.0 46.82 72.81 77.48 62.65 67.35 0.6 73.4 37.46 68.60 77.48 59.38 63.26 0.5 70.6 36.79 62.98 76.65 51.92 59.79 
+
+Prune Attention 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 78.2 48.49 75.79 79.22 65.57 69.45 0.8 74.8 47.83 75.44 79.05 64.95 68.41 0.7 78.0 44.15 70.70 78.89 63.14 66.98 0.6 76.6 39.13 68.42 78.73 59.71 64.52 0.5 74.6 32.11 62.11 74.76 54.22 59.56 
+
+Prune Attention&Q 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 77.4 48.16 76.67 79.60 66.18 69.60 0.8 77.6 49.83 76.84 79.71 66.42 70.08 0.7 77.6 50.84 76.67 79.82 65.11 70.01 0.6 77.2 47.83 76.14 78.94 65.68 69.16 0.5 77.2 44.15 73.86 79.27 64.54 67.80 
+
+Prune Attention&QKV 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 76.6 48.20 75.30 79.20 65.40 68.94 0.8 77.2 47.50 75.10 79.10 64.70 68.72 0.7 77.0 46.80 72.80 78.10 62.70 67.48 0.6 73.4 37.50 68.60 77.50 59.40 63.28 0.5 70.6 36.80 63.00 76.60 51.90 59.78 
+
+Prune MLP Up 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 73.0 46.49 70.70 78.07 60.20 65.69 0.8 73.6 38.46 62.98 76.17 58.31 61.90 0.7 68.2 41.47 60.00 74.59 55.12 59.88 0.6 69.0 34.55 58.07 73.72 53.15 57.70 0.5 66.8 28.76 51.05 69.15 46.44 52.44 
+
+Prune MLP Gate 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 73.6 44.82 74.74 79.33 60.69 66.64 0.8 74.2 47.16 70.00 77.42 60.03 65.76 0.7 74.8 41.81 69.12 75.35 59.30 64.08 0.6 74.4 42.81 66.49 74.27 56.51 62.90 0.5 69.4 34.11 63.86 71.49 50.61 57.89 
+
+Prune MLP Down 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 76.8 47.16 73.33 78.84 61.02 67.43 0.8 76.0 46.49 73.51 78.89 59.71 66.92 0.7 74.8 45.48 72.81 77.20 58.48 65.75 0.6 74.0 42.81 66.84 76.71 53.71 62.81 0.5 72.0 40.80 64.04 76.22 53.73 61.36 
+
+Prune Whole MLP 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 69.6 43.81 67.02 76.66 58.23 63.06 0.8 68.6 37.46 61.75 75.39 54.55 59.55 0.7 70.0 31.77 57.54 71.44 48.89 55.93 0.6 65.2 25.08 48.95 63.76 42.42 49.08 0.5 53.6 23.75 35.44 57.56 31.04 40.28 
+
+Prune MLP&Attention 
+
+Baseline 77.2 49.5 76.32 79.92 66.01 69.79 0.9 69.6 41.47 65.61 77.15 58.97 62.56 0.8 69.8 35.12 56.32 73.72 55.86 58.16 0.7 68.4 33.11 52.28 67.85 48.73 54.07 0.6 56.6 27.76 44.56 57.51 36.69 44.62 0.5 56.4 25.08 31.05 52.88 28.01 38.68 
+
+Table 16: Comprehensive component-wise RMM ablations on LLaMA 3.1 8B across five QA benchmarks. Each group reports RMM applied to the indicated matrix product or combination of products under different retention ratios.
