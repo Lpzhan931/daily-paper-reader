@@ -1,0 +1,571 @@
+Title: From Positionwise Confidence to Prefix Scheduling: Verifier Skipping in Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2608.14787v1
+
+Published Time: Tue, 18 Aug 2026 00:08:32 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# From Positionwise Confidence to Prefix Scheduling: Verifier Skipping in Speculative Decoding 
+
+Haoxuan Luo, Jameson Sandler, Ferdinando Fioretto 
+
+University of Virginia 
+
+{ayr7tb,jmz4ds,fioretto}@virginia.edu 
+
+Abstract 
+
+Speculative decoding is a leading technique to reduce the cost of autoregressive generation by using a small drafter to propose several tokens, which are then verified in parallel by a larger target model. Speculative diffusion decoding (SDD) further removes sequential drafting by generating every position in a draft block in parallel with a discrete diffusion model. How-ever, SDD still invokes the target on every block, leaving verification as a potential bot-tleneck. This paper recognizes that this creates a new control handle: whether to invoke the verifier at all. Thus, we study verifier skip-ping , a lossy policy that commits a selected draft prefix directly, and ask which confidence signal should schedule it. Interestingly, our study finds that better token predictors need not yield better schedulers: skips require con-tiguous high-confidence prefixes, while short skips can induce additional drafting rounds. To study this mismatch, we compare raw confi-dence with learned marginal and conditional survival scores under the same policy, using Strict SDD, lenience, and top-k acceptance as baselines. On HumanEval with DiffuCoder-7B-Instruct and Qwen3-32B, all three confidence signals save 9.6% to 13 .5% of verifier calls at the same observed pass@1 as Strict SDD. Surprisingly, raw confidence saves the most; marginal survival has higher positionwise AU-ROC than raw confidence at most positions, yet neither learned signal dominates online. Our analysis shows that verifier skipping is a use-ful new lossy axis and, surprisingly, its key challenge is prefix scheduling rather than token prediction alone. 
+
+1 Introduction 
+
+Speculative decoding reduces generation cost by pairing a small drafter, which proposes several to-kens, with a larger target model that verifies them in parallel (Leviathan et al., 2023; Chen et al., 2023). Speculative diffusion decoding (SDD) extends this 54 56 58 60 62 
+
+> Decode throughput (tokens/s)
+> 0.75 0.80 0.85 0.90 0.95 1.00
+> Strict token agreement
+> Raw confidence Marginal survival Conditional survival Lenience Top-k acceptance Strict SDD
+
+Figure 1: Raw confidence remains competitive with the learned survival signals and preserves higher strict agreement than lenience at comparable throughput. Re-sults use HumanEval with DiffuCoder-7B-Instruct and Qwen3-32B at γ = 32 . Each curve shows the Pareto frontier over a fixed parameter grid; faded markers de-note settings dominated by another setting of the same method. 
+
+separation by generating every position in a draft block in parallel with a discrete diffusion model, thereby removing the sequential dependency within the drafting stage (Christopher et al., 2025). How-ever, this additional parallelism leaves target-side verification unchanged: strict decoding still invokes the target model for every drafted block, even when the target is substantially larger and its forward pass dominates the latency of a decoding round (Kumar et al., 2025; Zhong et al., 2025). This shift in the computational bottleneck motivates verifier skip-ping , a distinct lossy axis that controls whether the target should be invoked for the current block, rather than changing only how tokens are drafted or accepted. Skipping a call saves verification work by committing a drafted prefix directly, but it may also commit a token that strict verification would reject; consequently, the central challenge is to de-termine when a sufficiently reliable prefix is worth that risk. 1arXiv:2608.14787v1 [cs.CR] 14 Aug 2026 Confidence provides a natural basis for this deci-sion because the scheduler must act before invoking the target and can therefore rely only on informa-tion available from the drafter. Selective prediction and model routing use confidence for a related pur-pose, that is deciding whether a model should re-turn an output or defer to a more expensive system (Geifman and El-Yaniv, 2019; Gu and Hopkins, 2023; Huang et al., 2025b; Lee et al., 2026). This connection motivates evaluating candidate signals offline through positionwise binary cross entropy (BCE) and area under the receiver operating charac-teristic curve (AUROC). These metrics characterize local predictive quality, but verifier skipping is not a collection of independent token decisions: the scheduler can commit only a contiguous prefix, so high scores that occur at isolated positions may pro-vide no usable skip. Moreover, the online value of a feasible prefix depends on its length, since a short skip may avoid one verifier call while requiring additional diffusion rounds to complete the same output. The paper thus poses two hypotheses about the relationship between offline prediction and online scheduling:       
+
+> Analysis Hypotheses H1. Offline prediction ̸⇒online scheduling. Better posi-tionwise BCE or AUROC need not produce a better online frontier because skipping requires contiguous prefixes.
+> H2. Fewer calls ̸⇒higher throughput. Short skips can add drafting rounds, so fewer verifier calls need not yield higher throughput.
+
+To test these hypotheses, we hold the prefix policy fixed and vary only the confidence signal: raw drafter confidence, marginal survival, or con-ditional survival. A shadow verifier audits every skipped round without affecting generation, allow-ing us to compare task quality, strict agreement, verifier calls, and throughput on HumanEval with DiffuCoder-7B-Instruct and Qwen3-32B (Gong et al., 2026; Yang et al., 2025; Chen et al., 2021). 
+
+Contributions. This paper makes three contribu-tions. First, it introduces verifier skipping as a new lossy axis for SDD and formulates it as a prefix-scheduling problem. Second, it combines a propo-sition, a permutation diagnostic, and a minimum-skip-length analysis to explain why better posi-tionwise metrics or fewer verifier calls need not improve online scheduling. Finally, it evaluates raw confidence and two learned survival signals against Strict SDD, lenience, and top-k acceptance (Leviathan et al., 2023). As Figure 1 shows, the confidence-guided policies reduce verifier calls by 
+
+9.6% to 13 .5% at the same observed pass@1 as Strict SDD, yet the learned signals do not consis-tently improve the online frontier over raw confi-dence. These contributions establish that effective verifier skipping depends on feasible prefixes and decoding dynamics, not token prediction alone. 
+
+2 Related Work 
+
+Speculative diffusion decoding. SDD pairs a par-allel discrete-diffusion drafter with an autoregres-sive verifier (Christopher et al., 2025). Subsequent methods retain this verifier while improving the drafter: SpecDiff-2 scales drafter–verifier align-ment (Sandler et al., 2026), DFlash incorporates target-model information into block-diffusion draft-ing (Chen et al., 2026), and DiffuSpec combines causal path search with adaptive proposal lengths (Li et al., 2026). A second line of work changes the proposal boundary. SpecDec++ adapts the can-didate length and AdaEDL stops drafting using a lower bound on token acceptance (Huang et al., 2025a; Agrawal et al., 2024), while Speculative Verification and DSpark limit how much of the pro-posal the target checks (Kim et al., 2026; Cheng et al., 2026). DSpark is especially close because prefix survival determines the verification length, but the target is still invoked. Lenience instead relaxes target acceptance (Leviathan et al., 2023), whereas SpecPV verifies only part of the proposal (Tan et al., 2025). Thus, prior methods change drafting, acceptance, or the work performed within verification; verifier skipping changes whether ver-ification occurs at all and may commit a prefix without invoking the target. 
+
+Routing target computation. Verifier skipping is most closely related to systems that invoke a larger model conditionally. BiLD uses drafter confidence to trigger an autoregressive large decoder (Kim et al., 2023), while SPRINTER uses predicted rejec-tion to schedule approximate verification (Zhong et al., 2025). S2D2 brings conditional verifica-tion to diffusion language models but uses one block-diffusion model for both drafting and routed autoregressive verification (Han et al., 2026). In device–edge inference, U-HLM uses local uncer-tainty to invoke a remote language model (Oh et al., 2025), whereas CoVSpec uses a probability margin to coordinate device–edge vision-language infer-ence (Jia et al., 2026). These methods motivate con-ditional target computation, but BiLD, SPRINTER, 2U-HLM, and CoVSpec make tokenwise decisions with autoregressive drafters, while S2D2 does not separate the drafter and target. Our setting instead selects a contiguous prefix from a separate parallel diffusion drafter without the target’s current output, making prefix feasibility central to the scheduling decision. 
+
+Confidence-based deferral. Selective prediction studies when a model should abstain and how such decisions should be evaluated in NLP (Geifman and El-Yaniv, 2019; Gu and Hopkins, 2023). Con-fidence has also been used to decide whether to answer, which model should handle a query, or whether to continue a cascade (Machcha et al., 2025; Su et al., 2026; Soiffer et al., 2025; Shen et al., 2025; Ong et al., 2025; Chen et al., 2024). Uncertainty and calibration estimates can vary across tasks and estimators, and entropy alone may be insufficient for safe selective prediction (Tao et al., 2025; Phillips et al., 2026). Verifier skipping instead repeatedly decides whether to commit a contiguous prefix, so its behavior also depends on prefix length and the drafting rounds that follow. 
+
+3 Problem Setup 
+
+3.1 Strict Decoding and Verifier Skipping 
+
+Speculative decoding accelerates autoregressive generation by pairing a drafter with a larger verifier (Leviathan et al., 2023). Given the current prefix 
+
+x, the drafter proposes candidate tokens, which the verifier processes under a rule that preserves the target model’s decoding distribution. SDD retains this separation but generates the draft block ˆx1: γ = (ˆ x1, . . . , ˆxγ ) in parallel (Christopher et al., 2025). The autoregressive ver-ifier accepts a prefix of the block, whose length we denote by L ∈ { 0, . . . , γ }. Strict SDD invokes the verifier for every block before committing the resulting output under the standard rule. Because the verifier is substantially larger than the drafter in our setting, this mandatory call accounts for much of each round’s cost. Verifier skipping turns this mandatory call into a scheduling decision. Let K ∈ { 0, . . . , γ } denote the committed skip length: K = 0 executes the standard strict round, whereas K > 0 commits 
+
+ˆx1: K without calling the verifier. Comparing K
+
+with L identifies when a skip is lossy, since K > L 
+
+means that the committed prefix contains at least one token that strict verification would reject. This comparison also provides the basis for measuring agreement. 
+
+3.2 Agreement with Strict Verification 
+
+The comparison between K and L motivates two complementary agreement measures. Let A be the set of rounds in which a relaxed rule commits a nonempty draft prefix. For each b ∈ A , let Kb de-note the committed prefix length and Lb the length that strict verification would accept from the same draft block. Because Lb is unobserved on skipped rounds, a shadow verifier recovers it from the same prefix and draft block. Its output is used only for agreement: it does not affect decoding, and the call is excluded from latency and verifier call counts. Lenience and top-k acceptance already invoke the target, so their 
+
+Lb is obtained from that call. In each case, the com-parison remains local to the current block rather than a separately generated Strict SDD sequence. The first metric, strict token agreement, mea-sures the fraction of committed tokens that strict verification would accept: 
+
+StrictToken = 
+
+P 
+
+> b∈A
+
+min( Kb, L b)
+
+P 
+
+> b∈A
+
+Kb
+
+. (1) Because the metric is token weighted, it gives par-tial credit when strict verification would reject only a suffix of the committed prefix. To distinguish such partially valid commits from prefixes accepted in full, we also report full prefix acceptance: 
+
+FullPrefix = 1
+
+|A| 
+
+X
+
+> b∈A
+
+1{Kb ≤ Lb}. (2) It requires every committed token to pass strict verification; both metrics equal one for Strict SDD. 
+
+4 Confidence-Guided Verifier Skipping 
+
+Figure 2 summarizes the decoding loop: for each parallel draft block, the policy uses drafter-side confidence to select a candidate prefix, then either commits it or executes a strict round. 
+
+4.1 Skip Policy 
+
+At each round, the diffusion drafter proposes ˆx1: γ
+
+and a confidence estimator assigns each position a score qj ∈ [0 , 1] . Section 4.2 defines three interpre-tations of this score within the same policy. For a prefix of length k, the local score Bk =min 1≤j≤k qj rejects any prefix containing a low-confidence position, while the signal-specific score 
+
+Ck = Ck(q1: k) summarizes the prefix as a whole. 3next round next round                              
+
+> prefix
+> x
+> diffusion drafter
+> drafts γtokens in parallel ̂
+> x1̂x2⋯̂ xγ
+> candidate prefix: ̂ Ktokens
+> position scores q1 : γ
+> ηb
+> local gate failure
+> local gate: Bk= min
+> j≤k
+> qj≥ηb
+> prefix gate: Ck≥ηĉ
+> K= longest prefix passing both gates
+> skip test ̂
+> K≥ max(1, Kmin )
+> D<Smax
+> guards pass
+> tests pass otherwise
+> skip verification
+> commit ̂ x1 :̂ K
+> D←D+̂ K
+> strict round
+> autoregressive verifier
+> commit strict output yD← 0
+
+Figure 2: Confidence-guided verifier skipping. The policy selects the longest prefix satisfying both confidence gates and skips verification only when the minimum-length, staleness, and safety conditions also permit it. 
+
+Given thresholds ηb and ηc, the policy selects the longest prefix that satisfies both gates: 
+
+bK = max {k ∈ { 1, . . . , γ } : Bk ≥ ηb, C k ≥ ηc} ,
+
+(3) where max ∅ = 0 .Confidence alone does not determine whether an eligible prefix should be committed, because the policy must also control fragmentation and stale target feedback. Let D count the unverified to-kens committed since the most recent verifier call, and let Smax denote the staleness threshold. If 
+
+D ≥ Smax , the policy forces a strict round; other-wise, it skips only when bK > 0, bK ≥ Kmin , and all remaining guards pass. The minimum length 
+
+Kmin prevents short skips from fragmenting gen-eration, whereas the staleness rule restores target feedback after enough unverified tokens. The re-maining guards cover end-of-sequence and other special tokens, repetition, invalid scores, and short-ened final blocks. When all conditions hold, the policy sets K =
+
+bK, commits ˆx1: K , and updates D ← D + K; oth-erwise, it sets K = 0 and executes a strict round. Every verifier call resets D to zero. Because stale-ness is checked before a skip, D may exceed Smax 
+
+by at most γ − 1, in which case the next round is necessarily strict. 
+
+4.2 Confidence Signals 
+
+To isolate the confidence representation from the scheduler, we evaluate three signals within the same policy. They differ only in the position score 
+
+qj and prefix rule Ck. The two learned variants also share the same per-position multilayer perceptron (MLP) and pre-verification inputs, differing only in their training targets and examples. The first signal is raw confidence, qraw  
+
+> j
+
+=
+
+pdraft (ˆ xj ), which under greedy drafting is the largest output probability at position j. Because it does not estimate verifier acceptance, we use it as a scheduling heuristic and define Craw  
+
+> k
+
+=(Qkj=1 qraw  
+
+> j
+
+)1/k . This geometric mean summarizes the prefix, while the local gate detects any low-confidence position. The second signal, marginal survival, estimates 
+
+aj = Pr( L ≥ j | F ) from the pre-verification drafter information F. It is trained on all blocks using labels yj = 1{L ≥ j}. Although the true se-quence aj is nonincreasing, the predictions ˆaj need not be; we therefore define ¯ak = min 1≤j≤k ˆaj and set qmarg  
+
+> j
+
+= ˆ aj and Cmarg  
+
+> k
+
+= ¯ ak. Consequently, 
+
+Bmarg  
+
+> k
+
+= Cmarg  
+
+> k
+
+= ¯ ak, so both gates reduce to 
+
+ηm = max {ηb, η c}.The third signal, conditional survival, estimates 
+
+sj = Pr( L ≥ j | L ≥ j − 1, F), with L ≥ 0
+
+by convention. Consistent with this at-risk inter-pretation, positions j ≤ L receive positive labels, 
+
+j = L + 1 receives a negative label when L < γ ,and later positions are masked. We set qcond  
+
+> j
+
+= ˆ sj
+
+and Ccond  
+
+> k
+
+= Qkj=1 ˆsj , computing the product in log space. We parameterize ηc = 1 − ϵ, so ϵ con-trols the predicted prefix risk. Because the signals aggregate position scores differently, they also determine whether the local 4and prefix gates impose distinct constraints. For any q1: k ∈ [0 , 1] k,
+
+> k
+
+Y
+
+> j=1
+
+qj ≤ min  
+
+> j≤k
+
+qj ≤
+
+
+
+> k
+
+Y
+
+> j=1
+
+qj
+
+
+
+> 1/k
+
+. (4) This ordering explains the role of each gate. For raw confidence, the geometric mean can remain high despite one low position, so the local gate adds a distinct constraint. For marginal survival, both gates equal ¯ak and are therefore identical. For conditional survival, the prefix gate implies the local gate whenever ηc ≥ ηb; only when ηb > η c
+
+can the local gate impose an additional restriction. 
+
+4.3 From Positionwise Prediction to Prefix Scheduling Survival semantics. Marginal and conditional survival encode the same prefix event at different levels of factorization. In particular, 
+
+aK = Pr( L ≥ K | F ) = 
+
+> K
+
+Y
+
+> j=1
+
+sj ,sj = aj
+
+aj−1
+
+when aj−1 > 0, a0 = 1 .
+
+(5) The factorization follows directly from the chain rule and requires no independence assumption. Ex-act marginal and conditional probabilities therefore contain the same information about prefix survival, even though separately trained predictors may be-have differently because their targets and training populations differ. This equivalence also clarifies how the scores should be aggregated. Only conditional survival factors should be multiplied, because each marginal 
+
+aj already includes survival through all earlier positions. For example, if the conditional fail-ure probability is h at every position, then aK =(1 − h)K , whereas multiplying the marginals yields QKj=1 aj = (1 − h)K(K+1) /2 and therefore counts earlier survival events repeatedly. The cumulative survival score further provides a direct risk interpretation. Suppose that bCk ≤
+
+Pr( L ≥ k | F ) for every k, and that bK is selected using only information in F. Then 
+
+bC bK ≥ 1 − ϵ =⇒ Pr( L ≥ bK | F ) ≥ 1 − ϵ. 
+
+(6) Under these assumptions, every selected prefix has conditional probability at least 1 − ϵ of being fully accepted. Our learned scores are not certified lower bounds, so this statement provides an interpretation rather than a formal guarantee; raw confidence has no analogous survival semantics. 
+
+Positionwise metrics and prefix events. Posi-tionwise predictive quality need not determine scheduling quality. Positionwise metrics score each draft position independently, whereas the policy re-quires several consecutive leading positions to pass together. Thus, identical positionwise behavior can yield different prefix frequencies, as the following proposition formalizes. 
+
+Proposition 1 (Positionwise metrics do not de-termine prefix frequency) . Fix 1 ≤ K ≤ γ,
+
+ρ ∈ (0 , 1) , a threshold τ ∈ (0 , 1) , and any distri-bution of L with Pr( L ≥ K) > 0. There exist two score processes q1: γ and q′ 
+
+> 1: γ
+
+taking values in (0 , 1) 
+
+such that (qj , 1{L ≥ j}) and (q′ 
+
+> j
+
+, 1{L ≥ j}) have the same joint distribution at every position j, while 
+
+Pr 
+
+
+
+min  
+
+> j≤K
+
+qj ≥ τ
+
+
+
+= Pr( L ≥ K)ρ, 
+
+Pr 
+
+
+
+min  
+
+> j≤K
+
+q′ 
+
+> j
+
+≥ τ
+
+
+
+= Pr( L ≥ K)ρK .
+
+See Appendix A.1 for the proof and a discussion of the construction. 
+
+Runtime geometry. Prefix frequency is also in-sufficient to determine online efficiency because skip length changes the number of required draft blocks. Let cD and cV denote the average costs of one block and one verifier call. Decode time is approximately 
+
+Tdecode ≈ cDNblk + cV Nver + Tpolicy , (7) where Nblk and Nver count draft blocks and verifier calls, while Tpolicy captures predictor inference and other policy overhead. To isolate the local break-even condition, we omit policy overhead and compare a strict round that commits A tokens on average at cost cD + cV
+
+with a skip of length K at cost cD. The skip has higher local throughput exactly when 
+
+KcD
+
+> AcD + cV
+
+,K > K ⋆ := A cD
+
+cD + cV
+
+.
+
+(8) Thus, local throughput improves only when K > K⋆, motivating Kmin : shorter skips may save a verifier call but add enough draft blocks to reduce throughput. 55 Experiments 
+
+5.1 Experimental Setup 
+
+We pair DiffuCoder-7B-Instruct with Qwen3-32B as the diffusion drafter and autoregressive veri-fier, respectively, and disable thinking (Gong et al., 2026; Yang et al., 2025). We evaluate all 164 HumanEval problems using pass@1 (Chen et al., 2021). Unless stated otherwise, decoding is greedy, uses two diffusion steps, and generates at most 512 tokens. A preliminary Strict SDD throughput com-parison determined γ = 32 before any skipping-policy evaluation; the main experiments then use 
+
+Kmin = 6 and Smax = 64 . All main runs use two NVIDIA A100 80 GB GPUs. To separate predictor training from policy evalu-ation, we partition HumanEval into five folds. Each run uses three folds for training, one for validation, and one for testing, with the roles rotated so every prompt appears exactly once in a test fold. Raw confidence requires no training but is evaluated on the same test folds, and every frontier uses a fixed threshold grid. This protocol supports complementary offline and online evaluations. Offline prediction is mea-sured by per-position BCE against position-only baselines, with AUROC as a ranking metric. On-line efficiency is measured by verifier calls per gen-erated token, normalized by Strict SDD, and by generated tokens per second; strict token agree-ment follows Section 3.2. Runtime includes the drafter, verifier, predictor, and policy but excludes the shadow audit. All reported results pool the five test folds. 
+
+5.2 Offline Prediction and Online Frontiers H1: Offline prediction ̸ ⇒ online scheduling. 
+
+To test whether offline improvements predict on-line scheduling, we first measure how well the learned models estimate strict prefix survival at in-dividual draft positions. Marginal survival predicts 
+
+1{L ≥ j} over all blocks, whereas conditional sur-vival predicts the same event only among blocks with L ≥ j − 1. Figure 3 compares both models with the empirical positive rate at each position, estimated from the training folds. Both learned predictors improve substantially over their position-only baselines: average BCE de-creases from 0.641 to 0.306 for marginal survival and from 0.195 to 0.123 for conditional survival. Conditional estimates become noisier at later po-sitions because fewer blocks remain at risk and provide training examples. Appendix A.2 com-plements this comparison with per-position AU-ROC for the learned predictors and raw confidence, which has slightly higher AUROC at some early positions. 
+
+Online scheduling. Having established an of-fline predictive advantage, we next ask whether it transfers online by sweeping the three signals’ thresholds while holding all other policy compo-nents fixed. Figure 1 relates strict token agreement to throughput, while Figure 4 relates pass@1 and agreement to relative verifier calls. Strict SDD pro-vides the common quality and cost reference, with strict token agreement equal to one. Strict SDD obtains 0.9085 pass@1. At observed points with the same aggregate pass@1, raw con-fidence, conditional survival, and marginal sur-vival reduce verifier calls by 13 .5% , 12 .5% , and 
+
+9.6% , respectively. Their full prefix acceptance is 
+
+0.9814 , 0.9712 , and 0.9776 , respectively, showing that each policy saves calls while remaining close to strict verification. The lossy baselines provide additional context for these gains. Lenience still verifies every block, yet its calls per generated token are 4.6% below Strict SDD at the same pass@1, while top-k ac-ceptance provides little call reduction and falls to 
+
+0.7744 pass@1 at k = 2 . A periodic policy that attempts a fixed-length skip once every P rounds without confidence is also dominated by raw con-fidence in both pass@1 and relative verifier calls at every tested setting; Appendix A.4 reports these results. 
+
+H1 finding and significance. Despite their offline gains, the learned signals do not dominate online. Raw confidence reaches the lowest call rates in the aggressive region and remains on the frontier near Strict SDD quality; conditional survival uses fewer calls than marginal survival at several high-quality points, whereas marginal survival achieves higher strict token agreement at conservative set-tings. Thus, no signal dominates across task quality, verifier calls, and strict agreement. This mismatch supports H1: better positionwise prediction is not sufficient for a better scheduling frontier. Impor-tantly, the result shows why BCE or AUROC alone cannot select an online scheduler; it establishes a lack of observed dominance by the learned scores, not universal superiority of raw confidence. 
+
+Why the online metrics must be separated. At a raw-confidence point matching Strict SDD pass@1, 61 4 8 12 16 20 24 28 32 
+
+Draft position j        
+
+> 0.0 0.2 0.4 0.6
+> BCE
+> Marginal survival Position-only baseline 14812 16 20 24 28 32
+
+Draft position j
+
+> 0.0 0.2 0.4 0.6
+> BCE
+> Conditional survival Position-only baseline
+
+Figure 3: Positionwise BCE for marginal and conditional survival on HumanEval at γ = 32 . Dashed curves show position-only baselines estimated from the training folds. 0.75 0.80 0.85 0.90 0.95 1.00 
+
+Relative verifier calls       
+
+> 0.70 0.75 0.80 0.85 0.90 0.95
+> pass@1
+> Raw confidence Marginal survival Conditional survival Lenience Top-k acceptance Strict SDD 0.70 0.75 0.80 0.85 0.90 0.95 1.00
+> Relative verifier calls
+> 0.75 0.80 0.85 0.90 0.95 1.00
+> Strict token agreement
+> Raw confidence Marginal survival Conditional survival Lenience Top-k acceptance Strict SDD
+
+Figure 4: HumanEval quality and agreement with strict decoding versus relative verifier calls at γ = 32 . Each curve shows the Pareto frontier over a fixed parameter grid for one method. Faded markers show the remaining settings. 
+
+throughput rises from 55 .1 to 58 .1 tokens per second as relative verifier calls fall to 0.866 . Asecond point with the same aggregate pass@1 reaches 59 .8 tokens/s with 0.975 strict token agree-ment. Lenience reaches a similar 59 .2 tokens/s, but with 0.954 relative calls and 0.957 agreement. Moreover, the 58 .1 tokens/s raw-confidence point has 0.987 agreement and matches Strict SDD’s pass/fail outcome on every problem, whereas le-nience gains two passes and loses two. Matching aggregate pass@1 can therefore conceal different call, throughput, and agreement behavior, motivat-ing the H2 analysis below. 
+
+5.3 Prefix Geometry and Runtime Why H1 arises: dependence within a block. 
+
+The mismatch has a structural source: offline metrics evaluate positions separately, whereas the scheduler can skip only a contiguous prefix. Scheduling therefore depends on whether favor-able scores occur together near the beginning of the same block. Proposition 1 formalizes this gap by showing that positionwise metrics cannot deter-mine how often eligible prefixes occur. To isolate this dependence empirically, we apply an offline permutation diagnostic to the logged test blocks. At each position j, we randomly permute recorded score–label pairs across blocks. Raw con-fidence and marginal survival use all valid blocks with label 1{L ≥ j}, while conditional survival uses only blocks with L ≥ j − 1. Moving each pair together preserves every position’s score–label distribution, and hence every positionwise metric, while breaking the association among positions from the same block. We repeat the permutation 100 times at fixed settings: (ηb, η c) = (0 .90 , 0.93) for raw confi-dence, ηm = 0.90 for marginal survival, and 
+
+(ηb, η c) = (0 .90 , 0.90) for conditional survival. Each repetition recomputes the longest prefix sat-isfying the score gates before Kmin or staleness is applied; we call this the feasible prefix length. 70 3 6 9 12 16 24 32 
+
+Kmin              
+
+> 0.8 1.0 1.2 1.4
+> Relative to Strict SDD  Relative verifier calls Relative draft blocks
+> 0.788 0.801 0.817 0.835 0.838 0.837 0.841 0.860 1.491 1.274 1.135 1.089 1.054 1.034 1.003 0.992 036912 16 24 32
+
+Kmin   
+
+> 52 54 56 58 60
+> Decode throughput (tokens/s)
+> 52.83 56.51 58.54 58.75 59.39 59.98 60.34 59.96
+
+Figure 5: Effect of Kmin on verifier calls, draft fragmentation, and throughput for raw confidence. The remaining policy thresholds are fixed, and all points use the same timing setup. Table 1: Mean feasible prefix length before and after permutation. Per-position BCE and AUROC are un-changed by construction.         
+
+> Signal Original Permuted mean Raw confidence 8.75 1.59 Marginal survival 6.86 1.00 Conditional survival 8.76 2.11
+
+Because the diagnostic uses only logged blocks, it does not regenerate a decoding trajectory. 
+
+Mechanistic evidence for H1. Table 1 shows a large reduction for every signal: original mean lengths range from 6.86 to 8.76 , whereas permuted means range from 1.00 to 2.11 . Because all posi-tionwise metrics are unchanged, this collapse iso-lates information that BCE and AUROC cannot capture—which positions become jointly available as a prefix. The diagnostic does not reproduce an online trajectory, but it explains one mechanism behind the offline-to-online gap. Appendix A.3 complements this analysis with a fixed-threshold ablation of the local and prefix gates. 
+
+H2: Fewer verifier calls ̸ ⇒ higher throughput. 
+
+Equation 8 predicts that short skips may reduce verifier calls without improving throughput. Fig-ure 5 tests this mechanism by varying Kmin while holding the remaining thresholds fixed. Setting 
+
+Kmin = 0 removes the minimum-length require-ment, although a skip still requires bK > 0. Raw confidence then lowers relative verifier calls to 
+
+0.788 , but raises relative draft blocks to 1.491 and reaches only 52 .83 tokens per second. Increasing 
+
+Kmin to 6 raises relative calls to 0.817 , yet reduces relative blocks to 1.135 and increases throughput to 58 .54 tokens per second. The same pattern continues across the sweep: throughput reaches 60 .34 tokens/s at Kmin = 24 
+
+and is slightly lower at Kmin = 32 , even as relative verifier calls rise from 0.788 to 0.860 . Observed pass@1 is 0.8963 for Kmin ∈ { 0, 3, 9}, 0.8902 
+
+for Kmin = 6 , 0.9024 for Kmin ∈ { 12 , 16 }, and 
+
+0.9085 for Kmin ∈ { 24 , 32 }.
+
+H2 finding and significance. Minimizing verifier calls does not maximize throughput, supporting H2 and showing why call reduction alone is an incom-plete efficiency objective: short skips can replace one verifier call with enough additional drafting work to slow decoding. We therefore use Kmin = 6 
+
+in the main experiments, which removes most ad-ditional draft blocks while keeping verifier calls 
+
+18 .3% below Strict SDD. Higher values reduce fragmentation further but yield smaller throughput gains and fewer call savings. 
+
+6 Conclusion 
+
+We introduced verifier skipping as a distinct lossy axis for SDD and evaluated the same prefix policy with raw confidence, marginal survival, and condi-tional survival. On HumanEval with DiffuCoder-7B-Instruct and Qwen3-32B, the three signals reach the same observed pass@1 as Strict SDD at operating points that reduce verifier calls per gen-erated token by 9.6% to 13 .5% . Raw confidence gives the largest reduction, and neither learned sig-nal consistently improves the observed online trade-off over it. The evidence supports both analysis hy-potheses: positionwise prediction metrics alone do not capture the prefix structure used by the sched-uler, and fewer verifier calls do not necessarily produce higher throughput. 8Limitations 
+
+The main experiments use one drafter and verifier pair on HumanEval under greedy decoding. Ap-pendix A.5 reports earlier transfer results on two additional benchmarks, but we have not tested other current model pairs or decoding settings. Each re-ported HumanEval point uses one completion per prompt, and matched-pass@1 operating points are identified from the observed test frontier. Equal-ity in aggregate pass@1 on 164 problems does not establish statistical quality equivalence; our re-sults show no observed online dominance by the learned signals, not a universal ordering. Through-put is measured using two GPUs with full sequence recomputation and no verifier KV cache, so the throughput results may differ in cached serving systems. Each prompt and setting is timed once, so small differences in tokens/s may be due to timing noise. The learned survival scores are not certi-fied lower bounds and therefore provide no formal guarantee of agreement with strict decoding. The predictors are trained only on Strict SDD trajec-tories and may encounter distribution shift after earlier verifier skips. We evaluate only one MLP architecture trained with positionwise objectives. 
+
+References 
+
+Sudhanshu Agrawal, Wonseok Jeon, and Mingu Lee. 2024. AdaEDL: Early draft stopping for speculative decoding of large language models via an entropy-based lower bound on token acceptance probability. In Proceedings of The 4th NeurIPS Efficient Natural Language and Speech Processing Workshop , volume 262 of Proceedings of Machine Learning Research ,pages 355–369. PMLR. Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and Charles Sutton. 2021. Program synthesis with large language models. Preprint , arXiv:2108.07732. Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. 2023. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 .Jian Chen, Yesheng Liang, and Zhijian Liu. 2026. DFlash: Block diffusion for flash speculative decod-ing. In Forty-third International Conference on Ma-chine Learning .Lingjiao Chen, Matei Zaharia, and James Zou. 2024. FrugalGPT: How to use large language models while reducing cost and improving performance. Transac-tions on Machine Learning Research .Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. Preprint , arXiv:2107.03374. Xin Cheng, Xingkai Yu, Chenze Shao, Jiashi Li, Yun-fan Xiong, Yi Qian, Jiaqi Zhu, Shirong Ma, Xi-aokang Zhang, Jiasheng Ye, et al. 2026. DSpark: Confidence-scheduled speculative decoding with semi-autoregressive generation. arXiv preprint arXiv:2607.05147 .Jacob K Christopher, Brian R Bartoldson, Tal Ben-Nun, Michael Cardei, Bhavya Kailkhura, and Ferdinando Fioretto. 2025. Speculative diffusion decoding: Ac-celerating language generation through diffusion. In 
+
+Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Compu-tational Linguistics: Human Language Technologies (Volume 1: Long Papers) , pages 12042–12059. Yonatan Geifman and Ran El-Yaniv. 2019. Selec-tiveNet: A deep neural network with an integrated reject option. In Proceedings of the 36th Interna-tional Conference on Machine Learning , volume 97 of Proceedings of Machine Learning Research , pages 2151–2159. PMLR. Shansan Gong, Ruixiang Zhang, Huangjie Zheng, Ji-atao Gu, Navdeep Jaitly, Lingpeng Kong, and Yizhe Zhang. 2026. DiffuCoder: Understanding and im-proving masked diffusion models for code generation. In International Conference on Learning Representa-tions , volume 2026, pages 15723–15750. Zhengyao Gu and Mark Hopkins. 2023. On the evalua-tion of neural selective prediction methods for natural language processing. In Proceedings of the 61st An-nual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 7888– 7899, Toronto, Canada. Association for Computa-tional Linguistics. Ligong Han, Hao Wang, Han Gao, Kai Xu, and Akash Srivastava. 2026. S2D2: Fast decoding for diffusion llms via training-free self-speculation. arXiv preprint arXiv:2603.25702 .Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021. Measuring mathematical problem solving with the MATH dataset. In Proceed-ings of the Neural Information Processing Systems Track on Datasets and Benchmarks , volume 1. Kaixuan Huang, Xudong Guo, and Mengdi Wang. 2025a. SpecDec++: Boosting speculative decoding via adaptive candidate lengths. In Second Conference on Language Modeling .Zhiqi Huang, Vivek Datla, Chenyang Zhu, Alfy Samuel, Daben Liu, Anoop Kumar, and Ritesh Soni. 2025b. 
+
+9Confidence-based response abstinence: Improving llm trustworthiness via activation-based uncertainty estimation. In Proceedings of the 2nd Workshop on Uncertainty-Aware NLP (UncertaiNLP 2025) , pages 184–193. Yuanyuan Jia, Shunpu Tang, and Qianqian Yang. 2026. CoVSpec: Efficient device-edge co-inference for vision-language models via speculative decoding. 
+
+Preprint , arXiv:2605.02218. Sehoon Kim, Karttikeya Mangalam, Suhong Moon, Ji-tendra Malik, Michael W Mahoney, Amir Gholami, and Kurt Keutzer. 2023. Speculative decoding with big little decoder. Advances in Neural Information Processing Systems , 36:39236–39256. Sungkyun Kim, Jaemin Kim, Dogyeong Yun, Jiho Shin, Junyeol Lee, and Jiwon Seo. 2026. Speculative veri-fication: Exploiting information gain for speculative decoding. In Findings of the Association for Compu-tational Linguistics: ACL 2026 , pages 36290–36307, San Diego, California, United States. Association for Computational Linguistics. Avinash Kumar, Sujay Sanghavi, and Poulami Das. 2025. HiSpec: Hierarchical speculative decoding for llms. arXiv preprint arXiv:2510.01336 .Sangmook Lee, Dohyung Kim, Hyukhun Koh, Nakyeong Yang, and Kyomin Jung. 2026. Confidence-guided stepwise model routing for cost-efficient reasoning. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 40, pages 31483–31491. Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via spec-ulative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR. Guanghao Li, Zhihui Fu, Min Fang, Qibin Zhao, Ming Tang, Chun Yuan, and Jun Wang. 2026. DiffuSpec: Unlocking diffusion language models for speculative decoding. In Findings of the Association for Compu-tational Linguistics: ACL 2026 , pages 20896–20910, San Diego, California, United States. Association for Computational Linguistics. Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harri-son Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. 2024. Let’s verify step by step. In The Twelfth Inter-national Conference on Learning Representations .Jiawei Liu, Chunqiu Steven Xia, Yuyao Wang, and Ling-ming Zhang. 2023. Is your code generated by Chat-GPT really correct? rigorous evaluation of large lan-guage models for code generation. In Advances in Neural Information Processing Systems , volume 36, pages 21558–21572. Curran Associates, Inc. Sravanthi Machcha, Sushrita Yerra, Sharmin Sultana, Hong Yu, and Zonghai Yao. 2025. Do large lan-guage models know when not to answer in medi-cal QA? In Proceedings of the 2nd Workshop on Uncertainty-Aware NLP (UncertaiNLP 2025) , pages 27–35, Suzhou, China. Association for Computa-tional Linguistics. Seungeun Oh, Jinhyuk Kim, Jihong Park, Seung-Woo Ko, Tony QS Quek, and Seong-Lyun Kim. 2025. Uncertainty-aware hybrid inference with on-device small and remote large language models. In 2025 IEEE International Conference on Machine Learn-ing for Communication and Networking (ICMLCN) ,pages 1–7. IEEE. Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chi-ang, Tianhao Wu, Joseph E Gonzalez, M Kadous, and Ion Stoica. 2025. RouteLLM: Learning to route LLMs from preference data. In International Con-ference on Learning Representations , volume 2025, pages 34433–34448. Edward Phillips, Fredrik K. Gustafsson, Sean Wu, An-shul Thakur, and David A. Clifton. 2026. Entropy alone is insufficient for safe selective prediction in llms. Preprint , arXiv:2603.21172. Qwen, An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jingren Zhou, Junyang Lin, and 24 others. 2025. Qwen2.5 technical report. Preprint ,arXiv:2412.15115. Jameson Sandler, Jacob Christopher, Tom Hartvigsen, and Ferdinando Fioretto. 2026. SpecDiff-2: Scal-ing diffusion drafter alignment for faster speculative decoding. Proceedings of Machine Learning and Systems , 8:1128–1147. Yuanzhe Shen, Yide Liu, Zisu Huang, Ruicheng Yin, Xi-aoqing Zheng, and Xuanjing Huang. 2025. SATER: A self-aware and token-efficient approach to routing and cascading. In Proceedings of the 2025 Confer-ence on Empirical Methods in Natural Language Processing , pages 10515–10529, Suzhou, China. As-sociation for Computational Linguistics. Duncan Soiffer, Steven Kolawole, and Virginia Smith. 2025. Semantic agreement enables efficient open-ended LLM cascades. In Proceedings of the 2025 Conference on Empirical Methods in Natural Lan-guage Processing: Industry Track , pages 2499–2537, Suzhou (China). Association for Computational Lin-guistics. Jiayuan Su, Fulin Lin, Zhaopeng Feng, Han Zheng, Teng Wang, Zhenyu Xiao, Xinlong Zhao, Zuozhu Liu, Lu Cheng, and Hongwei Wang. 2026. Cp-router: An uncertainty-aware router between LLM and LRM. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 40, pages 33065–33073. Zhendong Tan, Xingjun Zhang, Chaoyi Hu, Jun-jie Peng, and Kun Xia. 2025. SpecPV: Improv-ing self-speculative decoding for long-context gen-eration via partial verification. arXiv preprint arXiv:2512.02337 .
+
+10 Linwei Tao, Yi-Fan Yeh, Minjing Dong, Tao Huang, Philip Torr, and Chang Xu. 2025. Revisiting uncer-tainty estimation and calibration of large language models. Preprint , arXiv:2505.23854. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Day-iheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, and 41 others. 2025. Qwen3 technical report. Preprint ,arXiv:2505.09388. Meiyu Zhong, Noel Teku, and Ravi Tandon. 2025. Speeding up speculative decoding via sequen-tial approximate verification. arXiv preprint arXiv:2502.04557 .
+
+A Additional Experimental Details 
+
+A.1 Additional Analysis Details 
+
+Proof. Let Yj = 1{L ≥ j} and choose score levels 0 < qlo < τ < qhi < 1. Draw 
+
+Z ∼ Bernoulli( ρ) and independent variables 
+
+Z1, . . . , Z γ ∼ Bernoulli( ρ), all independently of 
+
+L. Define 
+
+qj = qlo + ( qhi − qlo )Yj Zq′ 
+
+> j
+
+= qlo + ( qhi − qlo )Yj Zj .
+
+At any fixed position, both scores equal qlo when 
+
+Yj = 0 ; when Yj = 1 , each equals qhi with proba-bility ρ and qlo otherwise. Their joint distributions with Yj are therefore identical. Their dependence across positions is different, however: the first K
+
+scores in the first process exceed τ when L ≥ K
+
+and Z = 1 , whereas the second process addition-ally requires Z1 = · · · = ZK = 1 . These events have the two stated probabilities. The construction isolates the dependence that positionwise metrics cannot observe. The shared variable Z makes high scores occur together in the first process, while the independent variables Zj
+
+disperse them across blocks in the second. Because the positionwise joint distributions remain identical, both processes receive the same value under any positionwise metric, including BCE and AUROC wherever defined. Nevertheless, a high-confidence prefix of length K occurs ρ1−K times as often in the first process. Thus, even when every selected prefix is fully accepted, positionwise metrics do not determine how often the scheduler encounters an eligible prefix. 
+
+A.2 Offline AUROC 
+
+Figure 6 compares the learned survival scores with raw confidence using positionwise AUROC. Marginal survival performs better across most po-sitions, while conditional survival and raw confi-dence are closer. 
+
+A.3 Gate Ablation 
+
+Table 2 reports a fixed threshold ablation of the pol-icy gates. We use settings fixed before inspecting the Qwen3 test results: (ηb, η c) = (0 .90 , 0.93) for raw confidence and (ηb, η c) = (0 .90 , 0.90) for con-ditional survival. Each variant removes one gate while leaving the remaining settings unchanged. We do not retune the variants because the goal is to identify the active constraint at each setting. We omit marginal survival because its local and prefix gates are equivalent. For raw confidence, the local-only policy closely matches the full policy, whereas the geometric-only policy lowers pass@1 from 0.8902 to 0.8598 .The local gate is therefore the main constraint at this setting. For conditional survival, the product-only policy is identical to the full policy, while the local-only policy reduces pass@1 to 0.7805 . Since 
+
+ηc = ηb = 0 .9, passing the product gate also passes the local gate. This redundancy is specific to the chosen thresholds; other choices can make both gates active, as discussed in Section 4.2. 
+
+A.4 Periodic Skipping Baseline 
+
+We evaluate a confidence-free baseline that at-tempts a skip of K = 6 tokens once every P
+
+rounds. All other rounds use strict decoding, and the same safety guards are checked before each scheduled skip. Each periodic setting is dominated by a point from the raw-confidence sweep in both pass@1 and relative verifier calls. 
+
+A.5 Transfer to MBPP+ and MATH 
+
+We report transfer results with DiffuCoder-7B-Instruct and Qwen2.5-72B-Instruct at γ = 16 
+
+(Gong et al., 2026; Qwen et al., 2025). The condi-tional predictor was trained on HumanEval strict traces and evaluated on MBPP+ and MATH. The marginal predictor was trained on HumanEval and MATH strict traces and evaluated on MBPP+ only. Neither predictor used MBPP+ examples, and all policy thresholds were selected on HumanEval. For MBPP+, the HumanEval indicator is 1 and the 11 1 4 8 12 16 20 24 28 32 
+
+Draft position j         
+
+> 0.5 0.6 0.7 0.8 0.9 1.0
+> AUROC
+> Raw confidence Marginal survival 14812 16 20 24 28 32
+
+Draft position j 
+
+> 0.5 0.6 0.7 0.8 0.9 1.0
+> AUROC
+> Raw confidence Conditional survival
+
+Figure 6: Positionwise AUROC on the held-out HumanEval folds at γ = 32 . The conditional evaluation includes positions with at least ten positive and ten negative examples. Table 2: Fixed threshold gate ablation on HumanEval at γ = 32 . Variants are not retuned. Calls and blocks are normalized by Strict SDD.                              
+
+> Signal Policy Pass@1 Tokens/s Relative calls Relative blocks Raw confidence Full 0.8902 58.54 0.8170 1.135 Local only 0.8902 58.24 0.8146 1.135 Geometric only 0.8598 60.82 0.7659 1.118 Conditional survival Full 0.8841 58.11 0.8175 1.137 Product only 0.8841 58.11 0.8175 1.137 Local only 0.7805 58.96 0.7896 1.130
+
+Table 3: Periodic skipping on HumanEval at γ = 32 .Relative calls are normalized by Strict SDD, and agree-ment denotes strict token agreement. Shadow verifica-tion is excluded from calls and throughput.                 
+
+> PPass@1 Tokens/s Rel. calls Agreement 30.5854 63.42 0.7939 0.7417 40.6768 60.50 0.8502 0.7542 80.7256 56.80 0.9540 0.6989
+
+MATH indicator is 0. For the conditional check-point, normalization maps the indicator inputs to zero to numerical precision on both HumanEval and MATH. We evaluate all 378 MBPP+ problems (Austin et al., 2021; Liu et al., 2023) and the first 300 prob-lems, in their original order, from the MATH-500 test split (Hendrycks et al., 2021; Lightman et al., 2024). All runs use greedy decoding, two diffusion steps, Kmin = 6 , and four NVIDIA A100 80 GB GPUs. Qwen2.5 is sharded over all four GPUs us-ing device_map=auto and a 50 GiB memory limit on GPU 0. DiffuCoder and the predictor also run on GPU 0. MBPP+ is evaluated with EvalPlus 0.3.1 and MBPP+ v0.2.0. For MATH, we extract the last balanced boxed expression, or the final signed in-teger or decimal if no boxed expression is present. We normalize LaTeX wrappers and spacing, cur-rency and percent notation, and numeric format-ting before exact string comparison. We do not use symbolic equivalence checking. Throughput is not directly comparable with the Qwen3 experiments because the model pair and hardware configuration differ. The MATH settings were fixed before evalua-tion. Raw confidence uses Smax = 24 , whereas conditional survival uses Smax = 32 , so these rows are not a controlled comparison. On MBPP+, raw confidence gives the largest call reduction but the lowest strict agreement. Us-ing 10,000 paired bootstrap resamples of the 378 tasks, the 95% percentile intervals for the pass@1 difference from Strict SDD are [−0.0079 , 0.0185] 
+
+for raw confidence, [−0.0344 , 0.0026] for marginal survival, and [−0.0212 , 0.0053] for conditional sur-vival. All three include zero. On the MATH subset, all scores are within 0.01 of Strict SDD, while rel-ative verifier calls fall by 3.6% to 6.4% .
+
+A.6 Baselines and Sweep Settings 
+
+For lenience, let zj (v) be the target logit for token v
+
+at position j. A drafted token ˆxj is accepted when 
+
+zj (ˆ xj ) − max  
+
+> v
+
+zj (v) ≥ log ℓ. (9) The decoder accepts the longest prefix satisfying this condition and uses the target argmax at the first 12 Table 4: Transfer results with DiffuCoder-7B-Instruct and Qwen2.5-72B-Instruct at γ = 16 . Score is EvalPlus pass@1 on the plus tests for MBPP+ and normalized answer exact match for the MATH subset. Calls are normalized by Strict SDD. Shadow verification is excluded from calls and throughput.                                          
+
+> Dataset Method Smax Score Tokens/s Relative calls Strict agreement MBPP+ Strict SDD –0.7593 23.03 1.0000 1.0000 Raw confidence 32 0.7646 25.64 0.8318 0.7503 Marginal survival 32 0.7434 24.14 0.9106 0.9344 Conditional survival 32 0.7513 23.35 0.9577 0.9544 MATH subset Strict SDD –0.4733 15.85 1.0000 1.0000 Raw confidence 24 0.4767 16.53 0.9359 0.9656 Conditional survival 32 0.4733 16.26 0.9636 0.9673
+
+rejection. A fully accepted block uses the same target bonus token as Strict SDD. At ℓ = 1 , we use the Strict SDD argmax comparison so that ties are handled identically. Top-k acceptance takes the longest draft prefix for which every drafted token is among the k largest target logits at its position. At the first rejected position, it uses the target argmax. A fully accepted block uses the target bonus token. Both lenience and top-k acceptance call the target model in every round. Longer accepted prefixes can still reduce verifier calls per generated token. All main HumanEval confidence sweeps use 
+
+Smax = 64 and, except in the Kmin diagnostic, 
+
+Kmin = 6 . A skip also requires bK > 0, so set-ting Kmin = 0 removes only the minimum-length constraint. All three skip policies reject prefixes containing forbidden special tokens, unverified end-of-sequence tokens, repetition, invalid scores, or shortened final blocks. These guards are not ap-plied to lenience or top-k acceptance because they call the target model in every round. 
+
+A.7 Predictor Details 
+
+Raw confidence is the probability assigned to a selected token in the DiffuCoder forward pass in which that token is revealed. Because drafting uses two diffusion steps, positions may receive their scores at different steps. The learned predictors are trained only on blocks from Strict SDD trajectories. Each predictor takes the 3,584-dimensional input to the LM head at the reveal step and 19 scalar features: reveal step, normalized reveal rank, reveal parallelism, a late-reveal indicator, top-1 probability and its logarithm, entropy and its negative, probability margin, top-5 probability mass, top-1 probability and negative entropy at diffusion step 0, their changes from dif-fusion step 0 to the reveal step, block position, generated length, segment position, and dataset in-dicators for HumanEval and MATH. The dataset indicators identify datasets rather than individual problems and are constant in the main HumanEval experiments. No verifier hidden state is used. The MLP architecture is 3603 → 256 → 256 →
+
+256 → 1. The hidden layers use GELU, with dropout 0.1 after the first two layers. Inputs are normalized using only the training folds. We train for 15 epochs with binary cross entropy, Adam, a learning rate of 10 −3, and a batch size of 4,096 tokens. We select the checkpoint with the lowest validation BCE. The online checkpoints use train-ing seed 0. Five folds are formed by shuffling the 164 prompt IDs with seed 12345. In rotation r, fold r is used for testing, fold (r + 1) mod 5 for validation, and the other three folds for training. Validation is used only for checkpoint selection, not for choos-ing policy thresholds or reported operating points. 
+
+A.8 Evaluation and Throughput 
+
+We generate one greedy completion for each of the 164 HumanEval problems, using temperature zero and decoding seed 0. The prompt requests the full function in a single Python code block. We extract and compile the code, then run the official HumanEval tests in a subprocess with a 10-second timeout. Pass@1 is the fraction of problems that pass. DiffuCoder and Qwen3 use BF16 weights, and Qwen3 logits are converted to FP32 when comput-ing log probabilities. Generation uses a batch size of one on two NVIDIA A100 80 GB GPUs. Diffu-Coder and the predictor run on one GPU; Qwen3 runs on the other without model parallelism. Before timing, each process runs one draft block and one target forward pass. The GPUs are syn-chronized before and after each timed decode. Time includes drafting, prediction, target verifi-cation, and decoder control, but excludes model 13 Table 5: Hyperparameter grids used in the reported sweeps.                                                           
+
+> Method Values Lenience ℓ∈ { 1.0,0.99 ,0.975 ,0.95 ,0.90 ,0.80 ,0.70 ,0.50 ,0.30 }
+> Top-kk∈ { 2,3,5};k= 1 is Strict SDD Raw confidence ηb∈ { 0.90 ,0.95 }and ηc∈ { 0.995 ,0.99 ,0.98 ,0.97 ,0.95 ,0.93 ,0.90 }, using every pairing; additional pairs (0 .80 ,0.93) ,(0 .80 ,0.85) ,(0 .70 ,0.70) , and (0 .60 ,0.50)
+> Marginal survival ηm∈ { 0.85 ,0.90 ,0.93 ,0.95 ,0.97 ,0.98 ,0.99 }
+> Conditional survival ηb= 0 .90 and ηc∈ { 0.99 ,0.98 ,0.97 ,0.95 ,0.93 ,0.90 ,0.85 ,0.80 }
+
+loading, warmup, prompt construction, HumanEval execution, and shadow verification. Each verifier call recomputes the full current sequence without a KV cache, including previously skipped tokens. This work is included in the reported time. Each prompt and policy setting is timed once. We aggregate throughput as P 
+
+> i
+
+Ni/ P 
+
+> i
+
+Ti, where 
+
+Ni is the number of generated tokens and Ti is the decode time for prompt i. All Qwen3 HumanEval runs, including the periodic baseline and top-k ex-tension, use this timing procedure. 14
