@@ -6,48 +6,50 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-22
-- 运行时间：2026-08-22 20:24:40 UTC
+- 最新运行日期：2026-08-23
+- 运行时间：2026-08-23 20:20:06 UTC
 - 运行状态：成功
-- 本次总论文数：8
+- 本次总论文数：10
 - 精读区：6
-- 速读区：2
+- 速读区：4
 
 ### 今日简报（AI）
-今日共处理8篇论文，精读6篇、速读2篇，重点聚焦大模型解码优化与边缘端推理效率。
-
-最值得关注的是两篇9.0分精读：《Beyond Tokens》系统梳理LLM与VLM解码方法，以及《S2-MoE》实现边缘设备上MoE的高效自推测解码。
-
-建议普通读者优先从解码方法综述入手建立全局认知，再结合S2-MoE了解实用优化方向。
-- 详情：[/202608/22/README](/202608/22/README)
+今日精读6篇、速读4篇，核心聚焦边缘端MoE自推测解码与长上下文稀疏注意力优化。最值得关注《S2-MoE》与《Learning how to Forget》，前者提升边缘设备解码效率，后者用遗忘机制改进稀疏注意力。建议下一步深入MoNe模块化记忆和FlashQuant异常感知推理，兼顾效率与内存。
+- 详情：[/202608/23/README](/202608/23/README)
 
 ### 精读区论文标签
-1. [Beyond Tokens: A Survey on Decoding Methods for Large Language and Vision-Language Models](/202608/22/2608.14797v1-beyond-tokens-a-survey-on-decoding-methods-for-large-language-and-vision-language-models)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：综述涵盖并行解码等加速视觉语言模型推理的解码方法
-2. [S2-MoE: Enabling Efficient Self-Speculative Decoding for Mixture-of-Experts on Edge Devices](/202608/22/2608.15018v1-s2-moe-enabling-efficient-self-speculative-decoding-for-mixture-of-experts-on-edge-devices)  
+1. [S2-MoE: Enabling Efficient Self-Speculative Decoding for Mixture-of-Experts on Edge Devices](/202608/23/2608.15018v2-s2-moe-enabling-efficient-self-speculative-decoding-for-mixture-of-experts-on-edge-devices)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：面向边缘设备MoE大语言模型的自投机解码与验证效率优化
+2. [Learning how to Forget: Fine-tuning for Long-Context Sparse Attention](/202608/23/2608.19920v1-learning-how-to-forget-fine-tuning-for-long-context-sparse-attention)  
    标签：评分：9.0/10、query:llm
-   evidence：面向MoE的自投机解码框架，降低验证开销并提升推理效率
-3. [S2-MoE: Enabling Efficient Self-Speculative Decoding for Mixture-of-Experts on Edge Devices](/202608/22/2608.15018v2-s2-moe-enabling-efficient-self-speculative-decoding-for-mixture-of-experts-on-edge-devices)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向混合专家模型的自投机解码，提升边缘设备上的推理效率
-4. [Learning how to Forget: Fine-tuning for Long-Context Sparse Attention](/202608/22/2608.19920v1-learning-how-to-forget-fine-tuning-for-long-context-sparse-attention)  
-   标签：评分：9.0/10、query:llm
-   evidence：通过微调适配稀疏注意力实现KV缓存压缩，直接支持LLM高效推理与KV缓存优化
-5. [FlashQuant: Sparse-Dense Fusion for Memory-Efficient Outlier-Aware LLM Inference](/202608/22/2608.15531v1-flashquant-sparse-dense-fusion-for-memory-efficient-outlier-aware-llm-inference)  
+   evidence：通过稀疏注意力进行KV缓存选择与压缩，并支持任意KV缓存策略的微调
+3. [S2-MoE: Enabling Efficient Self-Speculative Decoding for Mixture-of-Experts on Edge Devices](/202608/23/2608.15018v1-s2-moe-enabling-efficient-self-speculative-decoding-for-mixture-of-experts-on-edge-devices)  
    标签：评分：8.0/10、query:llm
-   evidence：面向内存高效LLM推理的量化与稀疏-稠密融合
-6. [MoNe: Modular Neural Memory for Efficient Long Context Inference](/202608/22/2608.17616v1-mone-modular-neural-memory-for-efficient-long-context-inference)  
+   evidence：针对MoE大语言模型的推理高效自投机解码，减少验证开销并提高专家复用，属于LLM投机解码加速
+4. [Dynamic Multi-Byte Prediction With Hierarchical Language Models](/202608/23/2608.15454v1-dynamic-multi-byte-prediction-with-hierarchical-language-models)  
    标签：评分：8.0/10、query:llm
-   evidence：高效长上下文推理；降低Transformer的计算和显存开销
+   evidence：通过并行多字节预测加速层次语言模型推理，与多令牌投机预测同属并行生成加速技术
+5. [DeltaLog: Deferred Materialization of Recurrent States for Linear Attention Decoding](/202608/23/2608.15533v1-deltalog-deferred-materialization-of-recurrent-states-for-linear-attention-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：线性注意力模型的高效解码，减少循环状态物化开销
+6. [FluxBin: Flexible LUT-based Ultra-low-bit LLM Inference by Algorithm-Kernel Synergy](/202608/23/2608.15602v1-fluxbin-flexible-lut-based-ultra-low-bit-llm-inference-by-algorithm-kernel-synergy)  
+   标签：评分：8.0/10、query:llm
+   evidence：通过算法-内核协同设计实现超低位宽大语言模型推理加速
 
 ### 速读区论文标签
-1. [DeltaLog: Deferred Materialization of Recurrent States for Linear Attention Decoding](/202608/22/2608.15533v1-deltalog-deferred-materialization-of-recurrent-states-for-linear-attention-decoding)  
+1. [MoNe: Modular Neural Memory for Efficient Long Context Inference](/202608/23/2608.17616v1-mone-modular-neural-memory-for-efficient-long-context-inference)  
+   标签：评分：8.0/10、query:llm
+   evidence：模块化神经记忆支持长上下文推理，使推理成本与上下文长度解耦
+2. [FlashAttention for Scalable Vector Architectures](/202608/23/2608.18656v1-flashattention-for-scalable-vector-architectures)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向向量架构的FlashAttention高效注意力机制，契合大模型高效推理主题
+3. [FlashQuant: Sparse-Dense Fusion for Memory-Efficient Outlier-Aware LLM Inference](/202608/23/2608.15531v1-flashquant-sparse-dense-fusion-for-memory-efficient-outlier-aware-llm-inference)  
    标签：评分：7.0/10、query:llm
-   evidence：通过循环状态内存优化实现高效大模型解码
-2. [Dynamic Multi-Byte Prediction With Hierarchical Language Models](/202608/22/2608.15454v1-dynamic-multi-byte-prediction-with-hierarchical-language-models)  
+   evidence：面向LLM推理加速的内存高效离群值感知量化方法
+4. [RecurrentGPT: Expressive Depth through Recurrent Modulation in Transformers](/202608/23/2608.15062v2-recurrentgpt-expressive-depth-through-recurrent-modulation-in-transformers)  
    标签：评分：6.0/10、query:llm
-   evidence：并行多字节预测以加速分层语言模型推理
+   evidence：提出共享核心的循环深度Transformer以减少内存占用并保持表达力，与大模型高效推理相关
 
 
 <div class="dpr-home-promo-card">
