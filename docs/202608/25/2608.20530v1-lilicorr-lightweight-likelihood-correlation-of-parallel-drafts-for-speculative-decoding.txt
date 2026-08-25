@@ -1,0 +1,1096 @@
+Title: LiLiCorr: Lightweight Likelihood Correlation of Parallel Drafts for Speculative Decoding
+
+URL Source: https://arxiv.org/pdf/2608.20530v1
+
+Published Time: Mon, 24 Aug 2026 00:10:08 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# LiLiCorr: Lightweight Likelihood Correlation of Parallel Drafts for Speculative Decoding 
+
+Matan Rusanovsky * Yoav Miron Roy Uziel Omer Belhasin Ran Zilberstein Maor Ashkenazi Michael Elad NVIDIA 
+
+## Abstract 
+
+Speculative decoding accelerates language-model inference by drafting future tokens that the target model verifies in parallel. A diffusion-style block head such as DFlash is an attractive drafter, predicting an entire block of future tokens in a single forward pass. However, it is trained on per-position marginals rather than the joint block distribution, so the tokens it emits are individually plausible yet jointly incoherent. We introduce LiL-iCorr, a Li ghtweight Li kelihood-based model that Corr elates the per-position marginal distributions such a drafter already produces. It keeps the top-K tokens at each position as candidates and processes them jointly, producing for each an in and an out vector. These vectors link candidates at consecutive positions: a pair matches when the earlier candidate’s out vector has high cosine similarity with the later candidate’s in vector. These matches capture the block’s joint structure without ever materializing the full joint distribution, which is exponential in the block length. Training makes the correct pairings score highest while pushing competing ones down, so coherent blocks outscore incoherent ones. One lightweight network pass produces all the vectors, and the pair-wise scores are then computed in parallel as batched matrix operations, leaving only a cheap greedy walk sequential. We further co-train the DFlash drafter with LiLiCorr, so it learns to propose candidates that correlate into longer accepted sequences. Over the vanilla DFlash drafter, LiLiCorr raises acceptance length on every benchmark, by 9 to 
+
+19% , while its single-pass scoring head accounts for only about 2.8% of the per-block latency. Against DFlash and two concurrently developed methods that also restore co-herence at draft time, LiLiCorr delivers the highest throughput in 70 of 72 settings: nine benchmarks at two target sizes under greedy and temperature-one decoding, and a throughput sweep over six concurrencies, two input lengths and three entropy tiers, with all systems equally optimized on a common serving stack. Extending LiLiCorr to inputs an order of magnitude longer than it was trained on preserves that lead. 
+
+## 1 Introduction 
+
+Speculative decoding accelerates autoregressive language-model inference by letting a small draft model propose several future tokens that the target model verifies in parallel, keeping the longest correct prefix (8, 3). Because decoding is memory-bandwidth bound, verifying a multitude of to-kens together costs little more than generating just one token. The resulting speedup depends on two quantities: the acceptance length , the expected number of draft tokens accepted per step, and the cost of the drafter itself. A good drafter must raise the former without inflating the latter. Much ef-fort therefore goes into raising acceptance length, with designs ranging from feature-autoregressive heads such as EAGLE (9, 10, 11) to multi-head predictors such as Medusa (2). A particularly promising approach predicts an entire block of future tokens in a single forward pass via a parallel diffusion-style drafter, such as DFlash (4), offering a long speculative window at very low cost.                 
+
+> *Correspondence to Matan Rusanovsky, mrusanovsky@nvidia.com .arXiv:2608.20530v1 [cs.CL] 20 Aug 2026 DFlash: one forward pass marginals over the full vocabulary
+> slot 1 slot 2 slot 3
+> argmax of each slot The dog meows sweetly
+> ×“The dog meows sweetly”
+> top-Kcandidates per slot
+> dog cat bird meows barks sings sweetly loudly softly LiLiCorr: one bidirectional pass in out
+> 0.34
+> 0.81
+> 0.22
+> The dog cat bird meows barks sings sweetly loudly softly all links are scored in parallel
+> ✓“The cat meows softly”
+> one network pass, all slots at once argmax walk, no network weights
+> (a) the marginal drafter is jointly wrong (b) one pass over all candidates (c) cheap greedy decoding
+
+Figure 1: Overview of LiLiCorr. (a) DFlash produces a distribution logit over the vocabulary at each slot in one forward pass, and taking the most probable token of each slot independently yields a sequence that is locally probable but jointly incoherent. (b) LiLiCorr retains the top-K tokens of every slot and scores them jointly in a single pass, emitting an in and an out vector per candidate. (c) 
+
+Adjacent candidates are coupled by the alignment of the earlier out vector with the later in vector, so each slot pair reduces to one matrix product and the whole block is scored in parallel. The block is then committed left to right by a greedy argmax operation that touches no network weights. In this work we build on DFlash, which predicts an entire block of future tokens in one forward pass. For each position in the block, henceforth a slot , it produces a distribution over the full vocabulary. Although DFlash attends bidirectionally across slots, so its representations can in principle correlate different positions, it is optimized with a per-position cross-entropy that supervises only the token 
+
+marginal at each slot. This leaves the joint distribution over the block largely unconstrained, so DFlash predicts each slot well yet can assemble the tokens into an incoherent block. This marginals problem is well known in the discrete diffusion literature, and its origin is combina-torial: the joint distribution over a block of B positions, each drawn from a vocabulary of size V , has 
+
+V B possible realizations, so materializing it is intractable even for very short blocks. Diffusion lan-guage models therefore never model the joint explicitly, and both diffusion and speculative-decoding literature offer ways to recover coherence without it. Masked diffusion models such as LLaDA, MDLM, and Dream (13, 17, 21) correlate the sequence through iterative denoising, re-masking a subset of the predicted tokens and re-predicting them over several rounds. In a speculative-decoding setting, however, each such round is another full drafter pass, which is too expensive. Tree-based reranking, such as DDTree (16), expands several candidate paths from the per-slot marginals and lets the target model select among them. This shifts the correlation work onto the target, whose passes speculative decoding is designed to save. The trade is especially unfavorable in the compute-bound, high-concurrency regime typical of real-world serving. In contrast, Domino (7) and DSpark (5), two works developed concurrently with ours, act at draft time while avoiding extra target passes, but they do so through a sequence of auto-regressive neural-network passes, one on each draft slot. We introduce LiLiCorr, a lightweight likelihood-based model that recovers a coherent sequence from these per-slot marginals in a single network pass. Figure 1 sets out the method end to end. LiLiCorr takes the top-K candidate tokens at each slot and produces two vectors per candidate: in 
+
+and out . These capture how candidates chain together: two adjacent candidates are compatible when the out vector of the first aligns, in cosine similarity, with the in vector of the second. Training aligns the out and in vectors of consecutive ground-truth tokens and separates the competing pairings. At inference, a cheap greedy walk commits the block left to right, at each position taking the candidate that best matches its committed predecessor. The central novelty is that this correlation logic reduces to matrix operations that are easy to optimize . All candidate interactions follow from one forward pass and are computed in parallel. Only the greedy path selection remains sequential, unlike prior draft-time approaches, which run the correlation network once per slot. LiLiCorr is trained jointly with DFlash rather than on top of a frozen drafter, so the drafter learns 2to propose candidate sets that LiLiCorr can turn into longer accepted sequences. Against a vanilla DFlash drafter trained on the same data, this raises acceptance length by 9 to 19% on every bench-mark, for 8B and 4B target sizes and both greedy and temperature-1 decoding. We further com-pare against the two concurrent works above, Domino and DSpark, which likewise tune the drafter alongside their head, giving every system the same optimization effort on a common serving stack. LiLiCorr achieves longer accepted lengths than Domino on 83% of the benchmarks and on the benchmark average in every setting, and it turns its drafts into tokens more efficiently than either baseline: it serves faster than both in all thirty-six settings, leading the stronger of the two by as much as 5.3% on the benchmark average. The reason is structural: both baselines spend a network pass on every draft slot, whereas LiLiCorr scores the entire candidate lattice at once. This results in a head roughly 2.4× cheaper than Domino’s once both are fully optimized (Table 3). The lead persists as serving concurrency rises, and it carries to inputs an order of magnitude longer than the drafter was trained on, once the positional encoding is extended at inference. 
+
+Contributions. 
+
+(1) A novel likelihood-based formulation of the marginals problem. We cast the recovery of a coherent sequence from per-slot marginals as a learned scoring model over candidate paths. Rather than reason in the full vocabulary, the model attends over all candidates of all slots by assigning two low-dimensional vectors to each, which encode how neighbors are matched. (2) Correlation as efficient parallel matrix operations. At decoding time, a single network pass precomputes all of the correlations, as the pairwise candidate interactions reduce to matrix operations that are easy to optimize. This is followed by a cheap greedy walk that remains sequential. Prior draft-time approaches instead run the correlation network once per slot. (3) State-of-the-art results. LiLiCorr sets a new state-of-the-art for draft-time correlation in spec-ulative decoding, trained jointly with the drafter and given the same data, training budget, and optimization effort as the two concurrent works (7, 5). We evaluate on nine benchmarks, at two target sizes and under both greedy and temperature-one decoding, and on a throughput sweep over six serving concurrencies, two input lengths, and three output-entropy tiers. LiLiCorr holds the highest throughput of any system compared in 70 of these 72 settings, and the lead survives inputs longer than the drafter was trained on. 
+
+## 2 Related Work 
+
+Speculative decoding and parallel drafters. Speculative decoding accelerates inference by propos-ing draft tokens and verifying them with the target model under a rule that preserves its distribution (8, 3). Most work along these lines improves the drafter, from multi-head predictors such as Medusa (2) to feature-autoregressive heads such as the EAGLE family (9, 10, 11). A separate line of work drafts an entire block in one forward pass: parallel and diffusion-style block heads such as DFlash (4) and diffusion-based self-speculation (6) handle a long speculative window cheaply. D-PACE (19) improves DFlash with an acceptance-aware training objective. Their parallel prediction mirrors that of diffusion language models, such as LLaDA (13), MDLM (17), Dream (21), and Nemotron-Labs-Diffusion (6). These models exhibit a well-known marginals limitation: although attention is bidirectional, the block is factorized into independent per-position predictions, so the sampled tokens are not guaranteed to be jointly coherent. This is addressed via an iterative refinement, re-masking and re-predicting subsets of tokens so that later rounds condition on earlier ones. Parallel drafters inherit the same limitation, but in speculative decoding each refinement round adds a full drafter pass, which negates the latency gains that motivate parallel drafting. Recovering a coherent block from these marginals, without paying for repeated drafter passes, is the problem LiLiCorr addresses. 
+
+Recovering coherent drafts. Several recent methods recover a coherent sequence from the per-slot marginals that a parallel drafter such as DFlash produces. One direction expands these marginals 3into a draft tree of several continuations that the target verifies in a single pass. DDTree (16) is training-free, ranking candidate prefixes by their marginal product, whereas Oda et al. (14) first learn a small autoregressive adapter before building the tree. Both push the correlation work onto the target, spending the compute speculative decoding aims to save, and both rely on tree-structured attention, which is typically less efficient than standard causal attention. An alternative direction reintroduces the dependencies at draft time: Domino (7) and DSpark (5), the two works concurrent with ours, condition each slot on the previously sampled tokens, which avoids extra target passes but runs a correction network once at every slot. Both also tune the drafter jointly with their correction head, as we do. LiLiCorr also acts at draft time, but needs only a single network pass: it produces all candidate representations at once, computes their pairwise correlations in parallel, and leaves only a cheap greedy argmax over the resulting scores to run sequentially. 
+
+## 3 Method 
+
+3.1 Setup: prefix acceptance and the marginal drafter 
+
+Let M be a frozen target language model. A parallel block drafter proposes, in a single forward pass, a block of B positions conditioned on the verified context, of which B − 1 are future tokens. The first block position is the last token the target has committed, which serves as the anchor , slot 0. The remaining B − 1 positions are the speculative slots 1, . . . , B − 1. At each slot the drafter produces a distribution (logit) over the vocabulary, a per-slot marginal . Standard decoding resolves each slot independently, taking its most probable token. Once the draft is complete, the target verifies the whole block in a single pass and accepts a prefix of it, discarding everything from the first rejected position onward. With a greedy target a draft token is accepted when it coincides with the target’s own choice. Under a sampling target, acceptance instead follows the standard rejection test, which preserves the target distribution exactly (8, 3). In both regimes acceptance is prefix-structured, and it is this structure that LiLiCorr is built around. 
+
+3.2 A scoring model over the candidate lattice 
+
+The drafter is supervised on per-slot marginals, so the tokens it selects are individually probable but not necessarily compatible with one another. Selecting tokens that are jointly compatible, and not only locally probable, can lengthen the accepted prefix, and doing so at draft time could avoid extra target passes. LiLiCorr addresses this goal by correlating the slots over a small pool of alternatives that the drafter’s own marginal already places near the top. At each slot s it retains the drafter’s top-K candidate tokens cs, 1, . . . , c s,K rather than its single most probable one. Each candidate is a token, and we represent it by a vector we call its node , formed by summing four terms of equal width: the target’s frozen input embedding of the token, the drafter’s hidden state at that slot, a small network over a few scalar features of how confident the drafter is in that candidate, listed in Appendix A, and learned encodings of the slot and of the candidate’s rank. The hidden state belongs to the slot and is shared by its K candidates, so what separates them is the token itself, its confidence, and its rank. Across the B − 1 slots these nodes form a (B −1) × K lattice. A small Transformer processes the (B−1) × K nodes jointly. Its self-attention lets every candidate exchange information with every other, both the competing candidates within a slot and the candi-dates at neighboring slots, so each is represented in the context of the whole block rather than on its own. Each attended node is then fused with a projection of the target’s hidden state that produced the last verified token: the candidate’s own state, that projection, and their elementwise product are concatenated and mapped back to the node width by a single layer. Though one vector common to the whole block, it enters every candidate separately, so that the verifier’s view of the context, and not the drafter’s alone, shapes each of them. For each node LiLiCorr emits two vectors in Rde , an out 
+
+vector o and an in vector i, each normalized to unit norm. The dimension de is given in Appendix A. The anchor, which precedes the first slot, is encoded far more thinly: the anchor projection itself, 4mapped by its own head to one further out vector. Indexing the anchor as slot 0, we write this vector 
+
+o0. Adjacent slots s and s + 1 are then coupled by a single matching term, the cosine similarity between the out and in vectors: 
+
+ϕp(s, k, k ′) = σ cos( os,k , is+1 ,k ′ ) for s = 0 , . . . , B − 2, 1 ≤ k ≤ Ks, 1 ≤ k′ ≤ K, (1) where cos( ·, ·) is the cosine similarity and σ is a fixed scaling constant, with K0 = 1 at the anchor, which carries a single out vector, and Ks = K at every speculative slot. Figure 1(b) shows the lattice and the pair of vectors each candidate carries. The factorization is local, but the information behind it is not. Only adjacent slots are coupled by a score, yet the vectors that form that score depend on the entire lattice, so a pair at slots s and s+1 
+
+may be judged compatible on evidence lying outside them, among the candidates that precede s or follow s+1 . We hypothesize that this is the more useful place to spend capacity: rather than enrich the coupling itself, we keep it pairwise and let the vectors it multiplies see the whole block. The pairwise form is what leaves the scores computable as batched matrix products. Casting each score as a cosine is a deliberate stabilizer: it removes vector magnitude as an uncon-strained degree of freedom. Without this bound we observe runaway score magnitudes that corrupt, and in practice destroy, the shared DFlash backbone under joint training. The cosine instead confines every learned factor to [−σ, σ ] while avoiding saturating nonlinearities whose gradients vanish. We use a fixed scale σ to separate the candidate scores to discriminate among them. Its value, and the architecture of the head, are given in Appendix A. 
+
+3.3 Training the reranker Local normalization aligned with prefix acceptance. A natural formulation scores each full path by summing its matching terms across the block and selects the path that maximizes this whole-chain score. We argue that this is the wrong target for speculative decoding. The global optimum may sacrifice an early slot to win a richer tail, yet under prefix acceptance that tail is never reached. Section 3.5 and Appendix E take up this comparison at decoding time. Optimizing the whole chain thus spends capacity on regions the metric never credits. We therefore score each slot locally ,conditioned on the candidate committed just before it. Writing the per-slot node score of candidate 
+
+k as zs[k], the chain rule factorizes the path distribution as 
+
+P (cs | cs−1) = softmax k
+
+ zs[k], zs[k] = ϕp(s−1, c s−1, k ), s = 1 , . . . , B − 1, (2) where cs is the candidate committed at slot s and c0 is the anchor. Each conditional still depends on the previous pick through the matching term in zs[k], so locality avoids scoring the whole chain without reducing the model to a per-slot reranker. 
+
+Oracle-prefix supervision. We train LiLiCorr as a teacher-forced reranker over the drafter’s marginals, so the supervision must reflect how it is served. Two conditions decide which slots carry a learning signal. The first is coverage: a slot is useful only when its ground-truth token is among the drafter’s 
+
+K candidates, since otherwise no reranking can recover it. The second follows from prefix accep-tance. We condition each transition on the ground-truth predecessor gs−1: a path that has already left the ground truth is discarded by the verifier, so the transitions leaving it are never exercised in serving. A slot is therefore supervised only when every earlier slot is covered as well. Together these define the oracle prefix , the longest leading run of slots that each contain the ground-truth token among their K candidates. Let S collect these slots across a training batch. We teacher-force the per-slot cross-entropy on them: 
+
+LCE = − 1
+
+|S| 
+
+X
+
+> s∈S
+
+log P  cs = gs | cs−1 = gs−1
+
+, (3) where gs is the ground-truth token at slot s. The softmax of Eq. (2) runs over all K candidates at slot 
+
+s, so each supervised transition raises the ground-truth successor and pushes its K −1 competitors 5down. A block whose very first slot already misses contributes zero loss. The effect resembles the per-slot decay used to train DFlash, though it arises from the coverage mask rather than from a designed weighting: supervision concentrates on earlier slots. 
+
+Target-weighted distractor penalty. The per-slot cross-entropy raises the ground-truth probabil-ity but is indifferent to how the residual mass is distributed among the remaining candidates. Under cross-entropy supervision alone, we observed that LiLiCorr’s errors were typically candidates the target scored well-below the ground truth, a mismatch with the verifier rather than a genuine am-biguity in the target distribution. Since the target is itself the verifier, its logits provide a graded measure of candidate compatibility that cross-entropy ignores. Scoring against the target lets us direct the negative gradient at these high-scoring but target-incompatible competitors, widening the ground truth’s margin over the candidates most likely to trigger an early verification failure. Let qk denote the target probability of candidate k, and gs the ground-truth candidate at slot s. Both 
+
+qgs and the qk are indexed out of the teacher-forced target pass that already supplies the drafter’s supervision. We define 
+
+Ωs = X
+
+> k
+
+Pθ (cs = k | cs−1 = gs−1) ReLU(log qgs − log qk) , (4) the expected target-relative cost under the LiLiCorr distribution. Candidates the target ranks below 
+
+gs are penalized in proportion to the gap. When gs is the target’s top candidate, this term shares its gradient with a target cross-entropy over the candidate pool, and the rectifier extends it safely to the rare positions where gs is not the target’s top candidate, as detailed in Appendix D. Averaging the per-slot penalties over the supervised slots gives the distractor loss 
+
+Ldist = 1
+
+|S| 
+
+X
+
+> s∈S
+
+Ωs. (5) We keep it alongside the hard cross-entropy because the two supply complementary gradients. Cross-entropy makes LiLiCorr rank the ground truth first even when the target assigns it only modest probability, so it remains the selected token however soft the target is. The distractor penalty com-plements this by pushing the confusers the target disfavors further down. It is therefore cost-aware shaping of cross-entropy, not a replacement, as detailed in Appendix D. It is the term that carries the short-prompt benchmarks, raising acceptance length on every one of them (Appendix C). 
+
+3.4 Co-adapting the drafter and the reranker 
+
+We tune DFlash jointly with LiLiCorr, so that the drafter learns to expose candidate pools and hid-den representations from which LiLiCorr can assemble longer accepted prefixes. Joint training must cross the top-K selection that forms the candidate pool, which is not differentiable. We keep the selected candidate indices fixed and retain gradients through their draft log-probabilities and the hid-den states from which they were produced, 1 both of which are inputs to LiLiCorr. The acceptance-oriented loss therefore reaches the DFlash backbone without differentiating pool membership, and inference is unchanged. The drafter keeps its own DFlash training loss, a per-slot block cross-entropy over the drafter marginals that weights earlier slots more heavily (4), 
+
+LDFlash = −
+
+> B−1
+
+X
+
+> s=1
+
+ws log ps(gs), ws = exp 
+
+
+
+− s − 1
+
+β
+
+
+
+, (6) where ps is the drafter’s marginal at slot s and β sets the decay. The drafter and LiLiCorr are trained jointly to minimize the drafter loss together with the two reranker terms, 
+
+L = LDFlash + γ [LCE + λ Ldist ] . (7) 
+
+> 1The candidate token embeddings remain frozen.
+
+6Here γ sets the weight of the reranker objective as a whole and λ scales the distractor penalty within it. These weights and the decay β are given in Appendix A, and Appendix C isolates the contribution of the distractor penalty. 
+
+3.5 Single-pass decoding 
+
+Decoding has a parallel- and a sequential stage, and the network runs only once. In the parallel stage, a single LiLiCorr pass produces every outgoing and incoming vector, including the anchor out vector. The block has B − 1 adjacent slot pairs, and within each pair every candidate is matched against every candidate in the next slot. This gives K2 comparisons for each of the B −2 interior pairs and K for the anchor pair, (B−2) K2 + K matching terms in total. Evaluating them reduces to one matrix multiplication per slot pair, batched across the full block, which keeps the computation static in shape and well suited to kernel fusion and graph capture. In the sequential stage, the block is committed greedily from left to right: at slot s we select 
+
+ˆcs = arg max 
+
+> k
+
+zs[k] = arg max 
+
+> k
+
+ϕp(s−1, ˆcs−1, k ), (8) conditioning each slot on the candidate just committed, a walk traced in Figure 1(c). This greedy rule is exactly the inference behavior the local objective in Eq. (2) was trained to optimize. An alternative is to commit the combination of candidates that maximizes the sum of the matching terms along the whole path. Appendix E evaluates an efficient dynamic program that recovers this globally best-scoring path exactly, and finds that it decodes worse than the greedy left-to-right rule in the speculative-decoding setting. Only the argmax walk is sequential, and it touches no network weights; the expensive computation is the single parallel pass. This is the key distinction from iterative-refinement drafters, which invoke a network once per position: LiLiCorr confines all learning to one pass and reduces the per-position work to an argmax over precomputed matching scores. 
+
+## 4 Experiments 
+
+4.1 Experimental setup Models and evaluation. We use frozen Qwen3-8B and Qwen3-4B targets (20) with their reason-ing mode disabled. Evaluation spans eight public datasets across three domains: math (GSM8K, MATH-500, AIME 2025), code (HumanEval, MBPP, LiveCodeBench), and chat (Alpaca, MT-Bench). We additionally report on SPEED-Bench (1), hereafter SPEED, whose qualitative split holds 880 prompts across eleven categories, from math and coding to multilingual text, summariza-tion, and roleplay. We evaluate two decoding regimes: a deterministic one with a greedy target, and a sampling one at temperature 1 over the untruncated target distribution, verified by exact rejection sampling so that the target distribution is preserved and averaged over three seeds. We measure the acceptance length τ , computed block-weighted as the total number of accepted tokens divided by the number of verification blocks, together with output throughput and the resulting speedup over the target’s own autoregressive decoding on the same hardware. 
+
+Baselines. We compare LiLiCorr against two concurrent works to ours, Domino (7) and DSpark (5), and against the DFlash drafter it builds on. Both baselines likewise recover a coherent block from the per-slot marginals at draft time, but resolve them through a sequence of per-slot network passes rather than a single scoring pass. Like LiLiCorr, both also tune the DFlash drafter as they train their own head. The DFlash drafter takes each slot’s most probable token independently and performs no reranking. At temperature 1, LiLiCorr and Domino propose a single block deterministically and leave exactness to the verifier, whereas DSpark supports that contract and a sampled one; we report it under both. All systems are trained on the same corpus for the same number of epochs, at the same global batch size and sequence length, then evaluated under one regime, so acceptance length and throughput are directly comparable. 7Training data. All three systems are trained on roughly 1.4M examples drawn from the code, mathematics, STEM, and general-chat splits of the Nemotron Post-Training Dataset V2 (12), with the multilingual splits excluded. For each conversation we keep the original system and user mes-sages and regenerate every assistant turn with the target model, decoding greedily with reasoning disabled and a cap of 4,096 completion tokens. 
+
+Implementation details. We serve every system on the same deployment-representative SGLang backend, with block size 16 on a single H100 and concurrency one unless stated otherwise. Fol-lowing DSpark, each speculative head is folded into the drafter and optimized with fused kernels and graph capture, and we port Domino onto the same stack, so that no system is disadvantaged by its implementation. Fully optimized, the LiLiCorr head costs 0.28 ms per block against Domino’s 
+
+0.67 ms, 2.4× cheaper, and accounts for about 2.8% of the per-block wall. 2 Remaining setup and training details, and the per-stage decomposition behind these figures, are deferred to Appendix A. 
+
+4.2 Main results 
+
+Table 1 reports speedup over autoregressive decoding on the nine benchmarks, for both target sizes and both decoding regimes; the acceptance lengths and absolute throughputs behind it are deferred to Appendix B. The three draft-time methods reach comparable acceptance lengths, and throughput is what separates them. Under greedy decoding LiLiCorr is the fastest system in all eighteen settings, leading the strongest baseline by up to 4.9% on the benchmark average. Against the vanilla DFlash drafter, which reranks nothing, it improves on both axes everywhere, raising acceptance length by 
+
+12 to 19% and throughput by 4 to 13% . Tables 7 and 8 resolve SPEED into its eleven categories. LiLiCorr leads on every one, and by the widest margin on multilingual, by 11 .0% on Qwen3-8B and 16 .8% on Qwen3-4B. This is the only domain held out of the training corpus, which suggests a capacity to generalize out of distribution. Sampling does not reorder the systems. At temperature one, verified by exact rejection sampling, accepted prefixes shorten for all of them, as expected once the target no longer commits to its own argmax, and LiLiCorr’s lead over Domino widens. DSpark’s sampled arm accepts longer prefixes than its single-block one but serves slower on both targets. LiLiCorr is the fastest system in seven-teen of the eighteen settings, and the fastest of those proposing a single block in all eighteen. 
+
+4.3 Scaling with concurrency 
+
+Deployed systems run batched, a regime in which decoding moves from memory-bandwidth bound towards compute bound and the cost of speculation is weighed differently. SPEED provides a sec-ond, throughput split for this setting, which holds the input length fixed and varies serving concur-rency (1). We evaluate on its 1K and 2K input-length blocks, in each of their three output-entropy tiers. Every drafter is trained on sequences of 3,072 tokens (Table 4), and these are the blocks that a 1,024 -token generation keeps within that length, so all systems are served in the regime they were trained for. Table 2 covers concurrencies from c = 1 to c = 32 . LiLiCorr attains the highest throughput at thirty-five of the thirty-six operating points, by up to 7.2% over the strongest baseline, and trails DSpark by 0.3% at the remaining one, 1K mixed at c = 32 . Acceptance lengths are again close: LiLiCorr exceeds Domino everywhere, by 1.6 to 10 .4% , and stays within 1.4% of DSpark, which edges it on the high-entropy and mixed tiers. Speedups compress for all systems as the batch grows, from 
+
+2.1–3.8× at c = 1 to 1.2–1.8× at c = 32 , and the ordering is preserved throughout. Acceptance lengths and absolute throughputs are given in Appendix F. 
+
+> 2DSpark folds its head into the drafter by construction and so leaves no separate stage to measure; it is compared on end-to-end throughput throughout.
+
+8Table 1: Speedup over autoregressive decoding on the nine benchmarks, both target sizes, single H100, concurrency one. T = 1 entries are means over three seeds, and DSpark appears there under both of its proposal contracts. Average is the unweighted mean over the nine benchmarks. Best per row and target size in bold; acceptance lengths in Tables 5 and 6. 
+
+AR (TPS) LiLiCorr Domino DSpark DSpark (samp.) Vanilla DFlash Benchmark 8B 4B 8B 4B 8B 4B 8B 4B 8B 4B 8B 4B 
+
+> Greedy , T = 0
+
+GSM8K 150 235 5.30 × 4.95 × 4.97 × 4.62 × 5.07 × 4.58 × – – 4.70 × 4.49 ×
+
+MATH-500 150 230 6.59 × 6.16 × 6.35 × 5.87 × 6.31 × 5.72 × – – 6.00 × 5.73 ×
+
+AIME 2025 150 233 5.98 × 5.86 × 5.77 × 5.64 × 5.69 × 5.39 × – – 5.43 × 5.48 ×
+
+HumanEval 146 227 4.15 × 3.95 × 3.95 × 3.79 × 4.06 × 3.80 × – – 3.88 × 3.80 ×
+
+MBPP 150 240 4.15 × 3.82 × 4.00 × 3.66 × 4.11 × 3.68 × – – 3.77 × 3.58 ×
+
+LiveCodeBench 149 232 5.38 × 5.20 × 5.20 × 4.94 × 5.34 × 4.92 × – – 5.02 × 4.95 ×
+
+AlpacaEval 150 240 2.69 × 2.55 × 2.58 × 2.45 × 2.61 × 2.42 × – – 2.46 × 2.40 ×
+
+MT-Bench 150 239 2.91 × 2.77 × 2.82 × 2.67 × 2.85 × 2.63 × – – 2.65 × 2.61 ×
+
+SPEED 149 232 3.58 × 3.50 × 3.42 × 3.29 × 3.44 × 3.25 × – – 3.27 × 3.24 ×
+
+Average 150 234 4.51 × 4.29 × 4.32 × 4.09 × 4.37 × 4.03 × – – 4.11 × 4.02 ×
+
+> Sampling , T = 1
+
+GSM8K 148 229 4.57 × 4.43 × 4.32 × 4.14 × 4.43 × 4.14 × 4.12 × 3.60 × 4.16 × 4.08 ×
+
+MATH-500 148 229 4.55 × 4.45 × 4.42 × 4.26 × 4.45 × 4.20 × 4.55 × 4.03 × 4.32 × 4.25 ×
+
+AIME 2025 147 229 3.61 × 3.48 × 3.37 × 3.21 × 3.45 × 3.25 × 3.80 × 3.36 × 3.39 × 3.32 ×
+
+HumanEval 144 222 4.11 × 4.00 × 3.92 × 3.82 × 4.04 × 3.83 × 3.49 × 3.18 × 3.83 × 3.82 ×
+
+MBPP 148 231 3.57 × 3.50 × 3.41 × 3.36 × 3.49 × 3.40 × 3.33 × 2.92 × 3.28 × 3.30 ×
+
+LiveCodeBench 146 226 4.11 × 3.80 × 3.90 × 3.60 × 4.10 × 3.62 × 3.74 × 3.15 × 3.79 × 3.58 ×
+
+AlpacaEval 148 232 2.18 × 2.22 × 2.10 × 2.14 × 2.13 × 2.12 × 2.06 × 1.88 × 2.05 × 2.13 ×
+
+MT-Bench 148 230 2.48 × 2.48 × 2.37 × 2.38 × 2.45 × 2.37 × 2.31 × 2.07 × 2.30 × 2.35 ×
+
+SPEED 147 228 2.52 × 2.63 × 2.41 × 2.48 × 2.46 × 2.49 × 2.41 × 2.25 × 2.38 × 2.48 ×
+
+Average 147 229 3.52 × 3.43 × 3.36 × 3.25 × 3.44 × 3.26 × 3.31 × 2.93 × 3.28 × 3.24 ×
+
+Table 2: Speedup over autoregressive decoding as serving concurrency c grows, on the 1K and 2Kblocks of the SPEED throughput split (1), Qwen3-8B target, greedy decoding, single H100. Each output-entropy tier, low (L), mixed (M) and high (H), holds 512 requests with 1,024 generated tokens. Best per tier and row in bold; acceptance lengths in Table 13. 
+
+AR (TPS) LiLiCorr Domino DSpark Vanilla DFlash 
+
+c L M H L M H L M H L M H L M H
+
+> 1K
+
+1 148 148 148 3.49 × 3.57 × 2.31 × 3.17 × 3.35 × 2.19 × 3.28 × 3.43 × 2.20 × 3.18 × 3.22 × 2.15 ×
+
+2 284 284 286 3.37 × 3.49 × 2.31 × 3.11 × 3.30 × 2.19 × 3.17 × 3.37 × 2.20 × 3.10 × 3.17 × 2.15 ×
+
+4 542 545 552 3.19 × 3.30 × 2.26 × 2.93 × 3.13 × 2.12 × 3.04 × 3.19 × 2.16 × 2.95 × 3.00 × 2.09 ×
+
+8 982 986 1018 2.82 × 2.92 × 2.06 × 2.60 × 2.80 × 1.95 × 2.68 × 2.84 × 1.96 × 2.62 × 2.69 × 1.91 ×
+
+16 1705 1717 1821 2.32 × 2.46 × 1.79 × 2.19 × 2.38 × 1.74 × 2.22 × 2.40 × 1.73 × 2.16 × 2.26 × 1.70 ×
+
+32 2703 2747 3034 1.69 × 1.82 × 1.33 × 1.61 × 1.76 × 1.31 × 1.64 × 1.82 × 1.31 × 1.62 × 1.68 × 1.24 ×
+
+> 2K
+
+1 146 146 147 3.83 × 3.69 × 2.31 × 3.43 × 3.46 × 2.19 × 3.57 × 3.53 × 2.20 × 3.43 × 3.33 × 2.14 ×
+
+2 276 277 280 3.69 × 3.59 × 2.31 × 3.35 × 3.38 × 2.20 × 3.47 × 3.44 × 2.20 × 3.34 × 3.26 × 2.14 ×
+
+4 515 519 528 3.40 × 3.32 × 2.24 × 3.08 × 3.14 × 2.10 × 3.23 × 3.24 × 2.13 × 3.12 × 3.08 × 2.07 ×
+
+8 896 909 939 2.95 × 2.89 × 2.05 × 2.70 × 2.77 × 1.93 × 2.78 × 2.79 × 1.98 × 2.73 × 2.68 × 1.92 ×
+
+16 1484 1500 1589 2.45 × 2.39 × 1.79 × 2.28 × 2.32 × 1.74 × 2.35 × 2.34 × 1.74 × 2.28 × 2.21 × 1.68 ×
+
+32 2208 2255 2459 1.84 × 1.81 × 1.40 × 1.74 × 1.76 × 1.37 × 1.79 × 1.80 × 1.38 × 1.73 × 1.70 × 1.31 ×
+
+4.3.1 Inputs beyond the training range 
+
+The throughput split also holds 8K, 16 K and 32 K blocks, which carry every drafter past the range it was trained on. We serve these with the positional encoding extended at inference by YaRN (15), applied identically to all systems. Without it every drafter attends over positions outside its training range and gives up acceptance length. We find that adding a hinge on the reranker’s decision gap during training makes LiLiCorr more robust at these lengths. Trained this way, it attains the highest throughput at every one of the ninety operating points of the throughput split, within the training range and beyond, leading the strongest baseline by up to 10 .0% . The regularizer, the full sweep, and the comparison against LiLiCorr trained without it are given in Appendix G. 95 Conclusion 
+
+LiLiCorr correlates the per-slot marginals of a parallel block drafter in a single network pass. As-signing each candidate an in and an out vector reduces the correlation to batched matrix products, leaving only a greedy walk that touches no network weights. Trained jointly with the drafter, LiL-iCorr improves on the vanilla DFlash drafter on every benchmark we test, and a draft of comparable quality at a fraction of the cost of correcting one slot at a time makes it the faster system almost everywhere we measure, across benchmarks, serving concurrencies and input lengths. One limitation is inherent to the design: LiLiCorr reranks only the top-K tokens the drafter proposes, so a slot whose correct token is absent from that pool cannot be recovered, and the achievable acceptance length is bounded by the drafter’s coverage. Coupling slots beyond adjacent pairs is a natural next step, and whether longer-range couplings repay their cost under prefix acceptance remains open. 
+
+## References 
+
+[1] T. Abramovich, M. Ashkenazi, I. Putterman, B. Chislett, T. Mitra, B. D. Rouhani, R. Zil-berstein, and Y. Geifman. SPEED-bench: A unified and diverse benchmark for specula-tive decoding. In Forty-third International Conference on Machine Learning , 2026. URL 
+
+https://openreview.net/forum?id=Rl2uQlCoQX .[2] T. Cai, Y. Li, Z. Geng, H. Peng, J. D. Lee, D. Chen, and T. Dao. Medusa: Simple LLM infer-ence acceleration framework with multiple decoding heads. In Forty-first International Con-ference on Machine Learning , 2024. URL https://openreview.net/forum?id= PEpbUobfJv .[3] C. Chen, S. Borgeaud, G. Irving, J.-B. Lespiau, L. Sifre, and J. Jumper. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 , 2023. [4] J. Chen, Y. Liang, and Z. Liu. DFlash: Block diffusion for flash speculative decoding. In Forty-third International Conference on Machine Learning , 2026. URL https://openreview. net/forum?id=Oz335dV48X .[5] X. Cheng, X. Yu, C. Shao, J. Li, Y. Xiong, Y. Qian, J. Zhu, S. Ma, X. Zhang, J. Ye, et al. Dspark: Confidence-scheduled speculative decoding with semi-autoregressive gener-ation. arXiv preprint arXiv:2607.05147 , 2026. [6] Y. Fu, L. Whalen, A. Garg, C. Wu, M. Khadkevich, N. Oswald, E. Xie, D. Egert, S. T. Sreeni-vas, S. Diao, et al. Nemotron-labs-diffusion: A tri-mode language model unifying autoregres-sive, diffusion, and self-speculation decoding. arXiv preprint arXiv:2607.05722 , 2026. [7] J. Huang, Y. Zhang, Q. Zhang, H. Lin, H. Xu, and L. Zhang. Domino: Decoupling causal mod-eling from autoregressive drafting in speculative decoding. arXiv preprint arXiv:2605.29707 ,2026. [8] Y. Leviathan, M. Kalman, and Y. Matias. Fast inference from transformers via speculative de-coding. In International conference on machine learning , pages 19274–19286. PMLR, 2023. [9] Y. Li, F. Wei, C. Zhang, and H. Zhang. EAGLE: Speculative sampling requires rethinking feature uncertainty. In Forty-first International Conference on Machine Learning , 2024. URL 
+
+https://openreview.net/forum?id=1NdN7eXyb4 .[10] Y. Li, F. Wei, C. Zhang, and H. Zhang. Eagle-2: Faster inference of language models with dynamic draft trees. In Proceedings of the 2024 conference on empirical methods in natural language processing , pages 7421–7432, 2024. 10 [11] Y. Li, F. Wei, C. Zhang, and H. Zhang. Eagle-3: Scaling up inference acceleration of large language models via training-time test. Advances in Neural Information Processing Systems ,38:136737–136756, 2026. [12] D. Nathawani, S. Ding, V. Lavrukhin, I. Gitman, S. Majumdar, E. Bakhtu-rina, B. Ginsburg, and J. Polak Scowcroft. Nemotron-Post-Training-Dataset-v2, Aug. 2025. URL https://huggingface.co/datasets/nvidia/ Nemotron-Post-Training-Dataset-v2 .[13] S. Nie, F. Zhu, Z. You, X. Zhang, J. Ou, J. Hu, J. Zhou, Y. Lin, J.-R. Wen, and C. Li. Large language diffusion models. Advances in Neural Information Processing Systems , 38:50608– 50646, 2026. [14] Y. Oda, R. Mathieu, R. Knyazhitskiy, and A. Chakhvadze. Trees from marginals: Autoregres-sive drafting with factorized priors. arXiv preprint arXiv:2607.06763 , 2026. [15] B. Peng, J. Quesnelle, H. Fan, and E. Shippole. Yarn: Efficient context window extension of large language models. In International Conference on Learning Representations , volume 2024, pages 31932–31951, 2024. [16] L. Ringel and Y. Romano. Accelerating speculative decoding with block diffusion draft trees. 
+
+arXiv preprint arXiv:2604.12989 , 2026. [17] S. S. Sahoo, M. Arriola, Y. Schiff, A. Gokaslan, E. Marroquin, J. T. Chiu, A. Rush, and V. Kuleshov. Simple and effective masked diffusion language models. Advances in Neural Information Processing Systems , 37:130136–130184, 2024. [18] A. Viterbi. Error bounds for convolutional codes and an asymptotically optimum decoding algorithm. IEEE transactions on Information Theory , 13(2):260–269, 1967. [19] T. Wu, Y. Yao, Z. Qi, H. Zheng, Z. Wang, H. Ma, L. Liao, H. Lakkaraju, J. Li, and Y. Du. D-pace: Dynamic position-aware cross-entropy for parallel speculative drafting. arXiv preprint arXiv:2605.18810 , 2026. [20] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. [21] J. Ye, Z. Xie, L. Zheng, J. Gao, Z. Wu, X. Jiang, Z. Li, and L. Kong. Dream 7b: Diffusion large language models, 2025. URL https://arxiv. org/abs/2508.15487 .
+
+## A Implementation and Training Details 
+
+Architecture. Each candidate enters the head as one vector of the head’s hidden width, formed by summing four terms. The first is the target’s input embedding of the candidate token, held frozen and projected down. The second is the drafter’s hidden state at that slot, projected down and shared by the slot’s K candidates. The third is a two-layer network over five scalars describing the drafter’s confidence in the candidate, all read from its distribution at that slot: the log-probability and the probability under the full vocabulary, the log-probability gap to the slot’s most likely token, the rank normalized to [0 , 1] , and an indicator for being the slot’s top choice. The fourth is a pair of learned tables, one indexed by slot and one by rank. The target state that every candidate is later fused with is formed separately: the target’s hidden states that produced the last verified token, collapsed across five captured layers, normalized, and projected to the same width. The head itself is a two-layer bidirectional Transformer over the (B − 1) × K candidate lattice, attending over all of it at once, with hidden width 1024 , eight attention heads, and a feed-forward width of 2048 , using RMSNorm and SiLU activations. Beyond the slot table, position enters through two attention biases learned per head and added to the attention logits, one indexed by the signed slot 11 Table 3: Per-block stage decomposition in milliseconds, MT-Bench, single H100. The systems differ only in the speculative head. Lowest head cost and per-block wall of the two added heads in bold.                                     
+
+> DFlash LiLiCorr Domino Stage (ms / block) Eager Optimized Eager Optimized Target verify 7.48 7.52 7.51 7.54 7.54 Draft backbone 1.28 1.28 1.29 1.29 1.29 LM-head projection 0.49 0.50 0.50 0.49 0.49 Speculative head 0.05 0.66 0.28 1.97 0.67 Accept and residual 0.57 0.57 0.57 0.59 0.58 Per-block wall 9.87 10.53 10.15 11.88 10.57
+
+distance between a pair and one marking pairs of candidates that occupy the same slot. Only after the Transformer is each candidate combined with that target state, by concatenating the candidate state, the target state, and their elementwise product, and projecting the result back down to the head’s width through a single linear layer followed by a SiLU. This is the one concatenation in the head, everything else being a sum. Two linear heads then emit the out and in vectors of Section 3.2, each of dimension de and normalized to unit norm, and a third emits the anchor’s single out vector. Table 4 presents the settings. 
+
+Objective. The DFlash cross-entropy of Eq. (6) is applied at every slot, whereas the LiLiCorr terms are evaluated only on the oracle prefix, the maximal run of leading slots in which the ground-truth token is present in the candidate pool. Slots beyond the first coverage miss contribute to none of the three terms. 
+
+Serving. We fuse top-K candidate extraction and vocabulary-wide logit normalization into a sin-gle kernel, compile the matching and selection step, and use wide CUDA graphs that fold candidate pooling and reranking into a single replay. The same level of optimization is applied to Domino’s correction loop. Table 3 gives the stage decomposition for both heads before and after it, and is the source of the per-block figures quoted in Section 4.1. LiLiCorr and Domino differ only in the speculative head, which each places on a shared DFlash drafter in place of its per-slot argmax. The serving stack folds that head into the drafter, and every other result we report is measured that way. To isolate the head, this measurement alone is taken on a pipeline that keeps it separate, which is why the per-block wall it reports is not the one behind the throughputs of Section 4.2. DSpark folds its head by construction and leaves no separate stage to measure, so its comparison rests entirely on end-to-end throughput. 
+
+Baselines. Domino is served in its widened configuration, with 512 anchors and the same block size of 16 . Its correction head is a recurrent cell over the drafter’s hidden width followed by a vocabulary projection. DSpark is served in a width-matched configuration, also with 512 anchors, and at temperature 1 under each of its two proposal contracts, the deterministic one that LiLiCorr and Domino use and a sampled one. All systems are trained on the same regenerated corpus for the same six epochs, at the same global batch size and sequence length. LiLiCorr and Domino differ only in the head placed on top of a shared DFlash drafter and in the losses that train it. 
+
+## B Additional Results 
+
+Acceptance length and absolute throughput. Table 1 reports speedup, which is the quantity the comparison turns on. Tables 5 and 6 give the two underlying measurements for each target, the 12 Table 4: Configuration of LiLiCorr and of the joint training run. Symbols follow Section 3. 
+
+Symbol Quantity Value 
+
+B Block size, of which drafted slots 16 , of which 15 
+
+K Candidates retained per slot 8
+
+de Dimension of the in and out vectors 1024 
+
+σ Cosine scale 8.0
+
+Scoring Transformer layers 2
+
+Hidden width, heads, feed-forward width 1024 , 8, 2048 
+
+Parameters in the LiLiCorr head 36 .76 M (8B), 32 .04 M (4B) 
+
+β Decay of the DFlash cross-entropy 7.0
+
+λ Weight of the distractor penalty 1.0
+
+γ Weight of the reranker objective, Eq. (7) 0.25 
+
+Optimizer AdamW Learning rate, drafter and LiLiCorr head 6 × 10 −4, 1.5 × 10 −4
+
+Weight decay, drafter and LiLiCorr head 0, 0.01 
+
+Schedule cosine, 4% warmup Gradient-norm clipping 1.0
+
+Global batch size, sequence length 64 , 3072 
+
+Epochs 6
+
+Precision bf16, fp32 master weights Hardware H100 
+
+Table 5: Acceptance length ( τ , block-weighted) and output throughput behind Table 1, Qwen3-8B target. Cells report τ / TPS / speedup over autoregressive decoding, which averages 150 and 147 
+
+TPS at the two temperatures. Best per row and temperature in bold. 
+
+Benchmark LiLiCorr Domino DSpark DSpark (sampled) Vanilla DFlash 
+
+> Greedy , T = 0
+
+GSM8K 7.56 / 795 / 5.30 × 7.23 / 746 / 4.97 × 7.56 / 761 / 5.07 × – 6.38 / 705 / 4.70 ×
+
+MATH-500 9.14 / 988 / 6.59 × 9.04 / 952 / 6.35 × 9.20 / 947 / 6.31 × – 7.99 / 900 / 6.00 ×
+
+AIME 2025 8.19 / 897 / 5.98 × 8.12 / 866 / 5.77 × 8.17 / 854 / 5.69 × – 7.17 / 815 / 5.43 ×
+
+HumanEval 7.18 / 606 / 4.15 × 6.88 / 576 / 3.95 × 7.22 / 593 / 4.06 × – 6.23 / 566 / 3.88 ×
+
+MBPP 5.87 / 622 / 4.15 × 5.77 / 600 / 4.00 × 6.07 / 617 / 4.11 × – 5.07 / 565 / 3.77 ×
+
+LiveCodeBench 7.79 / 802 / 5.38 × 7.64 / 775 / 5.20 × 8.05 / 795 / 5.34 × – 6.89 / 748 / 5.02 ×
+
+AlpacaEval 3.67 / 404 / 2.69 × 3.62 / 387 / 2.58 × 3.72 / 392 / 2.61 × – 3.23 / 369 / 2.46 ×
+
+MT-Bench 3.99 / 436 / 2.91 × 3.97 / 423 / 2.82 × 4.09 / 427 / 2.85 × – 3.50 / 398 / 2.65 ×
+
+SPEED 4.92 / 534 / 3.58 × 4.81 / 509 / 3.42 × 4.94 / 513 / 3.44 × – 4.30 / 487 / 3.27 ×
+
+Average 6.48 / 676 / 4.51 × 6.34 / 648 / 4.32 × 6.56 / 655 / 4.37 × – 5.64 / 617 / 4.11 ×
+
+> Sampling , T = 1
+
+GSM8K 6.45 / 677 / 4.57 × 6.20 / 640 / 4.32 × 6.46 / 656 / 4.43 × 7.06 / 610 / 4.12 × 5.59 / 616 / 4.16 ×
+
+MATH-500 6.23 / 674 / 4.55 × 6.21 / 654 / 4.42 × 6.34 / 658 / 4.45 × 7.60 / 673 / 4.55 × 5.69 / 639 / 4.32 ×
+
+AIME 2025 4.88 / 531 / 3.61 × 4.68 / 495 / 3.37 × 4.86 / 507 / 3.45 × 6.26 / 559 / 3.80 × 4.43 / 499 / 3.39 ×
+
+HumanEval 7.11 / 592 / 4.11 × 6.89 / 565 / 3.92 × 7.13 / 582 / 4.04 × 7.04 / 502 / 3.49 × 6.16 / 551 / 3.83 ×
+
+MBPP 4.98 / 528 / 3.57 × 4.87 / 505 / 3.41 × 5.06 / 517 / 3.49 × 5.66 / 493 / 3.33 × 4.38 / 485 / 3.28 ×
+
+LiveCodeBench 5.88 / 600 / 4.11 × 5.65 / 570 / 3.90 × 6.04 / 599 / 4.10 × 6.44 / 546 / 3.74 × 5.15 / 554 / 3.79 ×
+
+AlpacaEval 2.94 / 322 / 2.18 × 2.92 / 311 / 2.10 × 3.00 / 315 / 2.13 × 3.40 / 305 / 2.06 × 2.67 / 303 / 2.05 ×
+
+MT-Bench 3.38 / 367 / 2.48 × 3.31 / 351 / 2.37 × 3.48 / 363 / 2.45 × 3.84 / 342 / 2.31 × 3.02 / 340 / 2.30 ×
+
+SPEED 3.43 / 371 / 2.52 × 3.37 / 354 / 2.41 × 3.48 / 361 / 2.46 × 4.00 / 354 / 2.41 × 3.12 / 350 / 2.38 ×
+
+Average 5.03 / 518 / 3.52 × 4.90 / 494 / 3.36 × 5.10 / 506 / 3.44 × 5.70 / 487 / 3.31 × 4.47 / 482 / 3.28 ×
+
+block-weighted acceptance length and the output throughput in tokens per second, under the same protocol. They are the source of the acceptance-length statements of Section 4.2. 
+
+Per-category results on SPEED. Tables 7 and 8 break the SPEED aggregate of Section 4.2 into its eleven categories, under the same protocol. The per-benchmark conclusions carry over: LiLiCorr serves faster than every system compared in forty-one of the forty-four cells, and accepts more tokens per block than Domino in thirty-seven of them. The multilingual lead noted in Section 4.2 13 Table 6: As Table 5, with a Qwen3-4B target. Autoregressive decoding averages 234 TPS at T = 0 
+
+and 229 at T = 1 .                                                                                                                                                                                       
+
+> Benchmark LiLiCorr Domino DSpark DSpark (sampled) Vanilla DFlash
+> Greedy , T = 0
+> GSM8K 7.51 /1163 /4.95 ×7.24 / 1085 / 4.62 ×7.43 / 1077 / 4.58 ×–6.38 / 1055 / 4.49 ×
+> MATH-500 8.93 / 1416 /6.16 ×8.91 / 1349 / 5.87 ×8.96 / 1315 / 5.72 ×–7.89 / 1317 / 5.73 ×
+> AIME 2025 8.35 / 1366 /5.86 ×8.40 / 1313 / 5.64 ×8.29 / 1256 / 5.39 ×–7.43 / 1276 / 5.48 ×
+> HumanEval 7.34 / 896 /3.95 ×7.16 / 861 / 3.79 ×7.49 / 863 / 3.80 ×–6.54 / 862 / 3.80 ×
+> MBPP 5.72 / 916 /3.82 ×5.71 / 879 / 3.66 ×5.96 / 884 / 3.68 ×–5.05 / 858 / 3.58 ×
+> LiveCodeBench 7.83 / 1206 /5.20 ×7.72 / 1147 / 4.94 ×7.94 / 1141 / 4.92 ×–7.01 / 1148 / 4.95 ×
+> AlpacaEval 3.66 / 613 /2.55 ×3.69 / 589 / 2.45 ×3.75 / 581 / 2.42 ×–3.26 / 576 / 2.40 ×
+> MT-Bench 3.99 / 662 /2.77 ×4.02 / 638 / 2.67 ×4.10 / 629 / 2.63 ×–3.57 / 623 / 2.61 ×
+> SPEED 5.00 / 811 /3.50 ×4.92 / 764 / 3.29 ×5.02 / 754 / 3.25 ×–4.40 / 751 / 3.24 ×
+> Average 6.48 / 1005 /4.29 ×6.42 / 958 / 4.09 ×6.55 / 944 / 4.03 ×–5.73 / 941 / 4.02 ×
+> Sampling , T = 1
+> GSM8K 6.59 / 1015 /4.43 ×6.38 / 948 / 4.14 ×6.52 / 948 / 4.14 ×6.92 / 825 / 3.60 ×5.72 / 935 / 4.08 ×
+> MATH-500 6.34 / 1018 /4.45 ×6.36 / 976 / 4.26 ×6.40 / 961 / 4.20 ×7.51 / 924 / 4.03 ×5.78 / 973 / 4.25 ×
+> AIME 2025 4.91 / 798 /3.48 ×4.72 / 734 / 3.21 ×4.91 / 745 / 3.25 ×6.19 / 770 / 3.36 ×4.47 / 760 / 3.32 ×
+> HumanEval 7.38 / 888 /4.00 ×7.19 / 848 / 3.82 ×7.47 / 850 / 3.83 ×7.27 / 706 / 3.18 ×6.54 / 847 / 3.82 ×
+> MBPP 5.17 / 809 /3.50 ×5.16 / 777 / 3.36 ×5.35 / 786 / 3.40 ×5.57 / 675 / 2.92 ×4.60 / 762 / 3.30 ×
+> LiveCodeBench 5.65 / 859 /3.80 ×5.50 / 813 / 3.60 ×5.67 / 817 / 3.62 ×6.02 / 713 / 3.15 ×4.98 / 809 / 3.58 ×
+> AlpacaEval 3.15 / 515 /2.22 ×3.18 / 497 / 2.14 ×3.21 / 492 / 2.12 ×3.47 / 436 / 1.88 ×2.87 / 494 / 2.13 ×
+> MT-Bench 3.52 / 570 /2.48 ×3.53 / 547 / 2.38 ×3.60 / 545 / 2.37 ×3.84 / 477 / 2.07 ×3.17 / 541 / 2.35 ×
+> SPEED 3.72 / 599 /2.63 ×3.67 / 565 / 2.48 ×3.77 / 568 / 2.49 ×4.16 / 514 / 2.25 ×3.34 / 565 / 2.48 ×
+> Average 5.16 / 786 /3.43 ×5.08 / 745 / 3.25 ×5.21 / 746 / 3.26 ×5.66 / 671 / 2.93 ×4.61 / 743 / 3.24 ×
+
+is the clearest of any category on throughput, reaching 8.0% in acceptance length and 16 .8% in throughput on Qwen3-4B under greedy decoding. Sample standard deviations across the three T = 1 
+
+seeds stay below 0.28 on acceptance length in every category and system, with two exceptions, both on Qwen3-4B under DSpark’s sampled contract. 
+
+Seed variability at T = 1 . Tables 9 and 10 give the mean and sample standard deviation over seeds 
+
+42 , 43 , and 44 that stand behind the T = 1 panels of Tables 5 and 6. Dispersion is small throughout: the standard deviation of τ stays below 0.28 on every benchmark and system, and below 0.16 on all but two. What scatter remains concentrates on the small splits, above all AIME 2025, which at 30 
+
+prompts is an order of magnitude smaller than any other. On the two splits of more than a thousand prompts no standard deviation exceeds 0.14 .
+
+## C Loss-Term Ablation 
+
+We isolate the distractor penalty by removing it and holding everything else fixed, the total weight of the reranker objective included, so that the comparison reallocates the same budget rather than enlarging it. Table 11 reports acceptance length on the evaluation suite at concurrency one. The penalty carries the suite. It raises acceptance length on all nine benchmarks, by 1.5 to 8.9% 
+
+and by 3.2% on the nine-benchmark average, with its largest gain on HumanEval and its smallest on MATH-500. This is the term that turns a reranker trained only against the ground-truth label into one trained against the candidates that actually cost acceptances, Appendix D giving the sense in which it is an expected target cost rather than a second cross-entropy. 
+
+## D Derivations for the Reranker Objective 
+
+The distractor penalty is an expected target cost. Write Pθ (k) for Pθ (cs = k | cs−1 = gs−1),let ck = − log qk be the cost the target assigns to candidate k, low where the target is confident, and let wk = ReLU( ck − cgs ) be that cost relative to the ground truth after rectification. The penalty of Eq. (4) is then Ωs = P 
+
+> k
+
+Pθ (k) wk, the expected rectified cost of the candidate LiLiCorr commits 14 Table 7: Per-category results on SPEED (1) with a Qwen3-8B target, reported as τ / TPS and otherwise as in Table 5. 
+
+Category LiLiCorr Domino DSpark DSpark (sampled) Vanilla DFlash 
+
+> Greedy , T = 0
+
+Math 6.96 / 760 6.92 / 736 6.93 / 724 – 6.11 / 695 Coding 6.33 / 681 6.21 / 653 6.47 / 666 – 5.49 / 616 Multilingual 5.56 / 606 4.96 / 530 5.24 / 546 – 4.71 / 536 STEM 6.20 / 682 6.12 / 655 6.23 / 653 – 5.47 / 625 Humanities 5.78 / 633 5.62 / 601 5.75 / 602 – 5.04 / 575 Reasoning 5.08 / 549 5.01 / 528 5.17 / 534 – 4.39 / 494 RAG 4.71 / 487 4.54 / 462 4.74 / 472 – 4.09 / 445 Writing 3.75 / 412 3.68 / 393 3.78 / 396 – 3.28 / 374 QA 3.47 / 379 3.40 / 364 3.54 / 371 – 3.05 / 348 Summarization 3.24 / 342 3.05 / 315 3.27 / 331 – 2.84 / 314 Roleplay 2.90 / 314 2.91 / 306 2.99 / 309 – 2.64 / 297 
+
+> Sampling , T = 1
+
+Math 4.01 / 438 4.05 / 430 3.99 / 417 5.13 / 457 3.75 / 424 Coding 4.72 / 506 4.66 / 487 4.89 / 503 5.53 / 486 4.21 / 469 Multilingual 3.92 / 425 3.58 / 378 3.67 / 382 3.88 / 346 3.43 / 386 STEM 3.57 / 390 3.43 / 365 3.54 / 371 4.29 / 383 3.26 / 368 Humanities 3.34 / 364 3.23 / 342 3.49 / 365 3.96 / 353 3.05 / 345 Reasoning 3.89 / 419 3.83 / 402 3.96 / 409 4.54 / 400 3.53 / 394 RAG 4.04 / 419 3.92 / 397 4.00 / 401 4.36 / 373 3.54 / 383 Writing 2.83 / 307 2.80 / 296 2.90 / 303 3.30 / 294 2.59 / 291 QA 2.78 / 302 2.78 / 294 2.86 / 298 3.30 / 294 2.53 / 286 Summarization 3.15 / 329 2.94 / 302 3.17 / 319 3.24 / 280 2.76 / 301 Roleplay 2.34 / 251 2.31 / 242 2.41 / 248 2.62 / 231 2.17 / 243 
+
+to. When gs is the target’s preferred candidate in the pool no cost is negative, the rectifier is inactive, and since P 
+
+> k
+
+Pθ (k) = 1 ,
+
+Ωs = X
+
+> k
+
+Pθ (k) ( ck − cgs ) = H(Pθ , q ) − cgs , H(Pθ , q ) = X
+
+> k
+
+Pθ (k) ck. (9) 
+
+H(Pθ , q ) is the expected target cost under Pθ , and the offset cgs does not depend on the LiLiCorr parameters, so ∇θ Ωs = ∇θ H(Pθ , q ): the penalty and a cross-entropy against the target have the same gradient. The penalty involves the target only through cost differences, so it is unchanged if q
+
+is renormalized over the pool. 
+
+Why this is not distribution matching. The target is frozen, so the costs ck are constants and 
+
+Ωs is linear in Pθ . A linear function on the probability simplex attains its minimum at a vertex, that is, at a distribution placing all of its mass on one candidate, and the minimizing vertex is the candidate of least cost. Under the assumption above that candidate is gs, so minimizing the penalty drives LiLiCorr to commit to the target’s preferred candidate rather than to reproduce the target’s distribution over the pool. Committing is what the verifier rewards, since a block is accepted on the tokens the target would itself emit and mass placed elsewhere is not recovered. 
+
+The rectifier. At the occasional slot where gs is not the target’s preferred candidate, the rectifier clips the negative costs that would otherwise reward a candidate the target ranks above the supervised token. Such slots are rare, and arise from numerical differences between the offline generation of the supervision and the teacher-forced target pass used during training, rather than from a genuine target preference. 15 Table 8: As Table 7, with a Qwen3-4B target. 
+
+Category LiLiCorr Domino DSpark DSpark (sampled) Vanilla DFlash 
+
+> Greedy , T = 0
+
+Math 7.27 / 1192 7.22 / 1130 7.30 / 1104 – 6.44 / 1109 Coding 6.44 / 1034 6.27 / 967 6.46 / 963 – 5.56 / 942 Multilingual 5.88 / 957 5.24 / 818 5.44 / 819 – 4.77 / 818 STEM 5.72 / 943 5.69 / 896 5.76 / 876 – 4.98 / 863 Humanities 5.42 / 887 5.27 / 826 5.33 / 808 – 4.73 / 814 Reasoning 5.39 / 870 5.40 / 833 5.49 / 819 – 4.75 / 808 RAG 4.49 / 703 4.33 / 651 4.59 / 666 – 3.98 / 658 Writing 3.74 / 614 3.69 / 579 3.76 / 571 – 3.30 / 569 QA 3.61 / 592 3.59 / 562 3.66 / 555 – 3.23 / 556 Summarization 3.46 / 545 3.29 / 500 3.41 / 500 – 3.05 / 508 Roleplay 3.46 / 557 3.49 / 538 3.58 / 533 – 3.20 / 542 
+
+> Sampling , T = 1
+
+Math 4.31 / 701 4.21 / 655 4.39 / 667 5.13 / 638 3.82 / 651 Coding 4.94 / 786 4.82 / 737 4.88 / 730 5.46 / 669 4.42 / 742 Multilingual 3.94 / 637 3.88 / 600 3.87 / 585 4.05 / 502 3.43 / 584 STEM 3.79 / 619 3.72 / 579 3.78 / 577 4.41 / 550 3.42 / 585 Humanities 3.67 / 596 3.55 / 550 3.66 / 557 4.06 / 505 3.27 / 558 Reasoning 4.20 / 674 4.16 / 638 4.28 / 642 4.63 / 569 3.74 / 630 RAG 4.18 / 645 4.21 / 625 4.21 / 611 4.44 / 532 3.79 / 617 Writing 3.19 / 516 3.15 / 487 3.25 / 491 3.49 / 434 2.87 / 487 QA 3.07 / 497 3.16 / 489 3.19 / 483 3.38 / 419 2.88 / 491 Summarization 3.35 / 521 3.19 / 479 3.32 / 486 3.34 / 402 2.94 / 484 Roleplay 2.51 / 401 2.53 / 388 2.74 / 411 3.08 / 378 2.31 / 390 
+
+Table 9: Seed variability behind the T = 1 panel of Table 5, Qwen3-8B target. Mean over seeds 42 ,
+
+43 and 44 , sample standard deviation in parentheses. 
+
+Benchmark LiLiCorr Domino DSpark DSpark (sampled) Vanilla DFlash 
+
+> Acceptance  τ
+
+GSM8K 6.45 (0.03) 6.20 (0.06) 6.46 (0.01) 7.06 (0.02) 5.59 (0.02) MATH-500 6.23 (0.07) 6.21 (0.04) 6.34 (0.06) 7.60 (0.03) 5.69 (0.04) AIME 2025 4.88 (0.14) 4.68 (0.14) 4.86 (0.03) 6.26 (0.12) 4.43 (0.06) HumanEval 7.11 (0.09) 6.89 (0.10) 7.13 (0.06) 7.04 (0.07) 6.16 (0.05) MBPP 4.98 (0.03) 4.87 (0.06) 5.06 (0.04) 5.66 (0.05) 4.38 (0.03) LiveCodeBench 5.88 (0.01) 5.65 (0.13) 6.04 (0.10) 6.44 (0.04) 5.15 (0.12) AlpacaEval 2.94 (0.01) 2.92 (0.01) 3.00 (0.00) 3.40 (0.01) 2.67 (0.02) MT-Bench 3.38 (0.05) 3.31 (0.00) 3.48 (0.02) 3.84 (0.02) 3.02 (0.03) SPEED 3.43 (0.03) 3.37 (0.01) 3.48 (0.01) 4.00 (0.01) 3.12 (0.02) 
+
+> Throughput
+
+GSM8K 677 (2.6) 640 (5.4) 656 (0.9) 610 (0.7) 616 (2.6) MATH-500 674 (6.5) 654 (4.3) 658 (5.7) 673 (2.9) 639 (4.5) AIME 2025 531 (15.8) 495 (15.5) 507 (2.8) 559 (10.2) 499 (6.1) HumanEval 592 (10.3) 565 (5.6) 582 (3.6) 502 (4.5) 551 (4.1) MBPP 528 (3.2) 505 (6.3) 517 (3.8) 493 (4.4) 485 (4.0) LiveCodeBench 600 (1.5) 570 (12.0) 599 (9.6) 546 (3.8) 554 (12.6) AlpacaEval 322 (0.5) 311 (2.2) 315 (1.1) 305 (0.7) 303 (1.2) MT-Bench 367 (5.7) 351 (0.7) 363 (2.0) 342 (1.6) 340 (4.1) SPEED 371 (3.5) 354 (1.1) 361 (0.6) 354 (1.8) 350 (1.9) 
+
+Complementary gradients. The hard cross-entropy and the distractor penalty act on the ground-truth logit zg through complementary gradients. For cross-entropy, 
+
+∂LCE 
+
+∂z g
+
+= Pθ (g) − 1, (10) 16 Table 10: As Table 9, with a Qwen3-4B target. 
+
+Benchmark LiLiCorr Domino DSpark DSpark (sampled) Vanilla DFlash 
+
+> Acceptance  τ
+
+GSM8K 6.59 (0.02) 6.38 (0.03) 6.52 (0.04) 6.92 (0.03) 5.72 (0.06) MATH-500 6.34 (0.05) 6.36 (0.03) 6.40 (0.09) 7.51 (0.08) 5.78 (0.05) AIME 2025 4.91 (0.25) 4.72 (0.27) 4.91 (0.09) 6.19 (0.03) 4.47 (0.09) HumanEval 7.38 (0.13) 7.19 (0.02) 7.47 (0.07) 7.27 (0.11) 6.54 (0.05) MBPP 5.17 (0.01) 5.16 (0.01) 5.35 (0.04) 5.57 (0.02) 4.60 (0.04) LiveCodeBench 5.65 (0.06) 5.50 (0.02) 5.67 (0.09) 6.02 (0.01) 4.98 (0.04) AlpacaEval 3.15 (0.00) 3.18 (0.00) 3.21 (0.01) 3.47 (0.02) 2.87 (0.01) MT-Bench 3.52 (0.03) 3.53 (0.04) 3.60 (0.03) 3.84 (0.01) 3.17 (0.02) SPEED 3.72 (0.01) 3.67 (0.01) 3.77 (0.04) 4.16 (0.01) 3.34 (0.02) 
+
+> Throughput
+
+GSM8K 1015 (3.4) 948 (4.5) 948 (3.0) 825 (1.2) 935 (7.7) MATH-500 1018 (5.6) 976 (5.3) 961 (12.4) 924 (11.0) 973 (8.8) AIME 2025 798 (42.5) 734 (43.5) 745 (18.0) 770 (6.2) 760 (9.5) HumanEval 888 (11.2) 848 (5.5) 850 (6.8) 706 (11.0) 847 (7.2) MBPP 809 (4.5) 777 (2.8) 786 (1.6) 675 (4.0) 762 (7.4) LiveCodeBench 859 (7.1) 813 (2.4) 817 (11.6) 713 (0.9) 809 (8.1) AlpacaEval 515 (3.9) 497 (4.9) 492 (4.4) 436 (0.8) 494 (4.9) MT-Bench 570 (10.0) 547 (3.1) 545 (3.1) 477 (2.5) 541 (4.4) SPEED 599 (5.6) 565 (3.9) 568 (10.0) 514 (2.6) 565 (7.5) 
+
+Table 11: Loss-term ablation, Qwen3-8B target, greedy decoding, concurrency one, acceptance length τ . The two rows share the architecture, all other settings, and the total reranker weight, so the second reallocates that budget rather than enlarging it. It is the model of Section 4. Best per column in bold.                                
+
+> Objective GSM8K MATH AIME HEval MBPP LCB Alpaca MTB SPEED
+> LCE +LDFlash 7.322 9.003 8.058 6.590 5.655 7.541 3.563 3.906 4.837
+> +Ldist (full) 7.563 9.135 8.190 7.178 5.868 7.790 3.672 3.989 4.917
+
+which remains strong when Pθ (g) is small, exactly the hardest mistakes. For the penalty, 
+
+∂Ωs
+
+∂z g
+
+= − Pθ (g) EPθ [w], (11) which vanishes as Pθ (g) → 0, so the penalty alone is weak precisely when the ground truth is badly misranked. It is also indifferent among candidates of zero cost, including target ties and candidates the target ranks above g, since the rectifier clips their costs to zero. Cross-entropy therefore robustly pulls the exact ground-truth token upward, while Ωs preferentially pushes target-rejected confusers downward, so the penalty is best viewed as cost-aware shaping of cross-entropy rather than a re-placement for it. Both terms are evaluated only on the oracle prefix and averaged over the same slots, so slots after the first coverage miss contribute to neither. 
+
+## E Greedy Selection Versus the Highest-Scoring Path 
+
+Sections 3.3 and 3.5 argue that prefix acceptance rewards a greedy left-to-right decode over a search for the best-scoring block. We test the decode rule in isolation, holding the trained model fixed and varying only the rule that selects a path through the candidate lattice. 
+
+Path selection. Let c = ( c1, . . . , c B−1) denote a path, where cs is the candidate committed at slot 
+
+s and c0 is the anchor. Since LiLiCorr couples only adjacent slots, a path scores as the sum of its 17 Table 12: Decode-rule ablation, Qwen3-8B target, greedy decoding, concurrency one, acceptance length τ . Both arms serve the same checkpoint and differ only in the rule that selects a path through the lattice, each as a single fused kernel in the same captured graph. ∆ is the change from greedy to exact, so negative favors greedy. Best per row in bold.                                 
+
+> Benchmark Greedy Exact ∆
+> SPEED 4.916 4.775 −2.89%
+> GSM8K 7.563 7.427 −1.80%
+> MATH-500 9.135 8.918 −2.38%
+> AIME 2025 8.190 7.796 −4.81%
+> HumanEval 7.177 7.113 −0.90%
+> MBPP 5.868 5.764 −1.77%
+> LiveCodeBench 7.790 7.677 −1.45%
+> Alpaca 3.672 3.552 −3.27%
+> MT-Bench 3.989 3.881 −2.70%
+> Mean ∆−2.44 %
+
+matching terms, 
+
+g(c) = 
+
+> B−1
+
+X
+
+> s=1
+
+ϕp(s−1, c s−1, c s) . (12) The greedy rule of Section 3.5 commits each slot to the best continuation of what precedes it and never revisits an earlier choice. The alternative is to return the path that maximizes g. Enumeration is infeasible, as the lattice holds KB−1 paths, but the pairwise structure of Eq. (12) makes the exact maximizer reachable in O(B K 2) time by dynamic programming. Sweeping left to right, one records for each candidate the score of the best path ending there, then traces the stored predecessors back from the best final candidate. This is the Viterbi algorithm (18), a strictly stronger optimizer of 
+
+g than the greedy walk. 
+
+Why the stronger optimizer is the wrong one. Under prefix acceptance every slot contributes only while all the slots before it have matched, so the early ones carry most of the expected accep-tance length, and a block that loses its first slot gains nothing from the rest. Maximizing g targets the block as a whole, which is essentially the probability that the entire block survives verification. Giving up an early slot to raise the total is rational for that objective and self-defeating here, because the improved tail is never reached. The greedy walk instead maximizes the leading decision exactly, and each later one conditioned on what was committed. 
+
+Results. Table 12 shows the exact optimizer decodes worse. It lowers acceptance length on all nine benchmarks, by 0.90 to 4.81% and by 2.44% on average. Throughput follows, since the two rules are equally cheap to serve: each is a single fused kernel folded into the same captured draft graph, and the block rate they sustain differs by at most 0.62% on any benchmark and by 0.005% 
+
+on average. The stronger optimizer is therefore had for free and still loses. Its worst case is AIME 2025, though at 30 problems that split carries the direction rather than the magnitude; every other benchmark lies between −0.90% and −3.27% . On the multi-domain SPEED suite greedy wins all eleven categories. 
+
+## F Input-Length Sweep on the SPEED Throughput Split 
+
+Table 13 gives the acceptance lengths and absolute throughputs behind Table 2, and Table 14 extends the sweep to the 8K, 16 K and 32 K blocks under the positional extension of Section 4.3.1. Each block holds 512 requests at a fixed input length with 1,024 generated tokens, in each of the three output-entropy tiers, and is swept from c = 1 to c = 32 . At 32 K the few prompts whose templated input 18 exceeds 39 ,904 tokens are right-truncated so that the full generation budget fits within the target’s 
+
+40 ,960 -token context. Shorter inputs are left unchanged. 
+
+Within the training range. On the 1K and 2K blocks the acceptance-length gap to the strongest baseline is small, from 1.4% behind to 3.2% ahead, and the lead LiLiCorr holds is carried by throughput, by up to 7.2% . Every acceptance-length exception is a loss to DSpark on the high-entropy or mixed tier; against Domino the block is longer at all thirty-six operating points. 
+
+Beyond the training range. On the 8K, 16 K and 32 K blocks LiLiCorr serves faster than every baseline at forty-six of the fifty-four operating points, by up to 10 .8% , and attains the highest accep-tance length at thirty-eight of them. Every exception is a loss to DSpark on the 16 K and 32 K blocks, costing at most 0.91% of throughput and 4.2% of acceptance length. Appendix G shows that the hinge regularizer of Section 4.3.1 removes all eight, leaving LiLiCorr with the highest throughput at every one of the ninety operating points of the throughput split, within the training range and beyond. 
+
+Positional extension. Served without it, every drafter loses acceptance length on these blocks, and loses it consistently, since the positions it is then asked to attend over lie outside the range it was trained on. The extension is YaRN (15), applied identically to every system, and all four absorb it: past the training range every drafter still accepts roughly between 2.8 and 5.8 tokens per block, a band comparable to the one it reaches at 1K and 2K. 
+
+Memory-bound operating points. Beyond 8K the highest concurrencies measure offered load rather than resident concurrency. The key-value cache of a single H100 admits roughly 18 sequences at a 16 K input and 9 at 32 K, so throughput ceases to improve once the sweep exceeds that capacity. At 16 K the c = 32 row runs against the memory limit rather than on a larger batch, and at 32 K the 
+
+c = 16 and c = 32 rows describe the same operating point. These rows are marked with a dagger. All systems meet the same ceiling, so the comparison between them remains valid, but the sweep no longer varies the resident batch size it is intended to control. The 1K through 8K blocks stay within memory across the entire sweep. 
+
+## G Extending to Inputs Beyond the Training Range 
+
+Section 4.3.1 reports the 8K, 16 K and 32 K blocks of the throughput split under two changes, a positional extension applied at inference to every system alike and a hinge regularizer added to the reranker objective during training. This appendix gives the regularizer and the full evidence for both. 
+
+Margin regularization. Cross-entropy maximizes the likelihood of the ground-truth token, but the served rule is an argmax: a slot is decided by which candidate scores highest, not by how much probability the ground truth carries. Once the ground truth is ranked first, cross-entropy keeps spending gradient on decisions that are already settled. Contested slots, where the decision gap is narrow, are exactly the ones a longer prompt produces more of. We therefore add a hinge on the decision gap ∆s = zs[gs] − max k̸ =gs zs[k],
+
+Lmargin = 1
+
+|S| 
+
+X
+
+> s∈S
+
+ReLU( ρ − ∆s) , (13) with a fixed margin ρ > 0, and blend it against the hard label at a fixed total reranker weight, so that Eq. (7) becomes LDFlash + γ[(1 − μ)LCE + λLdist + μLmargin ]. The hinge is inactive once the gap clears ρ, so its gradient falls only on the slots still in contention, and it leaves inference unchanged. We write LiLiCorr + margin for the model trained this way and set μ = 0 .5 and ρ = 2 .0, with every other setting as in Table 4. 19 Table 13: Acceptance length and absolute throughput behind Table 2, on the 1K and 2K blocks of the SPEED throughput split. Cells report τ / TPS / speedup over autoregressive decoding at the same concurrency, which does not speculate and so has no τ . Best per row in bold. 
+
+c Autoregressive Vanilla DFlash Domino DSpark LiLiCorr TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. 
+
+> 1K, low
+
+1 148 / 1.00 × 4.31 / 470 / 3.18 × 4.58 / 469 / 3.17 × 4.85 / 485 / 3.28 × 4.93 / 516 / 3.49 ×
+
+2 284 / 1.00 × 4.29 / 881 / 3.10 × 4.59 / 884 / 3.11 × 4.81 / 900 / 3.17 × 4.89 / 957 / 3.37 ×
+
+4 542 / 1.00 × 4.31 / 1601 / 2.95 × 4.59 / 1588 / 2.93 × 4.88 / 1646 / 3.04 × 4.92 / 1730 / 3.19 ×
+
+8 982 / 1.00 × 4.33 / 2568 / 2.62 × 4.60 / 2549 / 2.60 × 4.86 / 2628 / 2.68 × 4.94 / 2766 / 2.82 ×
+
+16 1705 / 1.00 × 4.26 / 3683 / 2.16 × 4.58 / 3734 / 2.19 × 4.84 / 3783 / 2.22 × 4.94 / 3963 / 2.32 ×
+
+32 2703 / 1.00 × 4.30 / 4368 / 1.62 × 4.56 / 4363 / 1.61 × 4.85 / 4421 / 1.64 × 4.91 / 4569 / 1.69 ×
+
+> 1K, mixed
+
+1 148 / 1.00 × 4.30 / 476 / 3.22 × 4.77 / 496 / 3.35 × 5.01 / 508 / 3.43 × 4.97 / 528 / 3.57 ×
+
+2 284 / 1.00 × 4.29 / 899 / 3.17 × 4.80 / 936 / 3.30 × 5.00 / 956 / 3.37 × 4.97 / 991 / 3.49 ×
+
+4 545 / 1.00 × 4.28 / 1634 / 3.00 × 4.81 / 1704 / 3.13 × 5.00 / 1738 / 3.19 × 4.97 / 1799 / 3.30 ×
+
+8 986 / 1.00 × 4.30 / 2655 / 2.69 × 4.81 / 2763 / 2.80 × 5.02 / 2802 / 2.84 × 4.95 / 2876 / 2.92 ×
+
+16 1717 / 1.00 × 4.25 / 3873 / 2.26 × 4.79 / 4095 / 2.38 × 5.02 / 4122 / 2.40 × 4.97 / 4226 / 2.46 ×
+
+32 2747 / 1.00 × 4.23 / 4619 / 1.68 × 4.72 / 4836 / 1.76 × 4.94 / 5006 / 1.82 × 4.89 / 4990 / 1.82 ×
+
+> 1K, high
+
+1 148 / 1.00 × 2.80 / 318 / 2.15 × 3.05 / 324 / 2.19 × 3.13 / 326 / 2.20 × 3.12 / 342 / 2.31 ×
+
+2 286 / 1.00 × 2.80 / 615 / 2.15 × 3.03 / 627 / 2.19 × 3.13 / 630 / 2.20 × 3.11 / 662 / 2.31 ×
+
+4 552 / 1.00 × 2.78 / 1151 / 2.09 × 3.04 / 1172 / 2.12 × 3.14 / 1190 / 2.16 × 3.13 / 1245 / 2.26 ×
+
+8 1018 / 1.00 × 2.80 / 1942 / 1.91 × 3.06 / 1981 / 1.95 × 3.14 / 1996 / 1.96 × 3.14 / 2093 / 2.06 ×
+
+16 1821 / 1.00 × 2.79 / 3090 / 1.70 × 3.05 / 3169 / 1.74 × 3.12 / 3154 / 1.73 × 3.11 / 3265 / 1.79 ×
+
+32 3034 / 1.00 × 2.78 / 3774 / 1.24 × 3.02 / 3973 / 1.31 × 3.11 / 3989 / 1.31 × 3.11 / 4042 / 1.33 ×
+
+> 2K, low
+
+1 146 / 1.00 × 4.69 / 501 / 3.43 × 5.00 / 501 / 3.43 × 5.33 / 521 / 3.57 × 5.49 / 559 / 3.83 ×
+
+2 276 / 1.00 × 4.70 / 922 / 3.34 × 5.03 / 924 / 3.35 × 5.36 / 958 / 3.47 × 5.48 / 1019 / 3.69 ×
+
+4 515 / 1.00 × 4.68 / 1605 / 3.12 × 4.98 / 1588 / 3.08 × 5.33 / 1661 / 3.23 × 5.46 / 1751 / 3.40 ×
+
+8 896 / 1.00 × 4.73 / 2444 / 2.73 × 4.99 / 2418 / 2.70 × 5.31 / 2495 / 2.78 × 5.48 / 2641 / 2.95 ×
+
+16 1484 / 1.00 × 4.72 / 3388 / 2.28 × 5.00 / 3381 / 2.28 × 5.37 / 3490 / 2.35 × 5.52 / 3632 / 2.45 ×
+
+32 2208 / 1.00 × 4.66 / 3822 / 1.73 × 4.98 / 3845 / 1.74 × 5.30 / 3960 / 1.79 × 5.46 / 4059 / 1.84 ×
+
+> 2K, mixed
+
+1 146 / 1.00 × 4.49 / 486 / 3.33 × 4.98 / 505 / 3.46 × 5.20 / 515 / 3.53 × 5.21 / 539 / 3.69 ×
+
+2 277 / 1.00 × 4.50 / 903 / 3.26 × 5.01 / 935 / 3.38 × 5.22 / 953 / 3.44 × 5.22 / 995 / 3.59 ×
+
+4 519 / 1.00 × 4.52 / 1596 / 3.08 × 4.97 / 1631 / 3.14 × 5.23 / 1681 / 3.24 × 5.18 / 1724 / 3.32 ×
+
+8 909 / 1.00 × 4.52 / 2439 / 2.68 × 5.01 / 2517 / 2.77 × 5.24 / 2539 / 2.79 × 5.23 / 2627 / 2.89 ×
+
+16 1500 / 1.00 × 4.48 / 3320 / 2.21 × 5.02 / 3486 / 2.32 × 5.24 / 3511 / 2.34 × 5.23 / 3578 / 2.39 ×
+
+32 2255 / 1.00 × 4.50 / 3842 / 1.70 × 4.99 / 3964 / 1.76 × 5.21 / 4066 / 1.80 × 5.21 / 4091 / 1.81 ×
+
+> 2K, high
+
+1 147 / 1.00 × 2.81 / 314 / 2.14 × 3.06 / 322 / 2.19 × 3.15 / 324 / 2.20 × 3.14 / 339 / 2.31 ×
+
+2 280 / 1.00 × 2.81 / 599 / 2.14 × 3.07 / 616 / 2.20 × 3.15 / 615 / 2.20 × 3.15 / 646 / 2.31 ×
+
+4 528 / 1.00 × 2.80 / 1095 / 2.07 × 3.04 / 1111 / 2.10 × 3.13 / 1126 / 2.13 × 3.14 / 1181 / 2.24 ×
+
+8 939 / 1.00 × 2.84 / 1804 / 1.92 × 3.05 / 1811 / 1.93 × 3.18 / 1857 / 1.98 × 3.16 / 1923 / 2.05 ×
+
+16 1589 / 1.00 × 2.80 / 2668 / 1.68 × 3.07 / 2764 / 1.74 × 3.14 / 2762 / 1.74 × 3.12 / 2846 / 1.79 ×
+
+32 2459 / 1.00 × 2.83 / 3216 / 1.31 × 3.07 / 3367 / 1.37 × 3.16 / 3403 / 1.38 × 3.15 / 3439 / 1.40 ×
+
+Effect on the evaluation suite. Table 15 compares the two on the nine benchmarks. They are within a few tenths of a percent of each other: on the unweighted average LiLiCorr + margin is behind by 0.10% on Qwen3-8B under greedy decoding and ahead by 0.04 , 0.10 and 0.52% in the other three panels. The regularizer is therefore neither bought nor paid for on short prompts, which is what makes it a long-input measure rather than a general improvement. 
+
+Effect beyond the training range. Tables 14 and 17 give the 8K, 16 K and 32 K blocks for the two models in the same format. LiLiCorr serves faster than every baseline at forty-six of the fifty-four op-erating points; LiLiCorr + margin does so at all fifty-four, and raises the count on acceptance length from thirty-eight to forty-four. Its acceptance-length gain over LiLiCorr grows with the prompt: 
+
+−0.1% at 8K, +1 .3% at 16 K and +2 .8% at 32 K on the mean over each block. Inside the train-ing range the ordering reverses and the regularizer costs a little, 0.4% on the mean at 1K and 2K(Table 16). 20 Table 14: The 8K, 16 K and 32 K blocks of the SPEED throughput split, all served with the positional extension of Section 4.3.1, otherwise as in Table 13. Rows marked † offer more concurrency than the key-value cache holds. 
+
+c Autoregressive Vanilla DFlash Domino DSpark LiLiCorr TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. 
+
+> 8K, low
+
+1 135 / 1.00 × 3.89 / 371 / 2.75 × 4.17 / 373 / 2.76 × 4.26 / 373 / 2.76 × 4.59 / 413 / 3.06 ×
+
+2 242 / 1.00 × 3.90 / 629 / 2.60 × 4.19 / 635 / 2.62 × 4.26 / 633 / 2.62 × 4.61 / 696 / 2.88 ×
+
+4 412 / 1.00 × 3.88 / 967 / 2.35 × 4.17 / 977 / 2.37 × 4.28 / 983 / 2.39 × 4.58 / 1055 / 2.56 ×
+
+8 625 / 1.00 × 3.93 / 1257 / 2.01 × 4.20 / 1262 / 2.02 × 4.25 / 1267 / 2.03 × 4.61 / 1349 / 2.16 ×
+
+16 854 / 1.00 × 3.93 / 1541 / 1.80 × 4.20 / 1555 / 1.82 × 4.27 / 1555 / 1.82 × 4.63 / 1632 / 1.91 ×
+
+32 1047 / 1.00 × 3.93 / 1685 / 1.61 × 4.21 / 1695 / 1.62 × 4.29 / 1699 / 1.62 × 4.62 / 1762 / 1.68 ×
+
+> 8K, mixed
+
+1 136 / 1.00 × 4.97 / 464 / 3.41 × 5.35 / 469 / 3.45 × 5.61 / 482 / 3.54 × 5.73 / 508 / 3.74 ×
+
+2 243 / 1.00 × 4.98 / 776 / 3.19 × 5.35 / 780 / 3.21 × 5.57 / 791 / 3.26 × 5.72 / 837 / 3.44 ×
+
+4 411 / 1.00 × 4.97 / 1172 / 2.85 × 5.35 / 1184 / 2.88 × 5.60 / 1201 / 2.92 × 5.72 / 1250 / 3.04 ×
+
+8 628 / 1.00 × 4.98 / 1491 / 2.37 × 5.33 / 1516 / 2.41 × 5.59 / 1537 / 2.45 × 5.71 / 1575 / 2.51 ×
+
+16 867 / 1.00 × 4.98 / 1796 / 2.07 × 5.33 / 1825 / 2.10 × 5.60 / 1854 / 2.14 × 5.73 / 1890 / 2.18 ×
+
+32 1074 / 1.00 × 4.96 / 1952 / 1.82 × 5.33 / 1973 / 1.84 × 5.59 / 2033 / 1.89 × 5.70 / 2033 / 1.89 ×
+
+> 8K, high
+
+1 136 / 1.00 × 2.82 / 285 / 2.10 × 3.02 / 287 / 2.11 × 3.12 / 290 / 2.13 × 3.14 / 305 / 2.24 ×
+
+2 244 / 1.00 × 2.79 / 500 / 2.05 × 3.03 / 508 / 2.08 × 3.08 / 506 / 2.07 × 3.12 / 532 / 2.18 ×
+
+4 411 / 1.00 × 2.80 / 807 / 1.96 × 2.98 / 812 / 1.98 × 3.06 / 812 / 1.98 × 3.12 / 856 / 2.08 ×
+
+8 622 / 1.00 × 2.80 / 1078 / 1.73 × 3.00 / 1114 / 1.79 × 3.12 / 1109 / 1.78 × 3.14 / 1150 / 1.85 ×
+
+16 882 / 1.00 × 2.80 / 1404 / 1.59 × 3.01 / 1428 / 1.62 × 3.09 / 1446 / 1.64 × 3.14 / 1479 / 1.68 ×
+
+32 1112 / 1.00 × 2.80 / 1604 / 1.44 × 2.99 / 1637 / 1.47 × 3.09 / 1670 / 1.50 × 3.11 / 1679 / 1.51 ×
+
+> 16 K, low
+
+1 121 / 1.00 × 4.38 / 328 / 2.71 × 4.58 / 324 / 2.68 × 4.72 / 328 / 2.71 × 4.90 / 347 / 2.87 ×
+
+2 200 / 1.00 × 4.40 / 490 / 2.45 × 4.63 / 489 / 2.44 × 4.78 / 494 / 2.47 × 4.91 / 512 / 2.56 ×
+
+4 303 / 1.00 × 4.41 / 603 / 1.99 × 4.58 / 600 / 1.98 × 4.78 / 601 / 1.98 × 4.93 / 635 / 2.10 ×
+
+8 404 / 1.00 × 4.40 / 730 / 1.81 × 4.61 / 732 / 1.81 × 4.76 / 746 / 1.85 × 4.89 / 756 / 1.87 ×
+
+16 491 / 1.00 × 4.43 / 824 / 1.68 × 4.62 / 828 / 1.69 × 4.73 / 826 / 1.68 × 4.92 / 845 / 1.72 ×
+
+32 † 483 / 1.00 × 4.42 / 781 / 1.62 × 4.62 / 804 / 1.66 × 4.78 / 814 / 1.69 × 4.93 / 816 / 1.69 ×
+
+> 16 K, mixed
+
+1 122 / 1.00 × 4.88 / 372 / 3.05 × 5.15 / 371 / 3.04 × 5.45 / 382 / 3.13 × 5.54 / 398 / 3.26 ×
+
+2 205 / 1.00 × 4.89 / 558 / 2.72 × 5.18 / 561 / 2.74 × 5.47 / 570 / 2.78 × 5.58 / 592 / 2.89 ×
+
+4 312 / 1.00 × 4.89 / 688 / 2.21 × 5.22 / 701 / 2.25 × 5.50 / 735 / 2.36 × 5.56 / 730 / 2.34 ×
+
+8 423 / 1.00 × 4.88 / 845 / 2.00 × 5.15 / 851 / 2.01 × 5.43 / 869 / 2.05 × 5.53 / 881 / 2.08 ×
+
+16 512 / 1.00 × 4.90 / 959 / 1.87 × 5.22 / 958 / 1.87 × 5.46 / 965 / 1.88 × 5.57 / 982 / 1.92 ×
+
+32 † 514 / 1.00 × 4.89 / 927 / 1.80 × 5.17 / 950 / 1.85 × 5.46 / 961 / 1.87 × 5.55 / 964 / 1.88 ×
+
+> 16 K, high
+
+1 124 / 1.00 × 2.83 / 250 / 2.02 × 3.05 / 253 / 2.04 × 3.15 / 257 / 2.07 × 3.16 / 267 / 2.15 ×
+
+2 209 / 1.00 × 2.87 / 412 / 1.97 × 3.05 / 412 / 1.97 × 3.17 / 420 / 2.01 × 3.17 / 432 / 2.07 ×
+
+4 313 / 1.00 × 2.89 / 548 / 1.75 × 3.10 / 558 / 1.78 × 3.16 / 552 / 1.76 × 3.20 / 577 / 1.84 ×
+
+8 424 / 1.00 × 2.84 / 713 / 1.68 × 3.04 / 716 / 1.69 × 3.17 / 737 / 1.74 × 3.16 / 745 / 1.76 ×
+
+16 541 / 1.00 × 2.85 / 834 / 1.54 × 3.10 / 871 / 1.61 × 3.20 / 870 / 1.61 × 3.18 / 877 / 1.62 ×
+
+32 † 534 / 1.00 × 2.86 / 844 / 1.58 × 3.07 / 863 / 1.62 × 3.20 / 874 / 1.64 × 3.20 / 883 / 1.65 ×
+
+> 32 K, low
+
+1 102 / 1.00 × 4.57 / 256 / 2.51 × 4.63 / 250 / 2.45 × 5.23 / 266 / 2.61 × 5.47 / 279 / 2.74 ×
+
+2 154 / 1.00 × 4.52 / 342 / 2.22 × 4.59 / 336 / 2.18 × 5.20 / 354 / 2.30 × 5.41 / 365 / 2.37 ×
+
+4 186 / 1.00 × 4.52 / 388 / 2.09 × 4.58 / 384 / 2.06 × 5.21 / 399 / 2.15 × 5.42 / 409 / 2.20 ×
+
+8 241 / 1.00 × 4.55 / 434 / 1.80 × 4.60 / 443 / 1.84 × 5.20 / 454 / 1.88 × 5.42 / 461 / 1.91 ×
+
+16 † 250 / 1.00 × 4.53 / 457 / 1.83 × 4.59 / 448 / 1.79 × 5.22 / 464 / 1.86 × 5.41 / 471 / 1.88 ×
+
+32 † 250 / 1.00 × 4.53 / 453 / 1.81 × 4.59 / 458 / 1.83 × 5.22 / 464 / 1.86 × 5.41 / 473 / 1.89 ×
+
+> 32 K, mixed
+
+1 95 / 1.00 × 4.69 / 217 / 2.28 × 5.16 / 223 / 2.35 × 5.43 / 228 / 2.40 × 5.28 / 227 / 2.39 ×
+
+2 138 / 1.00 × 4.71 / 277 / 2.01 × 5.14 / 281 / 2.04 × 5.45 / 283 / 2.05 × 5.27 / 282 / 2.04 ×
+
+4 167 / 1.00 × 4.72 / 309 / 1.85 × 5.16 / 315 / 1.89 × 5.45 / 320 / 1.92 × 5.31 / 320 / 1.92 ×
+
+8 204 / 1.00 × 4.69 / 340 / 1.67 × 5.14 / 337 / 1.65 × 5.44 / 342 / 1.68 × 5.26 / 340 / 1.67 ×
+
+16 † 211 / 1.00 × 4.71 / 342 / 1.62 × 5.14 / 350 / 1.66 × 5.50 / 351 / 1.66 × 5.27 / 351 / 1.66 ×
+
+32 † 213 / 1.00 × 4.71 / 344 / 1.62 × 5.14 / 355 / 1.67 × 5.50 / 357 / 1.68 × 5.27 / 355 / 1.67 ×
+
+> 32 K, high
+
+1 102 / 1.00 × 2.84 / 191 / 1.87 × 3.06 / 194 / 1.90 × 3.17 / 197 / 1.93 × 3.12 / 200 / 1.96 ×
+
+2 154 / 1.00 × 2.84 / 273 / 1.77 × 3.04 / 278 / 1.81 × 3.19 / 282 / 1.83 × 3.11 / 284 / 1.84 ×
+
+4 186 / 1.00 × 2.84 / 329 / 1.77 × 3.02 / 330 / 1.77 × 3.17 / 328 / 1.76 × 3.14 / 343 / 1.84 ×
+
+8 240 / 1.00 × 2.86 / 384 / 1.60 × 3.07 / 390 / 1.62 × 3.20 / 399 / 1.66 × 3.12 / 395 / 1.65 ×
+
+16 † 250 / 1.00 × 2.86 / 396 / 1.58 × 3.08 / 407 / 1.63 × 3.21 / 406 / 1.62 × 3.13 / 409 / 1.64 ×
+
+32 † 251 / 1.00 × 2.84 / 397 / 1.58 × 3.08 / 404 / 1.61 × 3.22 / 412 / 1.64 × 3.13 / 410 / 1.63 ×
+
+21 Table 15: LiLiCorr and LiLiCorr + margin on the nine benchmarks, as τ / speedup, each speedup against the autoregressive baseline of its own campaign. Otherwise as in Table 1. 
+
+LiLiCorr LiLiCorr + margin Benchmark 8B 4B 8B 4B 
+
+> Greedy , T = 0
+
+GSM8K 7.56 / 5.30 × 7.51 / 4.95 × 7.57 / 5.28 × 7.52 / 4.94 ×
+
+MATH-500 9.14 / 6.59 × 8.93 / 6.16 × 9.11 / 6.55 × 8.89 / 6.12 ×
+
+AIME 2025 8.19 / 5.98 × 8.35 / 5.86 × 8.15 / 5.96 × 8.38 / 5.88 ×
+
+HumanEval 7.18 / 4.15 × 7.34 / 3.95 × 7.26 / 4.19 × 7.44 / 3.94 ×
+
+MBPP 5.87 / 4.15 × 5.72 / 3.82 × 5.90 / 4.16 × 5.73 / 3.84 ×
+
+LiveCodeBench 7.79 / 5.38 × 7.83 / 5.20 × 7.75 / 5.36 × 7.86 / 5.20 ×
+
+AlpacaEval 3.67 / 2.69 × 3.66 / 2.55 × 3.66 / 2.68 × 3.66 / 2.56 ×
+
+MT-Bench 3.99 / 2.91 × 3.99 / 2.77 × 3.96 / 2.89 × 4.00 / 2.79 ×
+
+SPEED 4.92 / 3.58 × 5.00 / 3.50 × 4.92 / 3.58 × 5.01 / 3.49 ×
+
+Average 6.48 / 4.51 × 6.48 / 4.29 × 6.48 / 4.52 × 6.50 / 4.31 ×
+
+> Sampling , T = 1
+
+GSM8K 6.45 / 4.57 × 6.59 / 4.43 × 6.47 / 4.58 × 6.65 / 4.47 ×
+
+MATH-500 6.23 / 4.55 × 6.34 / 4.45 × 6.33 / 4.63 × 6.41 / 4.48 ×
+
+AIME 2025 4.88 / 3.61 × 4.91 / 3.48 × 4.77 / 3.53 × 5.04 / 3.58 ×
+
+HumanEval 7.11 / 4.11 × 7.38 / 4.00 × 7.25 / 4.18 × 7.43 / 3.99 ×
+
+MBPP 4.98 / 3.57 × 5.17 / 3.50 × 4.99 / 3.57 × 5.20 / 3.53 ×
+
+LiveCodeBench 5.88 / 4.11 × 5.65 / 3.80 × 5.84 / 4.07 × 5.63 / 3.77 ×
+
+AlpacaEval 2.94 / 2.18 × 3.15 / 2.22 × 2.93 / 2.16 × 3.16 / 2.23 ×
+
+MT-Bench 3.38 / 2.48 × 3.52 / 2.48 × 3.37 / 2.47 × 3.53 / 2.48 ×
+
+SPEED 3.43 / 2.52 × 3.72 / 2.63 × 3.43 / 2.52 × 3.72 / 2.62 ×
+
+Average 5.03 / 3.52 × 5.16 / 3.43 × 5.04 / 3.52 × 5.20 / 3.46 ×
+
+22 Table 16: LiLiCorr + margin on the 1K and 2K blocks of the SPEED throughput split, reported as in Table 13. 
+
+c Autoregressive Vanilla DFlash Domino DSpark LiLiCorr + margin TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. 
+
+> 1K, low
+
+1 148 / 1.00 × 4.31 / 470 / 3.18 × 4.58 / 469 / 3.17 × 4.85 / 485 / 3.28 × 4.92 / 514 / 3.47 ×
+
+2 284 / 1.00 × 4.29 / 881 / 3.10 × 4.59 / 884 / 3.11 × 4.81 / 900 / 3.17 × 4.90 / 959 / 3.38 ×
+
+4 542 / 1.00 × 4.31 / 1601 / 2.95 × 4.59 / 1588 / 2.93 × 4.88 / 1646 / 3.04 × 4.91 / 1723 / 3.18 ×
+
+8 982 / 1.00 × 4.33 / 2568 / 2.62 × 4.60 / 2549 / 2.60 × 4.86 / 2628 / 2.68 × 4.91 / 2752 / 2.80 ×
+
+16 1705 / 1.00 × 4.26 / 3683 / 2.16 × 4.58 / 3734 / 2.19 × 4.84 / 3783 / 2.22 × 4.88 / 3921 / 2.30 ×
+
+32 2703 / 1.00 × 4.30 / 4368 / 1.62 × 4.56 / 4363 / 1.61 × 4.85 / 4421 / 1.64 × 4.89 / 4562 / 1.69 ×
+
+> 1K, mixed
+
+1 148 / 1.00 × 4.30 / 476 / 3.22 × 4.77 / 496 / 3.35 × 5.01 / 508 / 3.43 × 4.94 / 525 / 3.55 ×
+
+2 284 / 1.00 × 4.29 / 899 / 3.17 × 4.80 / 936 / 3.30 × 5.00 / 956 / 3.37 × 4.92 / 983 / 3.46 ×
+
+4 545 / 1.00 × 4.28 / 1634 / 3.00 × 4.81 / 1704 / 3.13 × 5.00 / 1738 / 3.19 × 4.94 / 1793 / 3.29 ×
+
+8 986 / 1.00 × 4.30 / 2655 / 2.69 × 4.81 / 2763 / 2.80 × 5.02 / 2802 / 2.84 × 4.94 / 2874 / 2.91 ×
+
+16 1717 / 1.00 × 4.25 / 3873 / 2.26 × 4.79 / 4095 / 2.38 × 5.02 / 4122 / 2.40 × 4.92 / 4210 / 2.45 ×
+
+32 2747 / 1.00 × 4.23 / 4619 / 1.68 × 4.72 / 4836 / 1.76 × 4.94 / 5006 / 1.82 × 4.87 / 5006 / 1.82 ×
+
+> 1K, high
+
+1 148 / 1.00 × 2.80 / 318 / 2.15 × 3.05 / 324 / 2.19 × 3.13 / 326 / 2.20 × 3.12 / 341 / 2.30 ×
+
+2 286 / 1.00 × 2.80 / 615 / 2.15 × 3.03 / 627 / 2.19 × 3.13 / 630 / 2.20 × 3.10 / 658 / 2.30 ×
+
+4 552 / 1.00 × 2.78 / 1151 / 2.09 × 3.04 / 1172 / 2.12 × 3.14 / 1190 / 2.16 × 3.12 / 1239 / 2.24 ×
+
+8 1018 / 1.00 × 2.80 / 1942 / 1.91 × 3.06 / 1981 / 1.95 × 3.14 / 1996 / 1.96 × 3.13 / 2085 / 2.05 ×
+
+16 1821 / 1.00 × 2.79 / 3090 / 1.70 × 3.05 / 3169 / 1.74 × 3.12 / 3154 / 1.73 × 3.12 / 3279 / 1.80 ×
+
+32 3034 / 1.00 × 2.78 / 3774 / 1.24 × 3.02 / 3973 / 1.31 × 3.11 / 3989 / 1.31 × 3.10 / 4019 / 1.32 ×
+
+> 2K, low
+
+1 146 / 1.00 × 4.69 / 501 / 3.43 × 5.00 / 501 / 3.43 × 5.33 / 521 / 3.57 × 5.45 / 555 / 3.80 ×
+
+2 276 / 1.00 × 4.70 / 922 / 3.34 × 5.03 / 924 / 3.35 × 5.36 / 958 / 3.47 × 5.45 / 1017 / 3.68 ×
+
+4 515 / 1.00 × 4.68 / 1605 / 3.12 × 4.98 / 1588 / 3.08 × 5.33 / 1661 / 3.23 × 5.43 / 1742 / 3.38 ×
+
+8 896 / 1.00 × 4.73 / 2444 / 2.73 × 4.99 / 2418 / 2.70 × 5.31 / 2495 / 2.78 × 5.43 / 2617 / 2.92 ×
+
+16 1484 / 1.00 × 4.72 / 3388 / 2.28 × 5.00 / 3381 / 2.28 × 5.37 / 3490 / 2.35 × 5.45 / 3597 / 2.42 ×
+
+32 2208 / 1.00 × 4.66 / 3822 / 1.73 × 4.98 / 3845 / 1.74 × 5.30 / 3960 / 1.79 × 5.41 / 4031 / 1.83 ×
+
+> 2K, mixed
+
+1 146 / 1.00 × 4.49 / 486 / 3.33 × 4.98 / 505 / 3.46 × 5.20 / 515 / 3.53 × 5.19 / 538 / 3.68 ×
+
+2 277 / 1.00 × 4.50 / 903 / 3.26 × 5.01 / 935 / 3.38 × 5.22 / 953 / 3.44 × 5.21 / 994 / 3.59 ×
+
+4 519 / 1.00 × 4.52 / 1596 / 3.08 × 4.97 / 1631 / 3.14 × 5.23 / 1681 / 3.24 × 5.19 / 1726 / 3.33 ×
+
+8 909 / 1.00 × 4.52 / 2439 / 2.68 × 5.01 / 2517 / 2.77 × 5.24 / 2539 / 2.79 × 5.22 / 2622 / 2.88 ×
+
+16 1500 / 1.00 × 4.48 / 3320 / 2.21 × 5.02 / 3486 / 2.32 × 5.24 / 3511 / 2.34 × 5.22 / 3607 / 2.40 ×
+
+32 2255 / 1.00 × 4.50 / 3842 / 1.70 × 4.99 / 3964 / 1.76 × 5.21 / 4066 / 1.80 × 5.20 / 4083 / 1.81 ×
+
+> 2K, high
+
+1 147 / 1.00 × 2.81 / 314 / 2.14 × 3.06 / 322 / 2.19 × 3.15 / 324 / 2.20 × 3.14 / 339 / 2.31 ×
+
+2 280 / 1.00 × 2.81 / 599 / 2.14 × 3.07 / 616 / 2.20 × 3.15 / 615 / 2.20 × 3.14 / 645 / 2.30 ×
+
+4 528 / 1.00 × 2.80 / 1095 / 2.07 × 3.04 / 1111 / 2.10 × 3.13 / 1126 / 2.13 × 3.13 / 1178 / 2.23 ×
+
+8 939 / 1.00 × 2.84 / 1804 / 1.92 × 3.05 / 1811 / 1.93 × 3.18 / 1857 / 1.98 × 3.13 / 1905 / 2.03 ×
+
+16 1589 / 1.00 × 2.80 / 2668 / 1.68 × 3.07 / 2764 / 1.74 × 3.14 / 2762 / 1.74 × 3.12 / 2847 / 1.79 ×
+
+32 2459 / 1.00 × 2.83 / 3216 / 1.31 × 3.07 / 3367 / 1.37 × 3.16 / 3403 / 1.38 × 3.16 / 3433 / 1.40 ×
+
+23 Table 17: LiLiCorr + margin on the 8K, 16 K and 32 K blocks of the SPEED throughput split, reported as in Table 14 and directly comparable to it. Rows marked † offer more concurrency than the key-value cache holds. 
+
+c Autoregressive Vanilla DFlash Domino DSpark LiLiCorr + margin TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. τ / TPS / Sp. 
+
+> 8K, low
+
+1 135 / 1.00 × 3.89 / 371 / 2.75 × 4.17 / 373 / 2.76 × 4.26 / 373 / 2.76 × 4.54 / 410 / 3.04 ×
+
+2 242 / 1.00 × 3.90 / 629 / 2.60 × 4.19 / 635 / 2.62 × 4.26 / 633 / 2.62 × 4.55 / 691 / 2.86 ×
+
+4 412 / 1.00 × 3.88 / 967 / 2.35 × 4.17 / 977 / 2.37 × 4.28 / 983 / 2.39 × 4.51 / 1045 / 2.54 ×
+
+8 625 / 1.00 × 3.93 / 1257 / 2.01 × 4.20 / 1262 / 2.02 × 4.25 / 1267 / 2.03 × 4.56 / 1335 / 2.14 ×
+
+16 854 / 1.00 × 3.93 / 1541 / 1.80 × 4.20 / 1555 / 1.82 × 4.27 / 1555 / 1.82 × 4.57 / 1618 / 1.89 ×
+
+32 1047 / 1.00 × 3.93 / 1685 / 1.61 × 4.21 / 1695 / 1.62 × 4.29 / 1699 / 1.62 × 4.57 / 1754 / 1.68 ×
+
+> 8K, mixed
+
+1 136 / 1.00 × 4.97 / 464 / 3.41 × 5.35 / 469 / 3.45 × 5.61 / 482 / 3.54 × 5.79 / 512 / 3.76 ×
+
+2 243 / 1.00 × 4.98 / 776 / 3.19 × 5.35 / 780 / 3.21 × 5.57 / 791 / 3.26 × 5.79 / 843 / 3.47 ×
+
+4 411 / 1.00 × 4.97 / 1172 / 2.85 × 5.35 / 1184 / 2.88 × 5.60 / 1201 / 2.92 × 5.78 / 1257 / 3.06 ×
+
+8 628 / 1.00 × 4.98 / 1491 / 2.37 × 5.33 / 1516 / 2.41 × 5.59 / 1537 / 2.45 × 5.76 / 1587 / 2.53 ×
+
+16 867 / 1.00 × 4.98 / 1796 / 2.07 × 5.33 / 1825 / 2.10 × 5.60 / 1854 / 2.14 × 5.79 / 1889 / 2.18 ×
+
+32 1074 / 1.00 × 4.96 / 1952 / 1.82 × 5.33 / 1973 / 1.84 × 5.59 / 2033 / 1.89 × 5.76 / 2040 / 1.90 ×
+
+> 8K, high
+
+1 136 / 1.00 × 2.82 / 285 / 2.10 × 3.02 / 287 / 2.11 × 3.12 / 290 / 2.13 × 3.14 / 305 / 2.24 ×
+
+2 244 / 1.00 × 2.79 / 500 / 2.05 × 3.03 / 508 / 2.08 × 3.08 / 506 / 2.07 × 3.12 / 533 / 2.18 ×
+
+4 411 / 1.00 × 2.80 / 807 / 1.96 × 2.98 / 812 / 1.98 × 3.06 / 812 / 1.98 × 3.09 / 848 / 2.06 ×
+
+8 622 / 1.00 × 2.80 / 1078 / 1.73 × 3.00 / 1114 / 1.79 × 3.12 / 1109 / 1.78 × 3.12 / 1142 / 1.84 ×
+
+16 882 / 1.00 × 2.80 / 1404 / 1.59 × 3.01 / 1428 / 1.62 × 3.09 / 1446 / 1.64 × 3.09 / 1460 / 1.66 ×
+
+32 1112 / 1.00 × 2.80 / 1604 / 1.44 × 2.99 / 1637 / 1.47 × 3.09 / 1670 / 1.50 × 3.12 / 1682 / 1.51 ×
+
+> 16 K, low
+
+1 121 / 1.00 × 4.38 / 328 / 2.71 × 4.58 / 324 / 2.68 × 4.72 / 328 / 2.71 × 4.97 / 350 / 2.89 ×
+
+2 200 / 1.00 × 4.40 / 490 / 2.45 × 4.63 / 489 / 2.44 × 4.78 / 494 / 2.47 × 5.01 / 519 / 2.60 ×
+
+4 303 / 1.00 × 4.41 / 603 / 1.99 × 4.58 / 600 / 1.98 × 4.78 / 601 / 1.98 × 4.98 / 642 / 2.12 ×
+
+8 404 / 1.00 × 4.40 / 730 / 1.81 × 4.61 / 732 / 1.81 × 4.76 / 746 / 1.85 × 4.99 / 760 / 1.88 ×
+
+16 491 / 1.00 × 4.43 / 824 / 1.68 × 4.62 / 828 / 1.69 × 4.73 / 826 / 1.68 × 4.99 / 851 / 1.73 ×
+
+32 † 483 / 1.00 × 4.42 / 781 / 1.62 × 4.62 / 804 / 1.66 × 4.78 / 814 / 1.69 × 5.00 / 819 / 1.70 ×
+
+> 16 K, mixed
+
+1 122 / 1.00 × 4.88 / 372 / 3.05 × 5.15 / 371 / 3.04 × 5.45 / 382 / 3.13 × 5.64 / 403 / 3.30 ×
+
+2 205 / 1.00 × 4.89 / 558 / 2.72 × 5.18 / 561 / 2.74 × 5.47 / 570 / 2.78 × 5.66 / 599 / 2.92 ×
+
+4 312 / 1.00 × 4.89 / 688 / 2.21 × 5.22 / 701 / 2.25 × 5.50 / 735 / 2.36 × 5.64 / 743 / 2.38 ×
+
+8 423 / 1.00 × 4.88 / 845 / 2.00 × 5.15 / 851 / 2.01 × 5.43 / 869 / 2.05 × 5.62 / 885 / 2.09 ×
+
+16 512 / 1.00 × 4.90 / 959 / 1.87 × 5.22 / 958 / 1.87 × 5.46 / 965 / 1.88 × 5.63 / 979 / 1.91 ×
+
+32 † 514 / 1.00 × 4.89 / 927 / 1.80 × 5.17 / 950 / 1.85 × 5.46 / 961 / 1.87 × 5.64 / 971 / 1.89 ×
+
+> 16 K, high
+
+1 124 / 1.00 × 2.83 / 250 / 2.02 × 3.05 / 253 / 2.04 × 3.15 / 257 / 2.07 × 3.17 / 267 / 2.15 ×
+
+2 209 / 1.00 × 2.87 / 412 / 1.97 × 3.05 / 412 / 1.97 × 3.17 / 420 / 2.01 × 3.18 / 433 / 2.07 ×
+
+4 313 / 1.00 × 2.89 / 548 / 1.75 × 3.10 / 558 / 1.78 × 3.16 / 552 / 1.76 × 3.22 / 566 / 1.81 ×
+
+8 424 / 1.00 × 2.84 / 713 / 1.68 × 3.04 / 716 / 1.69 × 3.17 / 737 / 1.74 × 3.15 / 742 / 1.75 ×
+
+16 541 / 1.00 × 2.85 / 834 / 1.54 × 3.10 / 871 / 1.61 × 3.20 / 870 / 1.61 × 3.21 / 881 / 1.63 ×
+
+32 † 534 / 1.00 × 2.86 / 844 / 1.58 × 3.07 / 863 / 1.62 × 3.20 / 874 / 1.64 × 3.21 / 885 / 1.66 ×
+
+> 32 K, low
+
+1 102 / 1.00 × 4.57 / 256 / 2.51 × 4.63 / 250 / 2.45 × 5.23 / 266 / 2.61 × 5.61 / 283 / 2.77 ×
+
+2 154 / 1.00 × 4.52 / 342 / 2.22 × 4.59 / 336 / 2.18 × 5.20 / 354 / 2.30 × 5.56 / 370 / 2.40 ×
+
+4 186 / 1.00 × 4.52 / 388 / 2.09 × 4.58 / 384 / 2.06 × 5.21 / 399 / 2.15 × 5.56 / 414 / 2.23 ×
+
+8 241 / 1.00 × 4.55 / 434 / 1.80 × 4.60 / 443 / 1.84 × 5.20 / 454 / 1.88 × 5.57 / 464 / 1.93 ×
+
+16 † 250 / 1.00 × 4.53 / 457 / 1.83 × 4.59 / 448 / 1.79 × 5.22 / 464 / 1.86 × 5.56 / 475 / 1.90 ×
+
+32 † 250 / 1.00 × 4.53 / 453 / 1.81 × 4.59 / 458 / 1.83 × 5.22 / 464 / 1.86 × 5.56 / 476 / 1.90 ×
+
+> 32 K, mixed
+
+1 95 / 1.00 × 4.69 / 217 / 2.28 × 5.16 / 223 / 2.35 × 5.43 / 228 / 2.40 × 5.45 / 230 / 2.42 ×
+
+2 138 / 1.00 × 4.71 / 277 / 2.01 × 5.14 / 281 / 2.04 × 5.45 / 283 / 2.05 × 5.47 / 287 / 2.08 ×
+
+4 167 / 1.00 × 4.72 / 309 / 1.85 × 5.16 / 315 / 1.89 × 5.45 / 320 / 1.92 × 5.48 / 323 / 1.93 ×
+
+8 204 / 1.00 × 4.69 / 340 / 1.67 × 5.14 / 337 / 1.65 × 5.44 / 342 / 1.68 × 5.44 / 343 / 1.68 ×
+
+16 † 211 / 1.00 × 4.71 / 342 / 1.62 × 5.14 / 350 / 1.66 × 5.50 / 351 / 1.66 × 5.44 / 355 / 1.68 ×
+
+32 † 213 / 1.00 × 4.71 / 344 / 1.62 × 5.14 / 355 / 1.67 × 5.50 / 357 / 1.68 × 5.44 / 359 / 1.69 ×
+
+> 32 K, high
+
+1 102 / 1.00 × 2.84 / 191 / 1.87 × 3.06 / 194 / 1.90 × 3.17 / 197 / 1.93 × 3.16 / 202 / 1.98 ×
+
+2 154 / 1.00 × 2.84 / 273 / 1.77 × 3.04 / 278 / 1.81 × 3.19 / 282 / 1.83 × 3.17 / 287 / 1.86 ×
+
+4 186 / 1.00 × 2.84 / 329 / 1.77 × 3.02 / 330 / 1.77 × 3.17 / 328 / 1.76 × 3.19 / 338 / 1.82 ×
+
+8 240 / 1.00 × 2.86 / 384 / 1.60 × 3.07 / 390 / 1.62 × 3.20 / 399 / 1.66 × 3.20 / 400 / 1.67 ×
+
+16 † 250 / 1.00 × 2.86 / 396 / 1.58 × 3.08 / 407 / 1.63 × 3.21 / 406 / 1.62 × 3.20 / 414 / 1.66 ×
+
+32 † 251 / 1.00 × 2.84 / 397 / 1.58 × 3.08 / 404 / 1.61 × 3.22 / 412 / 1.64 × 3.20 / 415 / 1.65 ×
+
+24

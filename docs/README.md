@@ -6,58 +6,44 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-24
-- 运行时间：2026-08-24 20:14:55 UTC
+- 最新运行日期：2026-08-25
+- 运行时间：2026-08-25 20:41:31 UTC
 - 运行状态：成功
-- 本次总论文数：12
+- 本次总论文数：8
 - 精读区：6
-- 速读区：6
+- 速读区：2
 
 ### 今日简报（AI）
-今日共读12篇，精读6篇，聚焦注意力机制与解码效率优化。  
-最值得关注9分精读：长上下文稀疏注意力微调“学会遗忘”提升效率，以及投机解码的并行草稿似然相关性方法。  
-建议优先了解稀疏注意力与投机解码的推理加速思路，可关注后续实际应用案例。
-- 详情：[/202608/24/README](/202608/24/README)
+今日聚焦多模态推测解码与并行草稿加速，精读6篇、速读2篇，总览8篇新论文。最值得关注FOVEA（10分）提出缓存友好的视觉证据自适应方法，及LiLiCorr（9分）用轻量似然相关性优化并行草稿。若想快速跟进，建议优先精读这两篇高分工作，速读可略览存储感知预取与尾部路由策略。
+- 详情：[/202608/25/README](/202608/25/README)
 
 ### 精读区论文标签
-1. [Learning how to Forget: Fine-tuning for Long-Context Sparse Attention](/202608/24/2608.19920v1-learning-how-to-forget-fine-tuning-for-long-context-sparse-attention)  
+1. [FOVEA: Focused On-Demand Visual Evidence Adaptation for Cache-Friendly Multimodal Speculative Decoding](/202608/25/2608.22883v1-fovea-focused-on-demand-visual-evidence-adaptation-for-cache-friendly-multimodal-speculative-decoding)  
+   标签：评分：10.0/10、query:vlm-spec
+   evidence：面向视觉语言模型的多模态投机解码，按需调整视觉证据
+2. [LiLiCorr: Lightweight Likelihood Correlation of Parallel Drafts for Speculative Decoding](/202608/25/2608.20530v1-lilicorr-lightweight-likelihood-correlation-of-parallel-drafts-for-speculative-decoding)  
    标签：评分：9.0/10、query:llm
-   evidence：面向长上下文大模型高效推理的KV缓存选择与稀疏注意力微调方法。
-2. [LiLiCorr: Lightweight Likelihood Correlation of Parallel Drafts for Speculative Decoding](/202608/24/2608.20530v1-lilicorr-lightweight-likelihood-correlation-of-parallel-drafts-for-speculative-decoding)  
+   evidence：通过并行草稿的轻量似然相关性改进大语言模型投机解码
+3. [Reservoir of Importance: Learning Semi-Structured Sparsity with Differentiable Subset Sampling](/202608/25/2608.23048v1-reservoir-of-importance-learning-semi-structured-sparsity-with-differentiable-subset-sampling)  
    标签：评分：9.0/10、query:llm
-   evidence：一种对投机解码并行草稿进行轻量似然相关建模的模块，用于提升大模型推理中的草稿接受率。
-3. [Is Multimodal Speculative Decoding Ready for Diffusion-Based Parallel Drafting? A Survey and Empirical Diagnosis](/202608/24/2608.20743v1-is-multimodal-speculative-decoding-ready-for-diffusion-based-parallel-drafting-a-survey-and-empirical-diagnosis)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：针对多模态模型投机采样的综述与实证诊断，直接对应多模态投机解码主题
-4. [Dynamic Multi-Byte Prediction With Hierarchical Language Models](/202608/24/2608.15454v1-dynamic-multi-byte-prediction-with-hierarchical-language-models)  
+   evidence：面向LLM推理加速的半结构化稀疏剪枝
+4. [MoNe: Modular Neural Memory for Efficient Long Context Inference](/202608/25/2608.17616v1-mone-modular-neural-memory-for-efficient-long-context-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：通过并行多字节预测加速分层语言模型推理。
-5. [FlashQuant: Sparse-Dense Fusion for Memory-Efficient Outlier-Aware LLM Inference](/202608/24/2608.15531v1-flashquant-sparse-dense-fusion-for-memory-efficient-outlier-aware-llm-inference)  
-   标签：评分：8.0/10、query:llm
-   evidence：通过稀疏-稠密融合量化实现内存高效且感知异常值的大语言模型推理
-6. [Llama-Mobile: Efficient 2.7-Bit Quantization of VLMs](/202608/24/2608.21134v1-llama-mobile-efficient-27-bit-quantization-of-vlms)  
+   evidence：面向长上下文LLM高效推理的模块化神经记忆设计
+5. [E2S-Pruner: Progressive Two-Stage Evidence Fusion for Visual Token Pruning in Vision-Language Models](/202608/25/2608.23253v1-e2s-pruner-progressive-two-stage-evidence-fusion-for-visual-token-pruning-in-vision-language-models)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：面向资源受限设备的高效VLM量化推理
+   evidence：面向VLM的视觉令牌剪枝加速推理
+6. [ProxyFormer: A Dual-Stream Proxy Architecture for Ultra-Long Context and High-Resolution Generation](/202608/25/2608.23463v1-proxyformer-a-dual-stream-proxy-architecture-for-ultra-long-context-and-high-resolution-generation)  
+   标签：评分：8.0/10、query:llm
+   evidence：双流代理架构降低超长上下文语言模型的注意力与KV缓存开销
 
 ### 速读区论文标签
-1. [FlashAttention for Scalable Vector Architectures](/202608/24/2608.18656v1-flashattention-for-scalable-vector-architectures)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向向量CPU的FlashAttention变体，加速Transformer推理
-2. [DeltaLog: Deferred Materialization of Recurrent States for Linear Attention Decoding](/202608/24/2608.15533v1-deltalog-deferred-materialization-of-recurrent-states-for-linear-attention-decoding)  
+1. [NeuroPrefetcher: Storage-Aware Sparse LLM Inference via Delta Prefetching](/202608/25/2608.22643v1-neuroprefetcher-storage-aware-sparse-llm-inference-via-delta-prefetching)  
    标签：评分：7.0/10、query:llm
-   evidence：通过延迟物化循环状态降低解码内存开销，提升大模型推理效率
-3. [Aggregating Visual Information with Optimal Transport for VideoLM Token Compression](/202608/24/2608.20473v1-aggregating-visual-information-with-optimal-transport-for-videolm-token-compression)  
-   标签：评分：7.0/10、query:vlm-spec
-   evidence：压缩视频语言模型的视觉token序列以减轻解码负担，实现VLM推理加速
-4. [Just Noticeable Difference Modeling for Token Compression in Vision-Language-Action Models](/202608/24/2608.21247v1-just-noticeable-difference-modeling-for-token-compression-in-vision-language-action-models)  
-   标签：评分：7.0/10、query:vlm-spec
-   evidence：通过JND建模进行令牌压缩，降低视觉-语言-行动模型推理成本
-5. [MoNe: Modular Neural Memory for Efficient Long Context Inference](/202608/24/2608.17616v1-mone-modular-neural-memory-for-efficient-long-context-inference)  
-   标签：评分：6.0/10、query:llm
-   evidence：面向高效长上下文推理的模块化神经记忆方法，降低计算与显存开销，符合大模型高效推理主题
-6. [Jacobian-guided Noise Injection for Quantization Robustness in Large Language Models](/202608/24/2608.20988v1-jacobian-guided-noise-injection-for-quantization-robustness-in-large-language-models)  
-   标签：评分：6.0/10、query:llm
-   evidence：面向LLM量化鲁棒性的高效推理技术
+   evidence：通过增量预取实现存储感知的稀疏大模型推理，加速边缘部署
+2. [TailSieve: Partial-Rollout-Guided Tail Routing for LLM Rollouts](/202608/25/2608.22788v1-tailsieve-partial-rollout-guided-tail-routing-for-llm-rollouts)  
+   标签：评分：7.0/10、query:llm
+   evidence：基于部分rollout引导的尾部路由与副本分配，优化LLM rollout整体耗时
 
 
 <div class="dpr-home-promo-card">
