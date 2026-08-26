@@ -6,44 +6,54 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-08-25
-- 运行时间：2026-08-25 20:41:31 UTC
+- 最新运行日期：2026-08-26
+- 运行时间：2026-08-26 22:03:26 UTC
 - 运行状态：成功
-- 本次总论文数：8
+- 本次总论文数：10
 - 精读区：6
-- 速读区：2
+- 速读区：4
 
 ### 今日简报（AI）
-今日聚焦多模态推测解码与并行草稿加速，精读6篇、速读2篇，总览8篇新论文。最值得关注FOVEA（10分）提出缓存友好的视觉证据自适应方法，及LiLiCorr（9分）用轻量似然相关性优化并行草稿。若想快速跟进，建议优先精读这两篇高分工作，速读可略览存储感知预取与尾部路由策略。
-- 详情：[/202608/25/README](/202608/25/README)
+今日推荐聚焦高效推理：AgentSpec 实现LLM智能体批量推断的投机解码，VisCache 提出视觉KV缓存剪枝，双双拿下9.0高分。
+
+最值得关注的是投机解码与KV缓存压缩两大方向，分别显著加速LLM智能体推理和视觉大模型长序列处理，兼顾吞吐与显存效率。
+
+后续可优先精读这两篇高分论文，再顺带宽泛浏览稀疏化采样、长上下文生成与视频token压缩等工作，以建立系统认识。
+- 详情：[/202608/26/README](/202608/26/README)
 
 ### 精读区论文标签
-1. [FOVEA: Focused On-Demand Visual Evidence Adaptation for Cache-Friendly Multimodal Speculative Decoding](/202608/25/2608.22883v1-fovea-focused-on-demand-visual-evidence-adaptation-for-cache-friendly-multimodal-speculative-decoding)  
-   标签：评分：10.0/10、query:vlm-spec
-   evidence：面向视觉语言模型的多模态投机解码，按需调整视觉证据
-2. [LiLiCorr: Lightweight Likelihood Correlation of Parallel Drafts for Speculative Decoding](/202608/25/2608.20530v1-lilicorr-lightweight-likelihood-correlation-of-parallel-drafts-for-speculative-decoding)  
+1. [AgentSpec: Speculative Decoding for Batch Inference of LLM Agents](/202608/26/2608.24004v1-agentspec-speculative-decoding-for-batch-inference-of-llm-agents)  
    标签：评分：9.0/10、query:llm
-   evidence：通过并行草稿的轻量似然相关性改进大语言模型投机解码
-3. [Reservoir of Importance: Learning Semi-Structured Sparsity with Differentiable Subset Sampling](/202608/25/2608.23048v1-reservoir-of-importance-learning-semi-structured-sparsity-with-differentiable-subset-sampling)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向LLM推理加速的半结构化稀疏剪枝
-4. [MoNe: Modular Neural Memory for Efficient Long Context Inference](/202608/25/2608.17616v1-mone-modular-neural-memory-for-efficient-long-context-inference)  
+   evidence：用于LLM智能体批量推理的投机解码算法。
+2. [VisCache: Visual KV Cache Pruning for Efficient Vision Large Language Model Inference](/202608/26/2608.24063v1-viscache-visual-kv-cache-pruning-for-efficient-vision-large-language-model-inference)  
+   标签：评分：9.0/10、query:vlm-spec
+   evidence：通过视觉KV缓存剪枝实现高效视觉大语言模型推理
+3. [MoNe: Modular Neural Memory for Efficient Long Context Inference](/202608/26/2608.17616v1-mone-modular-neural-memory-for-efficient-long-context-inference)  
    标签：评分：8.0/10、query:llm
-   evidence：面向长上下文LLM高效推理的模块化神经记忆设计
-5. [E2S-Pruner: Progressive Two-Stage Evidence Fusion for Visual Token Pruning in Vision-Language Models](/202608/25/2608.23253v1-e2s-pruner-progressive-two-stage-evidence-fusion-for-visual-token-pruning-in-vision-language-models)  
+   evidence：面向预训练Transformer的高效长上下文推理模块化神经记忆方法。
+4. [LiLiCorr: Lightweight Likelihood Correlation of Parallel Drafts for Speculative Decoding](/202608/26/2608.20530v1-lilicorr-lightweight-likelihood-correlation-of-parallel-drafts-for-speculative-decoding)  
+   标签：评分：8.0/10、query:llm
+   evidence：改进投机解码中的草稿连贯性以加速大模型推理
+5. [NeuroPrefetcher: Storage-Aware Sparse LLM Inference via Delta Prefetching](/202608/26/2608.22643v1-neuroprefetcher-storage-aware-sparse-llm-inference-via-delta-prefetching)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向存储感知的稀疏大模型推理，利用增量预取加速超内存场景下的解码
+6. [HAP: Head-Adaptive Visual Token Pruning via Cross-Modal Alignment](/202608/26/2608.23921v1-hap-head-adaptive-visual-token-pruning-via-cross-modal-alignment)  
    标签：评分：8.0/10、query:vlm-spec
-   evidence：面向VLM的视觉令牌剪枝加速推理
-6. [ProxyFormer: A Dual-Stream Proxy Architecture for Ultra-Long Context and High-Resolution Generation](/202608/25/2608.23463v1-proxyformer-a-dual-stream-proxy-architecture-for-ultra-long-context-and-high-resolution-generation)  
-   标签：评分：8.0/10、query:llm
-   evidence：双流代理架构降低超长上下文语言模型的注意力与KV缓存开销
+   evidence：面向VLM的视觉标记剪枝以降低prefill开销
 
 ### 速读区论文标签
-1. [NeuroPrefetcher: Storage-Aware Sparse LLM Inference via Delta Prefetching](/202608/25/2608.22643v1-neuroprefetcher-storage-aware-sparse-llm-inference-via-delta-prefetching)  
-   标签：评分：7.0/10、query:llm
-   evidence：通过增量预取实现存储感知的稀疏大模型推理，加速边缘部署
-2. [TailSieve: Partial-Rollout-Guided Tail Routing for LLM Rollouts](/202608/25/2608.22788v1-tailsieve-partial-rollout-guided-tail-routing-for-llm-rollouts)  
-   标签：评分：7.0/10、query:llm
-   evidence：基于部分rollout引导的尾部路由与副本分配，优化LLM rollout整体耗时
+1. [Reservoir of Importance: Learning Semi-Structured Sparsity with Differentiable Subset Sampling](/202608/26/2608.23048v1-reservoir-of-importance-learning-semi-structured-sparsity-with-differentiable-subset-sampling)  
+   标签：评分：8.0/10、query:llm
+   evidence：面向大语言模型加速的半结构化N:M稀疏性剪枝
+2. [ProxyFormer: A Dual-Stream Proxy Architecture for Ultra-Long Context and High-Resolution Generation](/202608/26/2608.23463v1-proxyformer-a-dual-stream-proxy-architecture-for-ultra-long-context-and-high-resolution-generation)  
+   标签：评分：8.0/10、query:llm
+   evidence：双流代理架构降低注意力与KV缓存开销
+3. [Aggregating Visual Information with Optimal Transport for VideoLM Token Compression](/202608/26/2608.20473v2-aggregating-visual-information-with-optimal-transport-for-videolm-token-compression)  
+   标签：评分：7.0/10、query:vlm-spec
+   evidence：视频语言模型的Token压缩以减轻解码负担
+4. [Learning to Look Again: Loss-Gap Supervision for Free-form Crop Routing in Vision-Language Models](/202608/26/2608.21762v1-learning-to-look-again-loss-gap-supervision-for-free-form-crop-routing-in-vision-language-models)  
+   标签：评分：6.0/10、query:vlm-spec
+   evidence：面向VLM的选择性重读以避免无差别计算
 
 
 <div class="dpr-home-promo-card">
