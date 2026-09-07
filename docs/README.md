@@ -6,58 +6,56 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-06
-- 运行时间：2026-09-06 21:48:05 UTC
+- 最新运行日期：2026-09-07
+- 运行时间：2026-09-07 22:58:27 UTC
 - 运行状态：成功
 - 本次总论文数：12
 - 精读区：6
 - 速读区：6
 
 ### 今日简报（AI）
-今日12篇论文聚焦长上下文LLM推理加速，其中精读6篇、速读6篇。  
-最值得关注的是推测解码与压缩KV缓存结合的两个9.0分工作（ReTrace、Strong Drafts），以及8.0分的注意力稀疏解码方案。  
-普通读者可重点关注“压缩KV缓存+推测解码”这一组合方向，其在不牺牲质量前提下显著提升长上下文生成效率。
-- 详情：[/202609/06/README](/202609/06/README)
+今日重点围绕长上下文LLM推理加速，聚焦投机解码与KV缓存优化；最值得关注《ReTrace》与《Strong Drafts》两篇9分工作，分别从拒绝轨迹条件化和压缩KV缓存提升解码效率。建议优先精读这两篇，再以CateKV、Tail-Replay等缓存/前缀方法作对比参考，深入理解系统瓶颈。
+- 详情：[/202609/07/README](/202609/07/README)
 
 ### 精读区论文标签
-1. [ReTrace: Rejected-Trajectory Conditioning for Speculative Decoding](/202609/06/2608.29748v1-retrace-rejected-trajectory-conditioning-for-speculative-decoding)  
+1. [ReTrace: Rejected-Trajectory Conditioning for Speculative Decoding](/202609/07/2608.29748v1-retrace-rejected-trajectory-conditioning-for-speculative-decoding)  
+   标签：评分：9.0/10、query:llm-sd
+   evidence：投机解码的拒绝轨迹条件化，避免首个拒绝后丢弃草稿后缀导致的计算浪费
+2. [Strong Drafts Need Compact Memories: Long-Context Speculative Decoding with Compressed KV Cache](/202609/07/2608.30252v1-strong-drafts-need-compact-memories-long-context-speculative-decoding-with-compressed-kv-cache)  
    标签：评分：9.0/10、query:llm
-   evidence：投机解码中对拒绝轨迹的再利用，契合LLM高效推理主题
-2. [Strong Drafts Need Compact Memories: Long-Context Speculative Decoding with Compressed KV Cache](/202609/06/2608.30252v1-strong-drafts-need-compact-memories-long-context-speculative-decoding-with-compressed-kv-cache)  
+   evidence：结合压缩KV缓存与投机解码加速长上下文LLM推理，命中KV缓存优化和投机解码综合主题
+3. [HeadWiseKV: Budgeted Per-Head Cache Residency for Hybrid Long-Context Language Models](/202609/07/2609.02029v1-headwisekv-budgeted-per-head-cache-residency-for-hybrid-long-context-language-models)  
    标签：评分：9.0/10、query:llm
-   evidence：面向长上下文LLM的投机解码结合压缩草稿侧KV缓存
-3. [Tail-Replay: Escaping the Curse of Linear Attention in Prefix Caching for Hybrid LLMs](/202609/06/2608.30310v1-tail-replay-escaping-the-curse-of-linear-attention-in-prefix-caching-for-hybrid-llms)  
-   标签：评分：9.0/10、query:llm
-   evidence：面向混合架构大语言模型的前缀缓存难题，提出无约束令牌级前缀复用机制，属KV缓存优化核心主题。
-4. [Multi-Access Speculative Inference: Uplink or Downlink?](/202609/06/2608.29618v1-multi-access-speculative-inference-uplink-or-downlink)  
+   evidence：面向混合长上下文语言模型的KV缓存优化与按头预算分配
+4. [Multi-Access Speculative Inference: Uplink or Downlink?](/202609/07/2608.29618v1-multi-access-speculative-inference-uplink-or-downlink)  
    标签：评分：8.0/10、query:llm
-   evidence：将SPIN投机解码扩展到多设备边缘网络，分析上行/下行纠正位置对通信开销的影响
-5. [Verification-Aware Training for Speculative Decoding](/202609/06/2608.30135v1-verification-aware-training-for-speculative-decoding)  
-   标签：评分：8.0/10、query:llm
-   evidence：通过验证感知的草稿模型训练改进大模型投机解码，直接推动LLM高效推理。
-6. [From Saliency to Discriminability: Rank-Preserving Visual Token Pruning for VLM Rerankers](/202609/06/2609.00667v1-from-saliency-to-discriminability-rank-preserving-visual-token-pruning-for-vlm-rerankers)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：面向VLM重排器的保序训练无关视觉标记剪枝，降低推理开销
+   evidence：基于SPIN的多接入投机推理，面向边缘大模型加速
+5. [Verification-Aware Training for Speculative Decoding](/202609/07/2608.30135v1-verification-aware-training-for-speculative-decoding)  
+   标签：评分：8.0/10、query:llm-sd
+   evidence：投机解码；验证感知训练；接受拒绝监督
+6. [SFAD: Speculative Factuality-Aware Decoding](/202609/07/2609.00796v1-sfad-speculative-factuality-aware-decoding)  
+   标签：评分：8.0/10、query:llm-sd
+   evidence：提出面向大模型的投机解码框架SFAD，在保持效率的同时用偏好数据增强事实一致性;
 
 ### 速读区论文标签
-1. [CateKV: On Sequential Consistency for Long-Context LLM Inference Acceleration](/202609/06/2608.30295v1-catekv-on-sequential-consistency-for-long-context-llm-inference-acceleration)  
+1. [CateKV: On Sequential Consistency for Long-Context LLM Inference Acceleration](/202609/07/2608.30295v1-catekv-on-sequential-consistency-for-long-context-llm-inference-acceleration)  
    标签：评分：8.0/10、query:llm
-   evidence：面向LLM推理加速的KV缓存优化与显存开销降低
-2. [Event-Driven Language Models with Sparse Neural Activity for Neuromorphic Hardware](/202609/06/2608.30439v1-event-driven-language-models-with-sparse-neural-activity-for-neuromorphic-hardware)  
+   evidence：面向长上下文LLM推理加速的KV缓存优化方法
+2. [Tail-Replay: Escaping the Curse of Linear Attention in Prefix Caching for Hybrid LLMs](/202609/07/2608.30310v1-tail-replay-escaping-the-curse-of-linear-attention-in-prefix-caching-for-hybrid-llms)  
    标签：评分：8.0/10、query:llm
-   evidence：提出在量化线性注意力大模型中诱导稀疏激活以减少计算的方法，服务于大模型高效推理这一主题。
-3. [Faster Than Flash: Exploiting Attention Sparsity for Efficient Long-Context Decoding](/202609/06/2609.00097v1-faster-than-flash-exploiting-attention-sparsity-for-efficient-long-context-decoding)  
+   evidence：面向混合LLM的前缀缓存与KV管理优化，契合大模型高效推理主题
+3. [Faster Than Flash: Exploiting Attention Sparsity for Efficient Long-Context Decoding](/202609/07/2609.00097v1-faster-than-flash-exploiting-attention-sparsity-for-efficient-long-context-decoding)  
    标签：评分：8.0/10、query:llm
-   evidence：利用注意力稀疏性的软硬协同设计加速长上下文解码
-4. [HeadWiseKV: Budgeted Per-Head Cache Residency for Hybrid Long-Context Language Models](/202609/06/2609.02029v1-headwisekv-budgeted-per-head-cache-residency-for-hybrid-long-context-language-models)  
-   标签：评分：8.0/10、query:llm
-   evidence：面向混合长上下文语言模型的免训练逐头KV缓存预算压缩
-5. [SFAD: Speculative Factuality-Aware Decoding](/202609/06/2609.00796v1-sfad-speculative-factuality-aware-decoding)  
+   evidence：利用注意力稀疏性和融合内核加速长上下文LLM解码，属于高效LLM推理主题
+4. [Don't Drop Dropout: Optimizing Layer Sparsity for Efficient LLM Training and Inference](/202609/07/2609.05275v1-dont-drop-dropout-optimizing-layer-sparsity-for-efficient-llm-training-and-inference)  
+   标签：评分：7.0/10、query:llm
+   evidence：层dropout作为层稀疏性优化，改善LLM训练并支持零样本层剪枝的高效推理
+5. [hLLM: Single Pass Decoding for Generative Reranking](/202609/07/2609.01807v1-hllm-single-pass-decoding-for-generative-reranking)  
    标签：评分：6.0/10、query:llm
-   evidence：面向LLM的投机解码框架，在不损害推理效率的前提下提升上下文忠实度
-6. [OUTLETS: Output-Length Prediction from Speculative Decoding Backbones](/202609/06/2609.01068v1-outlets-output-length-prediction-from-speculative-decoding-backbones)  
+   evidence：大模型解码加速；生成式重排序用O(1)前向替代自回归逐token解码
+6. [SPD: Single Pass Decoding for Generative Reranking](/202609/07/2609.01807v2-spd-single-pass-decoding-for-generative-reranking)  
    标签：评分：6.0/10、query:llm
-   evidence：利用投机解码骨架（如EAGLE-3）的潜表示预测输出长度，服务于LLM高效推理与资源调度。
+   evidence：面向生成式重排序的LLM高效解码，将自回归串行前向降为O(1)次，属于大模型推理加速方向
 
 
 <div class="dpr-home-promo-card">
