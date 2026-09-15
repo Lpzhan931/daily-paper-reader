@@ -1,0 +1,2992 @@
+Osprey: Target-agnostic Pre-training Makes Stronger Drafters in
+Speculative Decoding
+Fengxiang Bie*1,2, Yuqing Jian*,1, Yifan Yu1,4, Zhongzhu Zhou1,2, Zelei Shao1,4,
+Ben Athiwaratkun1, Shuaiwen Leon Song1,2, Chenfeng Xu1,3, Xiaoxia Wu1, Tianyi Zhang1
+1Together AI
+2The University of Sydney, Australia
+3The University of Texas at Austin, USA
+4University of Illinois Urbana-Champaign, USA
+Accepted at EMNLP 2026.
+Abstract
+Speculative decoding is critical for accelerating
+LLM inference. However, the speedup is frag-
+ile: drafters are typically trained against a nar-
+row distribution for a single target model, and
+their acceptance rate collapses under workload
+shifts. This is a striking inversion of modern
+LLM development, where target models are val-
+ued precisely for the broad generalization they
+acquire through large-scale pretraining. We
+argue that the natural remedy—pretraining—
+has been hard to apply to drafters because ex-
+isting recipes are target-specific: the drafter
+consumes the target’s hidden states and is dis-
+tilled on the target’s logits, so pretraining must
+be repeated for each target. We introduce Os-
+prey, which instead bootstraps drafters from
+off-the-shelf pretrained small language mod-
+els, treating broad pretraining as a reusable,
+target-agnostic asset and reducing per-target
+work to a lightweight adaptation step. Realiz-
+ing this requires overcoming two challenges:
+small LMs are far deeper than a latency-bound
+drafter can afford, and their pretrained computa-
+tion must remain intact while the drafter learns
+to ingest target hidden states and emit tokens in
+the target’s vocabulary. Osprey addresses both
+by pruning to a shallow backbone, restoring
+its language-modeling capability with target-
+agnostic next-token pretraining, and adapting it
+to each target through vocabulary alignment,
+zero-initialized QKV expansion, and distil-
+lation from the target model’s output distri-
+bution. Empirically, a single pretrained Os-
+prey backbone transfers across targets and im-
+proves mean acceptance length by 16.1% for
+Qwen3-8B, 21.2% for Llama-3.3-70B-Instruct,
+and 22.7% for the 229B MiniMax-M2.5 (with
+17.5% higher tokens per second), with the
+largest gains on out-of-domain and multilin-
+gual data.
+Our code is available at https:
+//github.com/LeanModels/Osprey.
+*Equal Contribution. Correspondence to: Tianyi Zhang
+<tonyzhang@together.ai>.
+1
+Introduction
+Speculative decoding (Leviathan et al., 2023; Chen
+et al., 2023; Li et al., 2025; Cai et al., 2024) has
+emerged as one of the most effective techniques for
+accelerating LLM serving. A lightweight drafter
+proposes a block of future tokens, while a larger
+target model verifies these tokens in parallel. Since
+accepted tokens are committed exactly according
+to the target distribution and rejected positions fall
+back to standard autoregressive decoding, spec-
+ulative decoding provides a rare combination of
+acceleration and losslessness. This has made it
+particularly attractive for latency-sensitive and re-
+source constrained deployment settings, where
+prior systems commonly report 2–5× decoding
+speedups (Xia et al., 2024b).
+Yet this success hides a fundamental fragility. In
+practice, the drafter is often trained or tuned on a
+particular data distribution, model family, or de-
+ployment domain (Hong et al., 2025). When the
+serving workload shifts, for example, from chat to
+code, from general QA to domain-specific reason-
+ing, or from short responses to long-form genera-
+tion, the drafter’s predictions can become poorly
+aligned with the target model. The result is a sharp
+drop in acceptance rate, and therefore a sharp loss
+of the very speedup that speculative decoding is
+designed to provide. As we show in Figure 2, a
+state-of-the-art Eagle3 (Li et al., 2025) drafter that
+is trained on a certain distribution of data performs
+well on in-domain data while performing notice-
+ably worse on out-of-domain data (e.g. Eagle3
+trained on math achieves an average of 5.06 accep-
+tance length on math data, and an average of only
+1.86 acceptance length on code data).
+This brittleness is interesting in the context of
+today’s LLM development (Kaplan et al., 2020).
+The target models we serve today are trained on
+increasingly broad mixtures of data and are valued
+precisely for their ability to generalize across do-
+arXiv:2609.09338v1  [cs.CL]  8 Sep 2026
+
+
+mains, tasks, and interaction styles (Radford et al.,
+2018). Domain shift, once a central concern in
+classical machine learning, is rarely a dominant
+narrative for frontier LLMs; the LLM field instead
+emphasizes emergent capabilities and broad trans-
+fer (Wei et al., 2022). However, the drafter used
+to accelerate these models remains a much more
+narrow and fragile component. In other words,
+speculative decoding inherits the latency benefits
+of small models, but not the generalization benefits
+of the large models it accelerates.
+This motivates us to rethink the design of the
+drafter. If the fragility of speculative decoding
+comes from distribution shift, then a natural ques-
+tion is whether we can improve the drafter’s gener-
+alization in the same way machine learning has his-
+torically improved generalization, such as through
+pretraining. Indeed, the role of pretraining in learn-
+ing transferable representations has been studied
+for decades (Erhan et al., 2010; Radford et al.,
+2018; Devlin et al., 2019). One might therefore
+try to pretrain existing speculative drafters, such as
+EAGLE-style drafters on more diverse data. How-
+ever, these methods are inherently target-specific:
+the drafter consumes activations from the target
+model and is trained in the target’s representation
+space. Consequently, adapting the method to a
+new target model requires a new, expensive train-
+ing pipeline. More importantly, such a training
+pipeline still does not directly inherit the broad
+generalization ability already learned by existing
+pretrained language models.
+So we suggest a different direction. Today, small
+language models (SLMs) (Belcak et al., 2025) are
+increasingly capable, broadly pretrained, and close
+in scale to the draft models used in speculative
+decoding. Unlike target-specific drafters trained
+from scratch, these models already encode gen-
+eral linguistic, reasoning, and domain knowledge
+from large-scale pretraining. The question is there-
+fore: can speculative decoding use pretrained small
+LMs as general-purpose drafters, while still align-
+ing them tightly enough with the target model to
+preserve high acceptance rates?
+Building the speculators on top of small lan-
+guage models, however, is non-trivial. Existing
+small language models (SLMs) are typically 16 or
+more layers deep (Zhang et al., 2024c). A drafter
+must be shallow, as a deep drafter would negate
+the latency benefits of speculation. Furthermore,
+the backbone needs to be compatible with a wide
+range of target models. Its embedding and LM
+head must be adaptable to any target tokenizer, and
+it must be able to ingest target hidden states without
+disrupting pretrained capabilities.
+To address these challenges, we propose a four-
+stage training recipe for speculative drafters (Fig-
+ure 1), named Osprey, that is split into a universal,
+target-agnostic phase and a per-target adaptation
+phase. First, we prune an off-the-shelf pretrained
+small language model down to its embedding, lan-
+guage modeling head, and first few transformer
+layers to construct a shallow backbone. Second,
+we pre-train this pruned model off-policy via next-
+token prediction on a large, generic corpus, which
+restores robust and target-independent language
+modeling capabilities. Crucially, this pretraining
+stage is entirely target-agnostic, yielding a drafter
+backbone that can be reused across different target
+models. Third, we adapt this universal checkpoint
+to a specific target model by replacing the tokenizer
+and aligning the embedding and language model-
+ing head with the target’s vocabulary. During this
+adaptation step, we also expand the QKV projec-
+tions with zero-initialized columns, allowing the
+drafter to ingest target hidden states without dis-
+rupting the pretrained initialization. Finally, we
+distill target-specific behavior into the drafter by
+conditioning it on target activations and training it
+to predict target logits. Thus, each deployed drafter
+is ultimately target-specific, and inherits the broad
+language prior of the reusable backbone. This de-
+coupled approach allows a single target-agnostic
+checkpoint to be efficiently reused across a wide
+range of architectures, from Qwen3 (Team, 2025),
+through Llama-3.3 (Meta AI, 2024), to MiniMax-
+M2.5 (MiniMax AI, 2026).
+In this work, our primary contributions are
+twofold. We first propose a target-agnostic pre-
+training recipe for speculative drafters that dis-
+entangles general language modeling from target
+conditioning, creating a single, highly reusable
+drafter backbone. Second, we demonstrate that
+Osprey delivers higher acceptance rates and su-
+perior speedups than strong EAGLE-3 baselines.
+Empirically, on Qwen3-8B, Osprey improves the
+mean acceptance length over EAGLE-3 across all
+five evaluation domains (chat, code, commonsense,
+finance, and math), with the most significant gains
+at further lookahead positions. For larger targets,
+Osprey improves mean acceptance length and to-
+kens per second over matched EAGLE-3 (Li et al.,
+2025) baselines by 21.2% and 17.9% for Llama-
+3.3-70B-Instruct, and by 22.7% and 17.5% for
+
+
+MiniMax-M2.5. Furthermore, Osprey exhibits ex-
+cellent transferability to multilingual data (such
+as 42-language Global-MMLU and 11-language
+MGSM benchmarks) despite using only code data
+for target-specific training.
+2
+Related Work
+Speculative decoding and target-conditioned
+drafters.
+Speculative decoding accelerates au-
+toregressive inference by using a cheaper drafter
+to propose multiple tokens that the target model
+verifies in parallel (Leviathan et al., 2023; Chen
+et al., 2023). Existing drafters range from exter-
+nal proposal models (Xia et al., 2023; Miao et al.,
+2024) to target-conditioned architectures that con-
+sume target hidden states, including EAGLE (Li
+et al., 2024b), EAGLE-2 (Li et al., 2024a), and
+EAGLE-3 (Li et al., 2025), as well as Medusa,
+Hydra, ReDrafter, Clover, P-EAGLE, Falcon, and
+HASS (Cai et al., 2024; Ankner et al., 2024; Bhen-
+dawade et al., 2024a; Xiao et al., 2024a,b; Hui
+et al., 2026; Gao et al., 2024; Zhang et al., 2024b).
+A parallel line of work avoids a separate drafter by
+reusing the target itself, through early exits, adap-
+tive layer skipping, adapters, or multi-stream atten-
+tion (Elhoushi et al., 2024; Zhang et al., 2024a; Xia
+et al., 2024a; Liu et al., 2024a; Bhendawade et al.,
+2024b). These methods reduce inference cost, but
+either train drafters from scratch, tightly couple
+drafting behavior to a specific target, or require
+target-side architectural/training changes. Osprey
+instead keeps the target untouched and builds a
+standalone shallow drafter whose body is initial-
+ized from a target-agnostic pre-trained next-token
+predictor. We adopt EAGLE-3’s TTT paradigm and
+the three-layer target hidden states tap, but inject
+target features through a zero-initialized QKV ex-
+pansion, preserving the pre-trained drafter function
+at adaptation.
+Robust and reusable draft-model training.
+Re-
+cent studies show that speculative acceptance can
+vary sharply across domains and user populations
+(Xia et al., 2024b; Sandler et al., 2025; Hong
+et al., 2025), motivating drafters that generalize
+beyond the target-specific distillation distribution.
+Prior work improves robustness through pre-trained
+SLM initialization, state-space drafters, online up-
+dates, cross-vocabulary verification, or universal
+verification rules (Berdoz et al., 2025; Choi et al.,
+2025; Ramakrishnan et al., 2025; Timor et al.,
+2025; Liu et al., 2024b). Osprey differs by explic-
+itly pre-training a reusable shallow LM on generic
+web text (Penedo et al., 2024) and then lightly
+adapting it to each target, rather than relying on on-
+line correction or selecting among existing drafters.
+Our contribution is not a new distillation objective
+but a reusable initialization and adaptation path-
+way that yields stronger domain robustness and
+cross-target transfer under the same speculative
+decoding interface. A more complete discussion
+of related sub-fields—depth pruning, vocabulary
+transfer, continued pre-training, white-box distil-
+lation, and drafter-free parallel decoding—is de-
+ferred to Appendix A.
+3
+Method
+Osprey constructs a target-conditioned specula-
+tive drafter through a four-stage pipeline orga-
+nized into two phases (Figure 1). In the target-
+agnostic phase, we prune a pretrained source lan-
+guage model to a shallow architecture (Stage 1)
+and continue next-token pretraining on generic text
+(Stage 2). These stages produce a reusable shallow
+language-modeling backbone without being cou-
+pled to a target model. In the target-specific phase,
+we align the backbone with the target vocabulary
+and augment it to use target hidden states (Stage 3).
+We then adapt the converted drafter to the frozen
+target model using distillation (Stage 4).
+3.1
+Setup
+Let pθ denote the frozen target model and qϕ the
+lightweight drafter. Given a prefix x≤t, the drafter
+proposes K draft tokens, which the target veri-
+fies in a single forward pass using the standard
+speculative-decoding acceptance rule (Leviathan
+et al., 2023). Osprey changes how the drafter is
+constructed and trained; it does not modify the
+verification procedure.
+The source model used to initialize qϕ may be-
+long to a different model family and may use a
+different tokenizer from pθ. Stages 3–4 therefore
+align the drafter with the target vocabulary, hidden
+states, and output distribution.
+3.2
+Drafter Pretraining (Stages 1–2)
+The first two stages produce a shallow next-token-
+prediction (NTP) backbone that can be reused
+across target models.
+Stage 1: Pruning.
+Starting from a source lan-
+guage model with L transformer blocks, we re-
+tain only its first N blocks together with its in-
+
+
+Target-agnostic  — done once
+Per target  — repeat for each
+1. Prune
+2. Pre-train (off-policy)
+3. Adapt (per target)
+4. Distill (on-policy)
+Source SLM
+LM head
+Layer 32
+Layer 31
+⋮
+Layer 5
+Layer 4
+Layer 3
+Layer 2
+Layer 1
+Embedding
+Layer 32
+Layer 31
+⋮
+Layer 5
+Layer 4
+off-policy
+data
+LM head
+Layer 3
+Layer 2
+Layer 1
+Embedding
+(Embedding +
+2-4 layers +
+LM head)
+Next Token 
+Prediction
+Loss
+Qwen3-8B
+⋮
+Minimax 2.5 229B
+⋮
+Target X
+1 Tokenizer replacement
+→
+Draft tokenizer
+2
+Embedding & LM-head 
+adaptation
+A) T in draft vocab:
+→
+B) T not in draft vocab
+T→t₁
+t₂
+t₃
+→avg
+Apply to Embedding and LM head
+3
+Expand drafter QKV projections to 
+accept target activations as input
+Drafter layer (expanded)
+Q
+0
+low
+K
+0
+Mid
+V
+0
+High
+orig. 
+dim
+new dim 
+(0-init)
+Target Model
+⋮
+Target Activation (on-policy data)
+p_draft
+p_target
+KL distill
+loss
+Osprey
+Drop
+⋮
+Target tokenizer
+copy
+Embedding
+Embedding
+Embedding
+Embedding
+Layer 1
+Layer 1
+Layer 1
+LM head
+LM head
+Layer 80
+Layer 62
+Layer N
+LM head
+Layer 1
+Layer 2
+Layer N
+Layer N-1
+Layer N-2
+LM head
+low
+Mid
+High
+Figure 1: Overview of Osprey. The pipeline has four stages, split into a target-agnostic phase done once (left) and a
+per-target phase repeated for each new target model (right). (1) Prune: keep only the embedding, LM head, and the
+first few transformer layers of an off-the-shelf small LM. (2) Pre-train (off-policy): train the pruned model with
+next-token prediction on a generic corpus to restore language-modeling capability. (3) Adapt (per target): replace
+the tokenizer and align the embedding/LM head with the target’s vocabulary, then expand the QKV projections with
+zero-initialized taps so the drafter can ingest target hidden states without disturbing the pretrained initialization. (4)
+Distill (on-policy): distill from target activations and output distributions via KL on target-generated sequences.
+The same target-agnostic checkpoint is reused across targets ranging from Qwen3-8B to MiniMax-M2.5-229B.
+put embeddings, final normalization layer, and
+language-modeling head. We keep N small (N ∈
+{1, 2, 3, 4}) because the drafter is executed au-
+toregressively and its latency directly affects the
+speedups of speculative decoding.
+For example,
+retaining two blocks from
+Qwen3-4B
+(Team,
+2025)
+produces
+a
+2-
+layer,
+approximately
+591M-parameter
+back-
+bone,
+while
+retaining
+four
+blocks
+from
+layerskip-llama3.2-1B
+(Elhoushi
+et
+al.,
+2024) produces a 4-layer, approximately 506M-
+parameter backbone.
+Aggressive pruning can
+severely degrade the model’s next-token prediction
+capability, so we continue pretraining the pruned
+model in the next stage to restore this capability.
+Early-exit-trained models, such as LayerSkip
+(Elhoushi et al., 2024), provide a stronger initial-
+ization because auxiliary early-exit objectives
+explicitly train intermediate layers to predict the
+next token.
+Stage 2: Pretraining.
+We continue pretraining
+the shallow backbone with the standard next-token
+prediction objective. In our experiments, we use a
+100B-token sample from FineWeb (Penedo et al.,
+2024) and train for five epochs, corresponding to
+approximately 500B training tokens. This contin-
+ued pretraining restores the backbone’s next-token
+prediction capability after pruning and provides
+a broadly trained initialization for target-specific
+adaptation.
+We intentionally use more training tokens than
+the compute-optimal allocation for a model of this
+size (Hoffmann et al., 2022). Our goal at this stage
+is to obtain a broadly trained language backbone for
+subsequent target-specific adaptation, rather than
+to minimize the cost of pretraining. We refer to the
+resulting model as the shallow NTP backbone.
+3.3
+Drafter Conversion (Stage 3)
+Stage 3 converts the standalone shallow NTP back-
+bone into a target-conditioned drafter. The con-
+version involves three components: projecting the
+target hidden states, expanding the attention projec-
+tions with zero-initialized columns, and aligning
+the vocabulary. The drafter’s MLP blocks, normal-
+ization layers, and other pretrained components are
+transferred without architectural changes.
+Multi-layer target hidden states.
+Following
+EAGLE-3 (Li et al., 2025), we condition the drafter
+on hidden states from low, middle, and high layers
+of the target model. At position t, we concatenate
+the three target hidden states and project them into
+the drafter’s hidden space:
+ct = Wc
+h
+h(ℓlow)
+t
+; h(ℓmid)
+t
+; h(ℓhigh)
+t
+i
+.
+(1)
+Here, ℓlow, ℓmid, and ℓhigh identify the selected
+target layers, and Wc is a newly initialized linear
+projection. The resulting representation ct is pro-
+vided as input to every attention layer of the drafter.
+Zero-initialized attention expansion.
+At the be-
+ginning of a drafting step, the current token xt
+has been selected, but the target model has not yet
+
+
+computed hidden states for that token. The latest
+available projected representation is therefore ct−1.
+For a given drafter layer, let zt denote the token-
+side representation that its pretrained query, key,
+and value projections would normally process at
+position t. We concatenate ct−1 with zt and expand
+each pretrained attention QKV projection Wqkv
+with zero-initialized columns:
+f
+Wqkv = [0 Wqkv].
+(2)
+At initialization,
+f
+Wqkv
+ct−1
+zt
+
+= Wqkvzt.
+(3)
+Because the new columns are initialized to zero,
+the target hidden states initially do not affect the
+drafter’s query, key, or value vectors. The atten-
+tion layers therefore retain their target-agnostic pre-
+trained behavior at initialization. During training,
+these columns and all other drafter weights are up-
+dated, allowing the drafter to use the target hidden
+states to improve draft-token predictions.
+Vocabulary alignment.
+Let VS and VT denote
+the source and target vocabularies, respectively. We
+adapt the drafter to use the target tokenizer and vo-
+cabulary while retaining information from its own
+pretrained parameters. Specifically, we resize the
+drafter’s input embedding and language modeling
+head to |VT | and initialize the resized matrices from
+the drafter’s pretrained weights rather than from
+the target model (Gee et al., 2022). The resulting
+drafter can predict tokens in VT while preserving
+knowledge acquired during pretraining.
+For each token in the target vocabulary, the ini-
+tialization depends on whether the same token is
+present in the source vocabulary. If it is, we directly
+copy the corresponding pretrained row. Otherwise,
+we convert the target token to text, tokenize that
+text using the source tokenizer, and initialize the
+new row as the mean of the corresponding source-
+token rows. We use the same procedure for both
+the input embedding and the language modeling
+head.
+Formally, let WS denote either pretrained source
+matrix and let f
+W denote its resized counter-
+part.
+For each target token v ∈VT \ VS, let
+(s1, . . . , smv) = τS(str(v)) be the sequence ob-
+tained by tokenizing its string representation with
+the source tokenizer. We initialize each row as
+f
+W[v] =
+
+
+
+
+
+
+
+WS[v],
+v ∈VS,
+1
+mv
+mv
+X
+i=1
+WS[si],
+v /∈VS.
+(4)
+Thus, shared tokens retain their pretrained rows,
+whereas target-only tokens are initialized from the
+mean of their source-token representations.
+3.4
+Target Adaptation (Stage 4)
+After conversion, we train the drafter qϕ by distill-
+ing the frozen target pθ. All drafter parameters,
+both pretrained and newly added, are trained. We
+use the Training-Time Test (TTT) framework from
+EAGLE-3 (Li et al., 2025) to align training with
+autoregressive inference.
+For each training sample, the target first pro-
+duces logits as distillation targets and hidden states
+as drafter inputs. The drafter is then unrolled for
+Ktrain steps. At position t, it receives the teacher-
+forced token xt and the projected target represen-
+tation ct−1. It produces its own hidden state and
+next-token distribution, and this hidden state be-
+comes part of its autoregressive context at the next
+step. Thus, the input tokens are teacher-forced,
+while the drafter’s hidden-state trajectory is gener-
+ated autoregressively as it is during inference.
+Let p(k)
+θ
+and q(k)
+ϕ
+denote the target’s and drafter’s
+next-token distributions at TTT step k. We train
+with the following discounted distillation loss,
+which emphasizes earlier drafting steps:
+Ladapt =
+Ktrain−1
+X
+k=0
+λk CE
+
+p(k)
+θ , q(k)
+ϕ
+
+,
+λ = 0.8.
+(5)
+4
+Experiments
+We conduct comprehensive experiments comparing
+Osprey with competitive baselines. We first per-
+form target-agnostic pretraining for a shallow next-
+token-prediction (NTP) backbone obtained by prun-
+ing Qwen3-4B to two layers. We then adapt Osprey
+drafters to three target models from different model
+families ranging from 8B to 230B parameters. Our
+experiments investigate whether target-agnostic
+pretraining improves end-to-end speedup across
+model scales, enhances out-of-domain (OOD) gen-
+eralization, and provides sufficient gains to justify
+its computational cost.
+
+
+Overall
+ID
+OOD
+OOD/ID
+retention
+0
+1
+2
+3
+4
+5
+Acceptance length / ratio
+3.68
+4.46
+3.49
+0.78
+3.17
+3.97
+2.97
+0.75
+ID/OOD summary
+Qwen3-8B target
+Osprey
+Eagle3
+chat
+code
+common. finance
+math
+eval domain
+chat
+code
+common.
+finance
+math
+train domain
+4.33
+2.87
+3.87
+4.12
+4.06
+3.84
+4.14
+3.54
+3.85
+3.85
+3.79
+2.25
+4.26
+3.48
+3.23
+4.23
+3.10
+3.88
+4.34
+4.28
+3.11
+2.18
+3.27
+3.03
+5.25
+Osprey
+mean = 3.686
+chat
+code
+common. finance
+math
+eval domain
+chat
+code
+common.
+finance
+math
+3.75
+2.41
+3.25
+3.56
+3.58
+3.40
+3.78
+3.18
+3.47
+3.56
+3.27
+1.95
+3.72
+3.00
+2.54
+3.45
+2.52
+3.11
+3.54
+3.74
+2.53
+1.86
+2.72
+2.45
+5.06
+EAGLE3
+mean = 3.176
+chat
+code
+common. finance
+math
+eval domain
+chat
+code
+common.
+finance
+math
++0.58
++0.46
++0.62
++0.57
++0.48
++0.44
++0.36
++0.36
++0.39
++0.30
++0.53
++0.29
++0.54
++0.48
++0.69
++0.78
++0.58
++0.77
++0.80
++0.54
++0.58
++0.32
++0.54
++0.58
++0.20
+ gain: Osprey 
+ Eagle3
+mean = +0.510
+Mean accepted length per (train, eval) domain · Qwen3-8B target
+Figure 2: Mean accepted length (AL) for Qwen3-8B drafters adapted using data from one of five domains and
+evaluated across all five domains. Left: aggregate performance; middle: cross-domain AL matrices for Osprey
+and EAGLE-3 trained from scratch; right: cell-wise AL difference between Osprey and EAGLE-3 (Osprey minus
+EAGLE-3).
+Baselines, target models, and data.
+We com-
+pare Osprey with EAGLE-3 (Li et al., 2025), a com-
+petitive speculative decoding drafter, on three target
+models: Qwen3-8B, Llama-3.3-70B-Instruct, and
+MiniMax-M2.5. For Qwen3-8B, we perform five
+separate adaptation runs for each method, with each
+run using data from one of five domains: chat, code,
+commonsense, finance, and math (Team, 2024).
+For each domain, we collect approximately 65k
+problem prompts, generate responses with Qwen3-
+8B, and use the resulting prompt–response pairs to
+adapt the drafter. We then measure the mean ac-
+cepted length (AL) of each adapted drafter on 512
+held-out prompts from each of the five domains.
+This 5 × 5 evaluation setup enables a controlled
+comparison of in-domain performance, where the
+adaptation and evaluation domains match, and
+OOD generalization, where they differ.
+We further scale Osprey to two larger tar-
+get models: the dense Llama-3.3-70B-Instruct
+and the mixture-of-experts (MoE) MiniMax-M2.5.
+For Llama-3.3-70B-Instruct, we compare Osprey
+against both the official checkpoint released by the
+EAGLE-3 authors and our reproduction of EAGLE-
+3. To ensure a controlled comparison, our reproduc-
+tion and Osprey are adapted using the same target-
+regenerated Open-PerfectBlend dataset (Xu et al.,
+2024). For MiniMax-M2.5, we adapt Osprey using
+70k coding prompts paired with responses gener-
+ated by the target model (Team, 2024). We evaluate
+the adapted drafter on public benchmarks span-
+ning mathematics, coding, chat, commonsense rea-
+soning, and multilingual understanding: MATH-
+500 (Hendrycks et al., 2021), HUMANEVAL (Chen
+et al., 2021), LIVECODEBENCH (Jain et al., 2024),
+MT-BENCH (Zheng et al., 2023), COMMONSENSE-
+EVAL, MGSM (Shi et al., 2023), and GLOBAL-
+MMLU (Singh et al., 2025).
+Drafter training settings.
+All Osprey models
+are initialized from the same shallow NTP back-
+bone, obtained by pruning Qwen3-4B to two layers.
+The shallow NTP backbone is then pretrained on
+FineWeb-100BT (Penedo et al., 2024) for 55k steps
+(approximately 462B tokens), using a sequence
+length of 4096 and a peak learning rate of 10−4.
+Complete pretraining details are provided in Ap-
+pendix C.
+For Qwen3-8B, Osprey and a one-layer EAGLE-
+3 baseline are adapted for 97.5k steps using a TTT
+length of 5, a sequence length of 4096, and a
+learning rate of 10−4. For Llama-3.3-70B-Instruct,
+Osprey and the EAGLE-3 baseline (trained from
+scratch) use the same data and are each adapted
+for 37.5k steps. We additionally evaluate the offi-
+cial EAGLE-3 checkpoint.1 Osprey is adapted to
+MiniMax-M2.5 for 35k steps and compared with
+the publicly available one-layer EAGLE-3 check-
+point (Lu et al., 2025). Draft-model sizes and per-
+target training costs are reported in Appendix E.
+We also apply target-agnostic pretraining to a four-
+layer LayerSkip Llama 8B model used as a DFlash
+drafter (Chen et al., 2026); the results are presented
+in Appendix G.
+Inference settings and metrics.
+We evalu-
+ate
+all
+drafters
+in
+SGLang
+(Zheng
+et
+al.,
+2024) with batch=1, steps=5, topk=1, and
+draft_tokens=6. Results for larger batch sizes
+and different numbers of lookahead tokens, to-
+gether with additional serving-sensitivity analyses,
+are provided in Appendix D. MiniMax-M2.5 is
+served in FP8 with tensor-parallelism and expert-
+parallelism degrees of four.
+We report mean accepted length (AL), defined
+1https://huggingface.co/yuhuili/EAGLE3-LLaMA3.
+3-Instruct-70B
+
+
+Table 1: Mean accepted length (AL) by evaluation do-
+main and overall decoding throughput (tokens/s) for
+Llama-3.3-70B-Instruct.
+Domain/metric
+EAGLE-3
+reproduced
+EAGLE-3
+official
+Osprey
+Chat
+1.95
+2.03
+2.33
+Code
+2.38
+2.53
+3.12
+CSense
+2.31
+2.33
+2.55
+Finance
+2.21
+2.26
+2.63
+Math
+3.41
+2.47
+4.25
+Mean AL
+2.45
+2.33
+2.97
+Throughput
+155.8
+150.3
+183.7
+as the average number of draft tokens accepted per
+verification step, and end-to-end decoding through-
+put in tokens per second (TPS). For Qwen3-8B,
+we additionally report mean in-domain (ID) and
+out-of-domain (OOD) performance, along with the
+OOD-to-ID ratio.
+4.1
+Cross-Domain Evaluation on Qwen3-8B
+Figure 2 compares Osprey with EAGLE-3 for
+Qwen3-8B, with each drafter adapted on one of
+five domains and evaluated on all five domains.
+Averaged over all 25 combinations of adaptation
+and evaluation domains, Osprey achieves a mean
+AL of 3.686, which is 16.1% higher than EAGLE-
+3’s 3.176. Osprey achieves higher AL for every
+domain pair.
+Osprey’s advantage over EAGLE-3 is larger
+when the adaptation and evaluation domains dif-
+fer. On OOD evaluations, Osprey achieves a mean
+AL of 3.493, outperforming EAGLE-3’s 2.977
+by 17.3%.
+On in-domain evaluations, Osprey
+achieves 4.465, compared with 3.971 for EAGLE-
+3, a 12.4% advantage. The OOD-to-ID AL ratio
+is also higher for Osprey (0.782) than for EAGLE-
+3 (0.750). For the math-adapted drafters, Osprey
+achieves an in-domain AL of 5.25 versus 5.06 for
+EAGLE-3, and a mean AL of 2.90 versus 2.39
+across the other four domains.
+4.2
+Transfer to Larger Target Models
+We next investigate whether the same pretrained
+shallow NTP backbone, obtained by pruning
+Qwen3-4B to two layers, can be adapted to target
+models outside the Qwen family. These target mod-
+els test whether the pretrained backbone transfers
+despite differences in model family, architecture
+(dense versus mixture-of-experts), tokenizer, and
+hidden-state dimensionality.
+Table 2: Accepted length (AL) and throughput (T/s)
+on five MiniMax-M2.5 public benchmarks, with 64
+prompts per benchmark.
+EAGLE-3
+Osprey
+Benchmark
+AL
+T/s
+AL
+T/s
+HUMANEVAL
+2.570
+184.4
+3.565
+243.2
+MATH-500
+2.924
+206.2
+3.642
+250.0
+LIVECODEBENCH
+2.508
+176.2
+3.779
+249.1
+MT-BENCH
+2.868
+214.4
+2.805
+201.6
+COMMON.-EVAL
+2.302
+154.3
+2.367
+154.8
+Mean
+2.634
+187.1
+3.232
+219.8
+Table 3: Accepted length (AL) and throughput (T/s) on
+multilingual MiniMax-M2.5 benchmarks. MGSM uses
+64 prompts; each G-MMLU language setting uses 84.
+EAGLE-3
+Osprey
+Suite
+AL
+T/s
+AL
+T/s
+MGSM (11 langs)
+2.275
+167.3
+2.557
+179.7
+G-MMLU (42 langs)
+2.633
+197.5
+3.259
+231.0
+G-MMLU native
+2.620
+193.7
+3.023
+209.9
+Results on Llama-3.3-70B-Instruct.
+We adapt
+the pretrained two-layer Qwen3-4B checkpoint to
+Llama-3.3-70B-Instruct (Meta AI, 2024). We
+compare Osprey with our reproduced EAGLE-3
+baseline and the official EAGLE-3 checkpoint. As
+shown in Table 1, Osprey achieves the highest
+AL in all five evaluation domains. Its mean AL
+and throughput are respectively 21.2% and 17.9%
+higher than those of our reproduced EAGLE-3
+baseline, and 27.5% and 22.2% higher than those
+of the official EAGLE-3 checkpoint.
+Results on MiniMax-M2.5.
+We also adapt the
+same pretrained checkpoint to MiniMax-M2.5, a
+229B-parameter mixture-of-experts model served
+in FP8. Table 2 compares Osprey with the public
+EAGLE-3 checkpoint on the benchmarks described
+above. Osprey achieves a mean AL of 3.232, which
+is 22.7% higher than EAGLE-3’s 2.634, and a
+throughput of 219.8 TPS, which is 17.5% higher
+than EAGLE-3’s 187.1 TPS. Osprey’s largest rel-
+ative AL advantages occur on LIVECODEBENCH
+(50.7%), HUMANEVAL (38.7%), and MATH-500
+(24.6%). The two drafters perform similarly on
+MT-BENCH and COMMONSENSE-EVAL.
+Multilingual benchmarks.
+Finally, we evaluate
+Osprey’s OOD generalization beyond its coding
+adaptation data on the multilingual MGSM and
+
+
+Table 4: Learning-rate sensitivity on Qwen3-8B. Entries
+report mean accepted length (AL). When the adaptation
+learning rate drops from 10−4 to 10−5, the warm-start
+draft loses only 0.11 AL, while the from-scratch base-
+line loses 1.07 AL. Full per-domain acceptance-length
+matrices are reported in Appendix F.
+Draft
+Metric
+10−5
+10−4
+∆
+Ours
+ID
+4.260 4.465 +0.21
+OOD
+3.407 3.493 +0.09
+All
+3.578 3.686 +0.11
+Scratch
+ID
+2.869 3.971 +1.10
+OOD
+1.921 2.977 +1.06
+All
+2.110 3.176 +1.07
+GLOBAL-MMLU benchmarks and compare it with
+the public EAGLE-3 checkpoint. As shown in Ta-
+ble 3, Osprey’s AL is 12.4% higher than EAGLE-
+3’s on MGSM and 23.8% higher on GLOBAL-
+MMLU. When the model must answer in the lan-
+guage of the question, Osprey’s AL is 15.4% higher
+than EAGLE-3’s.
+4.3
+Ablations
+We conduct ablations using Qwen3-8B as the target
+model. Specifically, we evaluate the learning-rate
+robustness of Osprey and EAGLE-3, isolate the ef-
+fect of target-agnostic pretraining, compare against
+a parameter-matched from-scratch baseline, and
+analyze when serving gains amortize the upfront
+pretraining cost. Unless otherwise stated, we vary
+one factor at a time while holding all other hyper-
+parameters fixed: 97,500 adaptation steps (three
+epochs), TTT length 5, and sequence length 4096.
+4.3.1
+Learning-rate robustness
+We found Osprey’s initialization from a pretrained
+checkpoint may reduce sensitivity to adaptation
+hyperparameters, compared to random initializa-
+tion like EAGLE3. Table 4 compares the warm-
+start Osprey drafter and the from-scratch EAGLE-
+3 baseline at two adaptation learning rates: 10−4,
+which is used for our main Qwen3-8B experiments,
+and 10−5. Reducing the learning rate by a fac-
+tor of ten decreases the overall AL of the warm-
+start drafter by only 0.11 (3.686 →3.578). In
+contrast, the from-scratch baseline loses 1.07 AL
+(3.176 →2.110). These results suggest that the
+pretrained initialization provides a strong prior that
+can be refined during target-specific adaptation,
+making Osprey substantially more robust to the
+choice of learning rate.
+Table 5: Effect of Stage 2 pretraining on Qwen3-8B
+accepted length (AL). Both variants use the same two-
+layer architecture and adaptation setup.
+Train
+Eval
+w/o Stage 2
+pretraining
+w/ Stage 2
+pretraining
+∆
+chat
+chat
+4.158
+4.335
++0.177
+code
+2.644
+2.867
++0.223
+finance
+3.935
+4.124
++0.189
+math
+3.888
+4.057
++0.169
+code
+chat
+3.735
+3.844
++0.109
+code
+3.804
+4.145
++0.341
+finance
+3.727
+3.855
++0.128
+math
+3.757
+3.854
++0.097
+finance
+chat
+4.091
+4.235
++0.144
+code
+2.964
+3.096
++0.132
+finance
+4.148
+4.335
++0.187
+math
+4.085
+4.287
++0.202
+math
+chat
+2.827
+3.109
++0.282
+code
+2.061
+2.189
++0.128
+finance
+2.737
+3.048
++0.311
+math
+5.113
+5.253
++0.140
+ID Mean
+4.306
+4.517
++0.211
+OOD Mean
+3.371
+3.547
++0.176
+Overall
+3.605
+3.790
++0.185
+4.3.2
+How helpful is Stage 2 pretraining?
+Osprey includes a target-agnostic pretraining stage
+(Stage 2) between layer pruning and target-specific
+adaptation. We investigate two questions: whether
+Stage 2 improves downstream performance and
+how much pretraining is needed to obtain most of
+its benefit.
+Skipping target-agnostic pretraining entirely.
+Table 5 isolates the contribution of Stage 2 by
+comparing a layer-pruned drafter that proceeds di-
+rectly to target-specific adaptation and distillation
+(Stages 1, 3, and 4) with the complete pipeline
+that includes FineWeb pretraining (Stages 1–4).
+This ablation covers chat, code, finance, and math,
+yielding 16 adaptation–evaluation domain pairs;
+commonsense is not included. Adding Stage 2 in-
+creases overall AL from 3.605 to 3.790 (+0.185).
+It improves both in-domain AL, from 4.306 to
+4.517 (+0.211), and OOD AL, from 3.371 to 3.547
+(+0.176). The improvement is consistent across
+all reported adaptation–evaluation domain pairs, in-
+dicating that target-agnostic pretraining provides a
+useful prior for subsequent target-specific adapta-
+tion.
+Limited gains beyond 10k pretraining steps.
+Extending target-agnostic pretraining from 10k to
+55k steps provides little additional benefit after
+
+
+target-specific adaptation. Under identical adap-
+tation settings, the 10k-step checkpoint achieves
+an overall AL of 3.552, compared with 3.578 for
+the 55k-step checkpoint, a difference of only 0.026.
+Their OOD-to-ID AL ratios are also nearly identi-
+cal (0.799 versus 0.800). Domain-level results and
+the corresponding pretraining curves are provided
+in Appendix C.
+4.3.3
+Parameter-matched from-scratch
+baseline
+Our main experiments compare a two-layer warm-
+start Osprey drafter with a one-layer EAGLE-3
+baseline, raising the possibility that Osprey’s ad-
+vantage results from its additional layer rather than
+from pretraining. Table 6 separates these effects by
+including a parameter-matched two-layer EAGLE-
+3 drafter trained from scratch. As in the Stage 2 ab-
+lation, this comparison covers chat, code, finance,
+and math. All three drafters use the same adapta-
+tion data, optimizer, and learning rate.
+The two-layer EAGLE-3 drafter achieves an
+overall AL of 3.385, only 0.094 higher than
+the one-layer EAGLE-3 drafter’s 3.291. Osprey
+achieves an overall AL of 3.790, exceeding the
+parameter-matched two-layer EAGLE-3 drafter by
+0.405 despite using the same architecture. The cor-
+responding OOD AL differences are 0.096 between
+the one- and two-layer EAGLE-3 drafters and
+0.408 between Osprey and the two-layer EAGLE-3
+drafter. These results indicate that Osprey’s gener-
+alization advantage comes primarily from its pre-
+trained language prior rather than its additional
+capacity.
+4.3.4
+Computational justification and serving
+break-even
+We assess whether the upfront cost of target-
+agnostic pretraining can be justified through back-
+bone reuse and serving-time compute savings.
+Stage 2 requires approximately 576 H100-hours
+for 10k pretraining steps and 3,040 H100-hours
+for 55k steps. Although it does not reduce the
+per-target adaptation budget, Stage 2 trains only
+the approximately 500M-parameter shallow model,
+requires no target-model forward passes, and pro-
+duces a backbone that can be reused across multi-
+ple target models (Table 10). On MiniMax-M2.5,
+Osprey achieves a throughput of 219.8 tokens/s,
+17.5% higher than EAGLE-3’s 187.1 tokens/s, sav-
+ing approximately 880 H100 GPU-hours per bil-
+lion generated tokens. At this rate, the 55k-step
+Table 6: Parameter-matched comparison on Qwen3-8B.
+Each cell reports AL/TPS.
+Train
+Eval
+Eagle-3
+Eagle-3
+Ours
+1-layer
+2-layer
+2-layer
+chat
+chat
+3.755/380
+3.661/328
+4.335/394
+code
+2.407/244
+2.486/223
+2.867/260
+fin
+3.558/365
+3.542/332
+4.124/380
+math
+3.581/362
+3.553/326
+4.057/367
+code
+chat
+3.399/345
+3.541/331
+3.844/349
+code
+3.780/370
+3.837/347
+4.145/374
+fin
+3.469/355
+3.558/333
+3.855/354
+math
+3.558/370
+3.633/345
+3.854/360
+finance
+chat
+3.454/344
+3.698/338
+4.235/383
+code
+2.516/253
+2.614/240
+3.096/277
+fin
+3.542/362
+3.839/358
+4.335/394
+math
+3.736/375
+3.825/354
+4.287/383
+math
+chat
+2.533/257
+2.634/241
+3.109/280
+code
+1.857/188
+2.014/180
+2.189/193
+fin
+2.453/252
+2.565/238
+3.048/277
+math
+5.058/496
+5.160/458
+5.253/463
+ID Mean
+4.034/402
+4.124/373
+4.517/406
+OOD Mean
+3.043/309
+3.139/290
+3.547/322
+Overall
+3.291/332
+3.385/311
+3.790/343
+pretraining cost is recovered after approximately
+3.5 billion generated tokens, while the 10k-step
+checkpoint breaks even after approximately 0.65
+billion tokens. Reusing the backbone across mul-
+tiple targets can further reduce the effective break-
+even volume per target. However, the upfront cost
+may not be recovered in low-traffic or one-off de-
+ployments, as discussed in the Limitations.
+5
+Conclusion
+State-of-the-art speculative drafters are typically
+trained for a single target model on narrow data
+distributions, requiring repeated training and lim-
+iting acceptance under domain shifts. We intro-
+duced Osprey, which prunes a pretrained small
+language model into a shallow backbone, restores
+its language-modeling capability through reusable
+target-agnostic pretraining, and then applies vocab-
+ulary alignment, zero-initialized QKV expansion,
+and target distillation. Compared with EAGLE-3,
+Osprey achieves mean AL that is 16.1%, 21.2%,
+and 22.7% higher on Qwen3-8B, Llama-3.3-70B-
+Instruct, and MiniMax-M2.5, respectively, while
+delivering 17.5% higher throughput on MiniMax-
+M2.5. Its strongest advantages appear on OOD
+and multilingual workloads, demonstrating that
+a broadly pretrained language prior provides an
+effective and reusable foundation for speculative
+drafters.
+
+
+Limitations
+We
+evaluate
+three
+targets—Qwen3-8B,
+Llama-3.3-70B-Instruct, and MiniMax-M2.5—
+under a fixed SGLang configuration; results may
+vary with other targets, hardware, batch sizes,
+or workloads.
+Furthermore, the computational
+advantages of Osprey are conditional on inference
+workload: Stage 2 pretraining requires an upfront
+compute investment that is repaid only under
+continuous, high-volume serving or multi-target
+reuse.
+In low-traffic or one-off settings where
+total generated tokens are low, the upfront training
+compute is not amortized.
+The cross-domain
+study covers five domains and the MiniMax-M2.5
+adaptation uses code-only target-generated data,
+which does not exhaust all languages, tasks, or
+deployment distributions. Most results are reported
+from single runs rather than multiple random
+seeds, so small differences should be interpreted
+cautiously. Because Osprey improves inference
+efficiency for existing LLMs, it may lower the
+cost of both beneficial and harmful uses and does
+not itself mitigate model bias, factuality, or safety
+issues.
+References
+Rishabh Agarwal, Nino Vieillard, Piotr Stanczyk,
+Sabela Ramos, Matthieu Geist, and Olivier Bachem.
+2024.
+On-policy distillation of language models:
+Learning from self-generated mistakes. In Interna-
+tional Conference on Learning Representations.
+Loubna Ben Allal,
+Anton Lozhkov,
+Elie Bak-
+ouch, Gabriel Martín Blázquez, Guilherme Penedo,
+Lewis Tunstall, Andrés Marafioti, Hynek Kydlíˇcek,
+Agustín Piqueres Lajarín, Vaibhav Srivastav, Joshua
+Lochner, Caleb Fahlgren, Xuan-Son Nguyen, Clé-
+mentine Fourrier, Ben Burtenshaw, Hugo Larcher,
+Haojun Zhao, Cyril Zakka, Mathieu Morlon, and 3
+others. 2025. SmolLM2: When smol goes big – data-
+centric training of a small language model. arXiv
+preprint arXiv:2502.02737.
+Zachary Ankner, Rishab Parthasarathy, Aniruddha
+Nrusimha, Christopher Rinard, Jonathan Ragan-
+Kelley,
+and William Brooks. 2024.
+Hydra:
+Sequentially-dependent draft heads for medusa de-
+coding. arXiv preprint arXiv:2402.05109.
+Peter Belcak, Greg Heinrich, Shizhe Diao, Yonggan
+Fu, Xin Dong, Saurav Muralidharan, Yingyan Celine
+Lin, and Pavlo Molchanov. 2025. Small language
+models are the future of agentic ai. arXiv preprint
+arXiv:2506.02153.
+Felix Berdoz, Lennart Rheinboldt, and Roger Watten-
+hofer. 2025. Steering pretrained drafters during spec-
+ulative decoding. arXiv preprint arXiv:2511.09844.
+Nikhil Bhendawade, Irina Belousova, Qichen Fu, Henry
+Mason, Mohammad Rastegari, and Mahyar Najibi.
+2024a.
+Recurrent drafter for fast speculative de-
+coding in large language models.
+arXiv preprint
+arXiv:2403.09919.
+Nikhil Bhendawade, Irina Belousova, Qichen Fu, Henry
+Mason, Mohammad Rastegari, and Mahyar Na-
+jibi. 2024b. Speculative streaming: Fast LLM in-
+ference without auxiliary models. arXiv preprint
+arXiv:2402.11131.
+Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng,
+Jason D. Lee, Deming Chen, and Tri Dao. 2024.
+Medusa: Simple LLM inference acceleration frame-
+work with multiple decoding heads. In Conference
+on Language Modeling.
+Charlie Chen, Sebastian Borgeaud, Geoffrey Irving,
+Jean-Baptiste Lespiau, Laurent Sifre, and John
+Jumper. 2023. Accelerating large language model
+decoding with speculative sampling. arXiv preprint
+arXiv:2302.01318.
+Jian Chen, Yesheng Liang, and Zhijian Liu. 2026.
+Dflash: Block diffusion for flash speculative decod-
+ing. arXiv preprint arXiv:2602.06036.
+Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan,
+Henrique Ponde de Oliveira Pinto, Jared Kaplan,
+Harri Edwards, Yuri Burda, Nicholas Joseph, Greg
+Brockman, Alex Ray, Raul Puri, Gretchen Krueger,
+Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela
+Mishkin, Brooke Chan, Scott Gray, and 39 others.
+2021. Evaluating large language models trained on
+code. arXiv preprint arXiv:2107.03374.
+Daewon Choi, Seunghyuk Oh, Saket Dingliwal, Jihoon
+Tack, Kyuyoung Kim, Woomin Song, Seojin Kim,
+Insu Han, Jinwoo Shin, Aram Galstyan, Shubham
+Katiyar, and Sravan Babu Bodapati. 2025. Mamba
+drafters for speculative decoding.
+arXiv preprint
+arXiv:2506.01206.
+Tri Dao. 2024. FlashAttention-2: Faster attention with
+better parallelism and work partitioning. In Inter-
+national Conference on Learning Representations
+(ICLR).
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Kristina Toutanova. 2019. Bert: Pre-training of deep
+bidirectional transformers for language understand-
+ing. In Proceedings of the 2019 conference of the
+North American chapter of the association for com-
+putational linguistics: human language technologies,
+volume 1 (long and short papers), pages 4171–4186.
+Konstantin Dobler and Gerard de Melo. 2023. FOCUS:
+Effective embedding initialization for monolingual
+specialization of multilingual models. In Proceed-
+ings of the 2023 Conference on Empirical Methods
+in Natural Language Processing.
+
+
+Mostafa Elhoushi, Akshat Shrivastava, Diana Liskovich,
+Basil Hosmer, Bram Wasti, Liangzhen Lai, Anas
+Mahmoud, Bilge Acun, Saurabh Agarwal, Ahmed
+Roman, Ahmed A. Aly, Beidi Chen, and Carole-Jean
+Wu. 2024. LayerSkip: Enabling early exit inference
+and self-speculative decoding. In Proceedings of the
+62nd Annual Meeting of the Association for Compu-
+tational Linguistics.
+Dumitru Erhan, Aaron Courville, Yoshua Bengio, and
+Pascal Vincent. 2010. Why does unsupervised pre-
+training help deep learning? In Proceedings of the
+thirteenth international conference on artificial intel-
+ligence and statistics, pages 201–208. JMLR Work-
+shop and Conference Proceedings.
+Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang.
+2024. Break the sequential dependency of LLM in-
+ference using lookahead decoding. In Proceedings of
+the 41st International Conference on Machine Learn-
+ing.
+Xiangxiang Gao, Weisheng Xie, Yiwei Xiang, Hao Yu,
+He Tang, Pengcheng Pan, Mingyao Wen, and Bin
+Shi. 2024.
+Falcon: Faster and parallel inference
+of large language models through enhanced semi-
+autoregressive drafting and custom-designed decod-
+ing tree. arXiv preprint arXiv:2412.12639.
+Leonidas Gee, Andrea Zugarini, Leonardo Rigutini, and
+Paolo Torroni. 2022. Fast vocabulary transfer for
+language model compression. In Proceedings of the
+2022 Conference on Empirical Methods in Natural
+Language Processing: Industry Track, pages 409–
+416.
+Fabian Gloeckle, Badr Youbi Idrissi, Baptiste Rozière,
+David Lopez-Paz, and Gabriel Synnaeve. 2024. Bet-
+ter & faster large language models via multi-token
+prediction. In Proceedings of the 41st International
+Conference on Machine Learning.
+Andrey Gromov, Kushal Tirumala, Hassan Shapourian,
+Paolo Glorioso, and Daniel A. Roberts. 2024. The
+unreasonable ineffectiveness of the deeper layers. In
+Advances in Neural Information Processing Systems.
+Yuxian Gu, Li Dong, Furu Wei, and Minlie Huang. 2024.
+MiniLLM: Knowledge distillation of large language
+models. In International Conference on Learning
+Representations.
+Suchin
+Gururangan,
+Ana
+Marasovi´c,
+Swabha
+Swayamdipta, Kyle Lo, Iz Beltagy, Doug Downey,
+and Noah A. Smith. 2020. Don’t stop pretraining:
+Adapt language models to domains and tasks. In
+Proceedings of the 58th Annual Meeting of the
+Association for Computational Linguistics.
+Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul
+Arora, Steven Basart, Eric Tang, Dawn Song, and Ja-
+cob Steinhardt. 2021. Measuring mathematical prob-
+lem solving with the MATH dataset. In Advances in
+Neural Information Processing Systems.
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. 2015.
+Distilling the knowledge in a neural network. arXiv
+preprint arXiv:1503.02531.
+Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch,
+Elena Buchatskaya, Trevor Cai, Eliza Rutherford,
+Diego de Las Casas, Lisa Anne Hendricks, Johannes
+Welbl, Aidan Clark, Tom Hennigan, Eric Noland,
+Katie Millican, George van den Driessche, Bogdan
+Damoc, Aurelia Guy, Simon Osindero, Karen Si-
+monyan, Erich Elsen, and 3 others. 2022. Train-
+ing compute-optimal large language models. In Ad-
+vances in Neural Information Processing Systems.
+Fenglu Hong, Ravi Shanker Raju, Jonathan Lingjie
+Li, Bo Li, Urmish Thakker, Avinash Ravichandran,
+Swayambhoo Jain, and Changran Hu. 2025. Training
+domain draft models for speculative decoding: Best
+practices and insights. In First Workshop on Scalable
+Optimization for Efficient and Adaptive Foundation
+Models.
+Shengding Hu, Yuge Tu, Xu Han, Chaoqun He, Ganqu
+Cui, Xiang Long, Zhi Zheng, Yewei Fang, Yuxiang
+Huang, Weilin Zhao, Xinrong Zhang, Zheng Leng
+Thai, Kaihuo Zhang, Chongyi Wang, Yuan Yao,
+Chenyang Zhao, Jie Zhou, Jie Cai, Zhongwu Zhai,
+and 6 others. 2024. MiniCPM: Unveiling the poten-
+tial of small language models with scalable training
+strategies. arXiv preprint arXiv:2404.06395.
+Mude Hui, Xin Huang, Jaime Campos Salas, Yue Sun,
+Nathan Pemberton, Xiang Song, Ashish Khetan, and
+George Karypis. 2026. P-EAGLE: Parallel-drafting
+EAGLE with scalable training.
+arXiv preprint
+arXiv:2602.01469.
+Adam Ibrahim, Benjamin Thérien, Kshitij Gupta,
+Mats L. Richter, Quentin Anthony, Timothée Lesort,
+Eugene Belilovsky, and Irina Rish. 2024. Simple
+and scalable strategies to continually pre-train large
+language models. arXiv preprint arXiv:2403.08763.
+Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia
+Yan, Tianjun Zhang, Sida Wang, Armando Solar-
+Lezama, Koushik Sen, and Ion Stoica. 2024. Live-
+CodeBench: Holistic and contamination free eval-
+uation of large language models for code. arXiv
+preprint arXiv:2403.07974.
+Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B
+Brown, Benjamin Chess, Rewon Child, Scott Gray,
+Alec Radford, Jeffrey Wu, and Dario Amodei. 2020.
+Scaling laws for neural language models.
+arXiv
+preprint arXiv:2001.08361.
+Yoon Kim and Alexander M. Rush. 2016. Sequence-
+level knowledge distillation. In Proceedings of the
+2016 Conference on Empirical Methods in Natural
+Language Processing.
+Siqi Kou, Lanxiang Hu, Zhezhi He, Zhijie Deng, and
+Hao Zhang. 2024. CLLMs: Consistency large lan-
+guage models. In Proceedings of the 41st Interna-
+tional Conference on Machine Learning.
+
+
+Yaniv Leviathan, Matan Kalman, and Yossi Matias.
+2023. Fast inference from transformers via spec-
+ulative decoding. In Proceedings of the 40th Interna-
+tional Conference on Machine Learning.
+Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang
+Zhang. 2024a. EAGLE-2: Faster inference of lan-
+guage models with dynamic draft trees. In Proceed-
+ings of the 2024 Conference on Empirical Methods
+in Natural Language Processing.
+Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang
+Zhang. 2024b. EAGLE: Speculative sampling re-
+quires rethinking feature uncertainty. arXiv preprint
+arXiv:2401.15077.
+Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang
+Zhang. 2025. EAGLE-3: Scaling up inference ac-
+celeration of large language models via training-time
+test. arXiv preprint arXiv:2503.01840.
+Fangcheng Liu, Yehui Tang, Zhenhua Wang, Kai Han,
+Yujie Tang, and Yunhe Wang. 2024a.
+Kangaroo:
+Lossless self-speculative decoding via double early
+exiting. In Advances in Neural Information Process-
+ing Systems.
+Xiaoxuan Liu, Lanxiang Hu, Peter Bailis, Alvin Che-
+ung, Zhijie Deng, Ion Stoica, and Hao Zhang. 2024b.
+Online speculative decoding. In Proceedings of the
+41st International Conference on Machine Learning.
+Ilya Loshchilov and Frank Hutter. 2019. Decoupled
+weight decay regularization. In International Confer-
+ence on Learning Representations (ICLR).
+Jiangang
+Lu,
+Mukherjee
+Anu,
+and
+Thought-
+works
+Lab.
+2025.
+EAGLE-3
+draft
+head
+for
+MiniMax-M2.5:
+Training
+recipe
+and
+benchmarks.
+https://huggingface.co/
+thoughtworks/MiniMax-M2.5-Eagle3
+and
+https://huggingface.co/blog/lujangusface/
+tw-eagle3-minimax. Open-source EAGLE-3 draft
+head release for MiniMax-M2.5.
+Xin Men, Mingyu Xu, Qingyu Zhang, Bingning Wang,
+Hongyu Lin, Yaojie Lu, Xianpei Han, and Weipeng
+Chen. 2024. ShortGPT: Layers in large language
+models are more redundant than you expect. arXiv
+preprint arXiv:2403.03853.
+Meta AI. 2024.
+Llama 3.3 70B Instruct.
+https:
+//github.com/meta-llama/llama-models/
+blob/main/models/llama3_3/MODEL_CARD.md.
+Official model card.
+Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao
+Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee
+Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, Chu-
+nan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna
+Abhyankar, and Zhihao Jia. 2024. SpecInfer: Ac-
+celerating generative large language model serving
+with tree-based speculative inference and verification.
+In Proceedings of the 29th ACM International Con-
+ference on Architectural Support for Programming
+Languages and Operating Systems.
+MiniMax AI. 2026. MiniMax M2.5: Built for real-
+world productivity.
+https://www.minimax.io/
+news/minimax-m25. Accessed: 2026-05-26.
+Benjamin Minixhofer, Fabian Paischer, and Navid Rek-
+absaz. 2022. WECHSEL: Effective initialization of
+subword embeddings for cross-lingual transfer of
+monolingual language models. In Proceedings of the
+2022 Conference of the North American Chapter of
+the Association for Computational Linguistics.
+Benjamin Minixhofer, Edoardo Maria Ponti, and Ivan
+Vuli´c. 2024. Zero-shot tokenizer transfer. In Ad-
+vances in Neural Information Processing Systems.
+Nandini Mundra, Aditya Khandavally, Raj Dabre,
+Anoop Vasudevan, Mitesh M. Khapra, and Sumanth
+Doddapaneni. 2024. An empirical comparison of vo-
+cabulary expansion and initialization approaches for
+language models. In Proceedings of the 28th Confer-
+ence on Computational Natural Language Learning.
+Dhruv Nathawani, Shuoyang Ding, Vitaly Lavrukhin,
+Igor Gitman, Somshubra Majumdar, Evelina Bakh-
+turina, Boris Ginsburg, and Jane Polak Scowcroft.
+2025. Nemotron-Post-Training-Dataset-v2.
+NVIDIA. 2025. Nvidia nemotron nano 2: An accurate
+and efficient hybrid mamba-transformer reasoning
+model. Preprint, arXiv:2508.14444.
+Guilherme Penedo, Hynek Kydlíˇcek, Loubna Ben Al-
+lal, Anton Lozhkov, Margaret Mitchell, Colin Raffel,
+Leandro Von Werra, and Thomas Wolf. 2024. The
+FineWeb datasets: Decanting the web for the finest
+text data at scale. In Advances in Neural Information
+Processing Systems Datasets and Benchmarks Track.
+Alec Radford, Karthik Narasimhan, Tim Salimans, and
+Ilya Sutskever. 2018. Improving language under-
+standing by generative pre-training.
+Ramchalam Kinattinkara Ramakrishnan, Zhaocong
+Yuan, Shaojie Zhuo, Chen Feng, Yicheng Lin,
+Chenzheng Su, and Xiaopeng Zhang. 2025. Om-
+niDraft: A cross-vocabulary, online adaptive drafter
+for on-device speculative decoding. arXiv preprint
+arXiv:2507.02659.
+Jameson Sandler, Ahmet Üstün, Marco Romanelli,
+Sara Hooker, and Ferdinando Fioretto. 2025. The
+disparate impacts of speculative decoding. arXiv
+preprint arXiv:2510.02128.
+Andrea Santilli, Silvio Severino, Emilian Postolache,
+Valentino Maiorca, Michele Mancusi, Riccardo
+Marin, and Emanuele Rodola. 2023. Accelerating
+transformer inference for translation via parallel de-
+coding. In Proceedings of the 61st Annual Meeting
+of the Association for Computational Linguistics.
+Freda Shi, Mirac Suzgun, Markus Freitag, Xuezhi Wang,
+Suraj Srivats, Soroush Vosoughi, Hyung Won Chung,
+Yi Tay, Sebastian Ruder, Denny Zhou, Dipanjan Das,
+and Jason Wei. 2023. Language models are multi-
+lingual chain-of-thought reasoners. In International
+Conference on Learning Representations.
+
+
+Shivalika Singh, Angelika Romanou, Clémentine Four-
+rier, David I. Adelani, Jian Gang Ngui, Daniel
+Vila-Suero, Peerat Limkonchotiwat, Kelly Marchi-
+sio, Wei Qi Leong, Yosephine Susanto, Raymond
+Ng, Shayne Longpre, Wei-Yin Ko, Sebastian Ruder,
+Madeline Smith, Antoine Bosselut, Alice Oh, Andre
+F. T. Martins, Leshem Choshen, and 5 others. 2025.
+Global MMLU: Understanding and addressing cul-
+tural and linguistic biases in multilingual evaluation.
+In Proceedings of the 63rd Annual Meeting of the
+Association for Computational Linguistics.
+Online SD Team. 2024. Online sd dataset: A multi-
+domain training collection.
+Qwen Team. 2025. Qwen3 technical report. Preprint,
+arXiv:2505.09388.
+Nadav Timor, Jonathan Mamou, Daniel Korat, Moshe
+Berchansky, Gaurav Jain, Oren Pereg, Moshe
+Wasserblat, and David Harel. 2025. Accelerating
+LLM inference with lossless speculative decoding
+algorithms for heterogeneous vocabularies. arXiv
+preprint arXiv:2502.05202.
+Jason Wei, Yi Tay, Rishi Bommasani, Colin Raf-
+fel, Barret Zoph, Sebastian Borgeaud, Dani Yo-
+gatama, Maarten Bosma, Denny Zhou, Donald Met-
+zler, Ed H. Chi, Tatsunori Hashimoto, Oriol Vinyals,
+Percy Liang, Jeff Dean, and William Fedus. 2022.
+Emergent abilities of large language models. arXiv
+preprint arXiv:2206.07682.
+Heming Xia, Tao Ge, Peiyi Wang, Si-Qing Chen, Furu
+Wei, and Zhifang Sui. 2023.
+Speculative decod-
+ing: Exploiting speculative execution for accelerating
+seq2seq generation. In Findings of the Association
+for Computational Linguistics: EMNLP 2023.
+Heming Xia, Yongqi Yang, Jun Wang, Sheng Liu, Xi-
+aomeng Chen, and Zhifang Sui. 2024a. SWIFT: On-
+the-fly self-speculative decoding for LLM inference
+acceleration. arXiv preprint arXiv:2410.06916.
+Heming Xia, Zhe Yang, Qingxiu Dong, Peiyi Wang,
+Yongqi Li, Tao Ge, Tianyu Liu, Wenjie Li, and Zhi-
+fang Sui. 2024b. Unlocking efficiency in large lan-
+guage model inference: A comprehensive survey of
+speculative decoding. Findings of the Association for
+Computational Linguistics: ACL 2024, pages 7655–
+7671.
+Mengzhou Xia, Tianyu Gao, Zhiyuan Zeng, and Danqi
+Chen. 2024c. Sheared LLaMA: Accelerating lan-
+guage model pre-training via structured pruning. In
+International Conference on Learning Representa-
+tions.
+Bin Xiao, Lujun Zhang, Hao Zhang, Penghui Li, and
+Yibo Pan. 2024a. Clover: Regressive lightweight
+speculative decoding with sequential knowledge.
+arXiv preprint arXiv:2405.00263.
+Bin Xiao, Lujun Zhang, Hao Zhang, Yibo Pan, Yang
+Yang, and Penghui Li. 2024b. Clover-2: Accurate
+inference for regressive lightweight speculative de-
+coding. arXiv preprint arXiv:2408.00264.
+Tengyu Xu,
+Eryk Helenowski,
+Karthik Abinav
+Sankararaman, Di Jin, Kaiyan Peng, Eric Han, Shao-
+liang Nie, Chen Zhu, Hejia Zhang, Wenxuan Zhou,
+and 1 others. 2024.
+The perfect blend: Redefin-
+ing rlhf with mixture of judges.
+arXiv preprint
+arXiv:2409.20370.
+Yifan Yu, Yuqing Jian, Junxiong Wang, Zhongzhu Zhou,
+Donglin Zhuang, Xinyu Fang, Sri Yanamandra, Xi-
+aoxia Wu, Qingyang Wu, Shuaiwen Leon Song, Tri
+Dao, Ben Athiwaratkun, James Zou, Fan Lai, and
+Chenfeng Xu. 2026. Introspective diffusion language
+models. arXiv preprint arXiv:2604.11035.
+Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen,
+Gang Chen, and Sharad Mehrotra. 2024a. Draft &
+verify: Lossless large language model acceleration
+via self-speculative decoding. In Proceedings of the
+62nd Annual Meeting of the Association for Compu-
+tational Linguistics.
+Lefan Zhang, Xiaodan Wang, Yanhua Huang, and Rui-
+wen Xu. 2024b.
+Learning harmonized represen-
+tations for speculative sampling.
+arXiv preprint
+arXiv:2408.15766.
+Peiyuan Zhang, Guangtao Zeng, Tianduo Wang, and
+Wei Lu. 2024c. Tinyllama: An open-source small
+language model. arXiv preprint arXiv:2401.02385.
+Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan
+Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin,
+Zhuohan Li, Dacheng Li, Eric P. Xing, Hao Zhang,
+Joseph E. Gonzalez, and Ion Stoica. 2023. Judging
+LLM-as-a-judge with MT-Bench and chatbot arena.
+arXiv preprint arXiv:2306.05685.
+Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue
+Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos
+Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark
+Barrett, and Ying Sheng. 2024. SGLang: Efficient
+execution of structured language model programs.
+Advances in Neural Information Processing Systems,
+37:62557–62583.
+Yongchao Zhou, Kaifeng Lyu, Akash Kumar Rashidi,
+Tomas Pfister, Manzil Zaheer, Ananda Theertha
+Suresh, Felix Roumeliotis, Emma Brunskill, and Yi-
+ran Cui. 2024. DistillSpec: Improving speculative
+decoding via knowledge distillation. In International
+Conference on Learning Representations.
+
+
+Appendix
+A
+Detailed Related Work
+Overview.
+This appendix expands the related-
+work paragraphs in Section 2. Briefly, Osprey’s
+training recipe combines several established tech-
+niques: depth pruning and healing (Gromov et al.,
+2024; Men et al., 2024; Xia et al., 2024c), vo-
+cabulary transfer across tokenizers (Minixhofer
+et al., 2022; Dobler and de Melo, 2023; Gee
+et al., 2022; Minixhofer et al., 2024; Mundra et al.,
+2024), continued/over-budget pre-training (Hoff-
+mann et al., 2022; Hu et al., 2024; Allal et al.,
+2025; Ibrahim et al., 2024; Gururangan et al., 2020),
+and white-box/on-policy distillation (Hinton et al.,
+2015; Kim and Rush, 2016; Gu et al., 2024; Agar-
+wal et al., 2024; Zhou et al., 2024). Drafter-free
+parallel decoding and multi-token prediction meth-
+ods (Santilli et al., 2023; Fu et al., 2024; Kou
+et al., 2024; Gloeckle et al., 2024) are comple-
+mentary since they modify the target or decod-
+ing loop, whereas Osprey improves the auxiliary
+drafter while leaving the target unchanged. The
+remainder of this appendix discusses each of these
+threads in detail.
+Speculative decoding and target-conditioned
+drafters.
+Speculative decoding accelerates au-
+toregressive inference by letting a cheaper draft
+model propose multiple future tokens that the target
+model verifies in parallel (Leviathan et al., 2023;
+Chen et al., 2023). Early approaches used special-
+ized external draft models to propose candidate to-
+kens for target-model verification (Xia et al., 2023;
+Miao et al., 2024). A second line of work condi-
+tions the drafter on the target’s own hidden states:
+EAGLE (Li et al., 2024b) drafts at the penultimate-
+layer feature level, EAGLE-2 (Li et al., 2024a) adds
+context-aware dynamic draft trees, and EAGLE-
+3 (Li et al., 2025) introduces multi-step training-
+time tests (TTT) together with a fusion of features
+tapped from three target layers. Related architec-
+tures include the head-attached Medusa (Cai et al.,
+2024) and its sequentially-dependent variant Hydra
+(Ankner et al., 2024), the RNN-based ReDrafter
+(Bhendawade et al., 2024a) and Clover (Xiao
+et al., 2024a,b), the parallel-drafting P-EAGLE
+(Hui et al., 2026), the semi-autoregressive Falcon
+(Gao et al., 2024), and feature-consistency HASS
+(Zhang et al., 2024b). Osprey adopts EAGLE-3’s
+TTT loss and three-layer hidden-state tap, but un-
+like all of the above we do not train the drafter
+body from scratch: the body inherits its parameters
+from a target-agnostic pre-trained next-token pre-
+dictor, and target features are folded in via a zero-
+initialized expansion of the attention projections so
+that the pre-trained computation is preserved at the
+start of adaptation.
+Self-speculative and target-internal drafters.
+A parallel line of work avoids an auxiliary drafter
+and draws proposals from the target itself. Lay-
+erSkip (Elhoushi et al., 2024) trains the target so
+that its shallow layers form an accurate early exit,
+which then serves as the self-speculative drafter.
+Draft & Verify (Zhang et al., 2024a) adaptively
+skips intermediate layers at inference time; SWIFT
+(Xia et al., 2024a) chooses which layers to skip
+on-the-fly without any auxiliary training; and Kan-
+garoo (Liu et al., 2024a) adds a small adapter on top
+of the target’s shallow layers. Speculative Stream-
+ing (Bhendawade et al., 2024b) fuses drafting into
+the target via multi-stream attention. These de-
+signs eliminate the cost of training and serving a
+separate drafter, but they tightly couple drafter be-
+havior to the target’s parameters and tokenizer, so
+the same drafter cannot be reused across heteroge-
+neous targets without retraining the target as well.
+Osprey takes the opposite design choice—a stan-
+dalone shallow drafter that is pre-trained once and
+lightly adapted per target. We do borrow Layer-
+Skip’s observation that the first few transformer
+layers can be trained into competent next-token
+predictors; indeed, our Llama-based variant is built
+by depth-pruning a LayerSkip checkpoint and then
+pre-training it as an independent shallow LM.
+Domain generalization and cross-target drafter
+reuse.
+A small but growing literature documents
+the failure mode our paper targets. Spec-Bench
+(Xia et al., 2024b) reports large variance in ac-
+cepted length across domains. Sandler et al. (2025)
+formalize the resulting “disparate impacts” across
+user populations and propose a stochastic correc-
+tive fine-tuning fix. Hong et al. (2025) explicitly
+measure how single-domain draft fine-tuning de-
+grades acceptance under domain shift. Closest to
+our thesis, Berdoz et al. (2025) argue that drafters
+initialized from a pre-trained small LM outper-
+form from-scratch drafters under OOD inputs, and
+Mamba Drafters (Choi et al., 2025) report similar
+gains for state-space drafters. Two recent efforts
+target cross-target reuse from a different angle: Om-
+niDraft (Ramakrishnan et al., 2025) maintains a
+single Llama-68M drafter across targets via on-
+
+
+line n-gram caching and cross-vocabulary verifi-
+cation, and Timor et al. (2025) relax the shared-
+vocabulary assumption inside the verification step.
+Online Speculative Decoding (Liu et al., 2024b)
+continuously fine-tunes the drafter from observed
+traffic. Osprey differs from this body of work along
+two axes. First, the broad prior is acquired by an
+explicit large-scale pre-training stage on generic
+web text (Penedo et al., 2024), rather than by on-
+line updates, off-the-shelf SLM borrowing, or se-
+lection among multiple pre-trained drafters. Sec-
+ond, target-feature ingestion is added via a zero-
+initialized QKV expansion that keeps the drafter
+functionally identical to its pre-trained checkpoint
+at the start of adaptation, which lets us isolate
+the contribution of pre-training from the contri-
+bution of target conditioning and reuse the same
+pre-trained checkpoint across an arbitrary number
+of targets.
+Knowledge
+distillation
+for
+autoregressive
+drafters.
+Our adaptation stage is structurally
+a knowledge-distillation problem: aligning the
+drafter’s output distribution to the frozen target’s at
+each predicted position. The general framework
+is white-box distillation (Hinton et al., 2015; Kim
+and Rush, 2016), and modern autoregressive
+variants close the train/inference distribution gap
+with on-policy data and reverse KL (Gu et al.,
+2024; Agarwal et al., 2024).
+The most direct
+precedent for drafter training is DistillSpec (Zhou
+et al., 2024), which uses on-policy white-box
+distillation to improve speculative acceptance and
+reports favorable generalization to unseen tasks.
+Osprey’s Stage 4 inherits the EAGLE-3 TTT loss,
+which can be viewed as an on-policy multi-step
+distillation against the target. Our contribution is
+therefore not a new distillation objective; it is a
+stronger initialization for the student. By starting
+from a pre-trained shallow LM rather than from
+random weights, the same distillation budget yields
+drafters that preserve substantially more linguistic
+behaviour outside the distillation distribution.
+Compact pre-training: depth pruning, vocabu-
+lary transfer, and over-budget training.
+Stages
+1–3 of Osprey assemble three established sub-fields
+into one pipeline. Depth pruning. Gromov et al.
+(2024) and Men et al. (2024) show that a large
+fraction of an LLM’s layers can be removed with
+only modest degradation after light healing, and
+Xia et al. (2024c) extend this to a prune-then-
+continued-pretrain pipeline for sub-billion Llamas.
+Our Stage 1 keeps only the first N ∈{2, 4} trans-
+former blocks, in line with this evidence and with
+LayerSkip’s early-exit-friendly initialization. Vo-
+cabulary transfer. When the source draft’s tok-
+enizer differs from the target’s, we initialize new
+embedding rows from existing draft rows, in the
+lineage of WECHSEL (Minixhofer et al., 2022),
+FOCUS (Dobler and de Melo, 2023), FVT (Gee
+et al., 2022), and the zero-shot tokenizer transfer of
+Minixhofer et al. (2024). Our average-of-subtokens
+initialization is in the spirit of FVT and is com-
+petitive with more elaborate alternatives (Mundra
+et al., 2024) while requiring no auxiliary corpus.
+Continued and over-budget pre-training. Stage 2
+is large-scale continued pre-training on FineWeb
+(Penedo et al., 2024), deliberately trained past
+the compute-optimal regime of Hoffmann et al.
+(2022)—a regime that other recent sub-2B models
+have also found beneficial (Hu et al., 2024; Allal
+et al., 2025). Practical recipes for continued pre-
+training (Ibrahim et al., 2024; Gururangan et al.,
+2020) inform our learning-rate and replay choices.
+We are not aware of prior work that combines these
+three steps into a draft-model recipe for speculative
+decoding.
+Drafter-free parallel decoding.
+A complemen-
+tary class of methods accelerates inference with-
+out an auxiliary drafter at all. Jacobi-style paral-
+lel decoding (Santilli et al., 2023; Fu et al., 2024)
+and its distilled fixed-point variants (Kou et al.,
+2024) replace token-by-token decoding with paral-
+lel updates, and multi-token-prediction approaches
+(Gloeckle et al., 2024) train the target itself with
+auxiliary heads that emit several future tokens
+at once.
+These methods are orthogonal to Os-
+prey: they modify the target or the decoding loop,
+whereas Osprey leaves the target untouched and
+improves the drafter.
+B
+Implementation Notes
+Our codebase implements the method in SpecForge
+on top of SGLang. The EAGLE-3 training path
+uses online target hidden-state generation, FSDP
+draft training, and optional tensor parallelism for
+the target model. The conversion scripts preserve
+pretrained layers, expand Q/K/V projections for
+the EAGLE-3 dual-stream interface, and optionally
+swap tokenizer rows into the target vocabulary. The
+SGLang evaluation path launches the target model
+with EAGLE-3 speculative decoding and records
+live accepted length plus throughput. For the abla-
+
+
+tion matrix, all architectures share the same target,
+training budget, training domains, evaluation do-
+mains, and speculative serving configuration.
+C
+Pretraining Implementation Details
+This appendix documents the hardware, optimiza-
+tion, data pipeline, and compute budget for the
+draft-pretraining stage. All configuration values
+are taken verbatim from the released training con-
+figs and slurm/train.slurm.sh.
+Hardware and precision.
+Each pretraining run
+uses 4 nodes × 8 NVIDIA H100 GPUs = 32 GPUs
+(world size 32), launched through Slurm with one
+task per node and torchrun controlling intra-node
+ranks. We train data-parallel under PyTorch FSDP
+with sharded optimizer states and gradients to fit the
+optimizer footprint on H100 80GB. All compute
+runs in bfloat16 with TensorFloat-32 matmuls en-
+abled. Attention is computed by FlashAttention-2
+(Dao, 2024), which transparently dispatches to the
+Hopper-specific FlashAttention-3 kernel on H100.
+Optimizer and schedule.
+We optimize with
+AdamW (Loshchilov and Hutter, 2019) using
+(β1, β2, ϵ) = (0.9, 0.95, 10−8), weight decay 0.1,
+and gradient-norm clipping at 1.0.
+The learn-
+ing rate follows a cosine schedule with a 1%
+linear warmup (600 of 60,000 steps) and peak
+rate 1×10−4. After exploratory experiments with
+constant-then-decay schedules, we converged on
+plain cosine for stability across both the LayerSkip-
+Llama and Qwen3 drafts.
+Batching and token budget.
+Sequence length
+is fixed at 4096 tokens, which covers the domi-
+nant document length in FineWeb while keeping
+attention cost manageable at 32-GPU scale. The
+per-device micro-batch is 4, with gradient accumu-
+lation 16, giving an effective global batch of
+32 × 4 × 16 × 4096
+≈
+8.39 M tokens
+for every optimizer step. Training runs for 60,000
+optimizer steps, corresponding to ≈503B tokens
+(about five passes over FineWeb sample-100BT).
+Each pretraining run takes approximately 80–110
+wall-clock hours on the 32-GPU configuration.
+Data pipeline.
+The FineWeb sample-100BT
+(Penedo et al., 2024) corpus is tokenized once
+with the draft’s own tokenizer (Llama-3.2 for
+the LayerSkip-Llama draft, Qwen3-4B for the
+Qwen draft) and serialized into per-shard uint32
+memory-mapped binaries with documents sepa-
+rated by a single EOS token.
+A multi-shard,
+infinite random-window sampler exposes fixed-
+length 4096-token training examples to the data
+loader, so different ranks see disjoint window off-
+sets within and across shards. This format avoids
+re-tokenization on the training path and lets us re-
+use the same on-disk corpus across both draft fami-
+lies.
+Layer-pruning
+configurations.
+We
+instantiate
+two
+pruned
+drafts.
+On
+facebook/layerskip-llama3.2-1B
+(Elhoushi
+et al., 2024) we keep N=4 of 16 blocks (≈506M
+parameters); on Qwen/Qwen3-4B (Team, 2025)
+we keep N=2 of 36 blocks (≈591M parameters).
+For both drafts we inherit embeddings, the
+final RMSNorm, and the LM head verbatim,
+patch num_hidden_layers to N, and truncate
+architecture-specific
+per-layer
+metadata
+(e.g.,
+Qwen3’s layer_types) accordingly.
+The Lay-
+erSkip variant is chosen deliberately: at step 0
+the four-layer pruned model has a substantially
+stronger local next-token prior than a standard
+Llama-3.2-1B truncation,
+which we observe
+directly in the initial training loss (∼4.5 vs. ∼13.5
+nats).
+C.1
+Pretraining-budget saturation
+Our full pretraining run uses 55k steps (≈462B
+tokens), but Table 7 shows that a 10k-step check-
+point already achieves nearly the same downstream
+performance as the 55k-step checkpoint. Extend-
+ing pretraining from 10k to 55k steps improves
+overall AL by only 0.026, while OOD/ID retention
+remains effectively unchanged at approximately
+0.80.
+The upstream pretraining curves provide further
+evidence of this saturation. Figure 3 shows that
+the cross-entropy loss drops sharply from approx-
+imately 19 to 5 nats during the first 1k steps and
+then decreases more gradually to approximately
+3.7 nats. Figure 4 shows that held-out perplexity
+plateaus near 37 after approximately 10,000 steps.
+Together with the downstream results, these curves
+indicate that a relatively short pretraining run cap-
+tures most of the benefit, making the cost of pro-
+ducing a reusable shallow NTP backbone modest
+relative to its downstream gains.
+
+
+0
+10000
+20000
+30000
+40000
+50000
+Training step
+4
+6
+8
+10
+Cross-entropy loss (nats)
+step 55,000
+loss = 3.66
+Figure 3: Pretraining cross-entropy loss on FineWeb.
+Red: Qwen3-4B 2L (55k steps).
+103
+104
+Training step (log scale)
+37
+50
+70
+100
+150
+200
+300
+500
+Perplexity
+step 55,000
+PPL = 37.5
+Figure 4: Held-out perplexity of the Qwen3-4B 2-layer
+drafter during pretraining (log-scale axes). PPL falls
+from ∼520 to a plateau near 37 past step 10,000.
+D
+Adaptation Implementation Details
+All experiments use bf16 mixed-precision training
+under PyTorch FSDP and SGLang serving with
+EAGLE-3 speculative decoding. Hardware differs
+by target model.
+Qwen3-8B
+target
+(train
+and
+inference).
+Stages
+3–4
+(per-target
+adaptation
+and
+on-
+policy
+distillation
+against
+Qwen3-8B)
+use
+2 NVIDIA H100 80 GB GPUs on a single node,
+with the target served in bf16 via SGLang to pro-
+duce on-policy hidden states and logits. Evaluation
+(acceptance length and decoding throughput in
+Sec. 4) is also run on a single H100 80 GB GPU
+(tp=1) under SGLang, matching the canonical
+EAGLE-3 serving configuration.
+MiniMax-M2.5 target (train and inference).
+For the 229B-parameter MoE target, both adap-
+tation/distillation and evaluation are performed
+on 4 NVIDIA B200 GPUs on a single node.
+The MiniMax-M2.5 target is served in FP8 un-
+der SGLang with tensor_parallel_size=4 and
+expert_parallel_size=4, fitting the model into
+the 4×192 GB HBM3e of the B200 node. The
+draft trains on the same 4 B200 GPUs against
+Table 7: Effect of the pretraining budget. The 10k-
+step and 55k-step checkpoints are adapted identically to
+Qwen3-8B using lr=10−5. The additional 45k pretrain-
+ing steps improve overall AL by only 0.026. Domain
+rows report AL for the corresponding adaptation split,
+averaged across evaluation domains.
+Adaptation split / metric
+10k ckpt
+55k ckpt
+∆
+chat
+3.619
+3.639
++0.020
+code
+3.684
+3.714
++0.030
+commonsense
+3.271
+3.316
++0.045
+finance
+3.760
+3.779
++0.019
+math
+3.424
+3.440
++0.016
+Overall AL
+3.552
+3.578
++0.026
+ID AL
+4.230
+4.260
++0.030
+OOD AL
+3.382
+3.407
++0.025
+OOD/ID ret.
+0.799
+0.800
++0.000
+MiniMax-generated code data for 35k steps. We
+use SGLang’s FP8 KV-cache path (sglang_fp4kv
+environment) to keep target memory headroom for
+on-policy rollouts during distillation.
+Per-target adaptation cost.
+For each Qwen3-8B
+domain, Osprey and the matched scratch EAGLE-
+3 baseline use identical data, steps, and hard-
+ware, with near-matched drafter bodies (265 M vs.
+269 M).
+Table 8: Per-domain Qwen3-8B adaptation workload.
+Quantity
+Value
+Unique prompts
+65k; responses regenerated by the target
+Sequence / TTT length
+4096 / 5
+Optimizer steps
+97.5k (3 epochs)
+Tokens processed
+≈0.8B
+Target forward passes
+≈195k; hidden states and logits computed on-
+line
+Hardware
+2×H100; target co-served in bf16
+For Llama-3.3-70B, Osprey and the scratch base-
+line likewise use the same target-regenerated
+data and 37.5k steps. MiniMax-M2.5 uses 70k
+target-regenerated code prompts and 35k steps on
+4×B200; because the public comparator’s training
+cost is not reported, we make no cost-parity claim
+for that comparison.
+Serving configuration.
+All reported accep-
+tance lengths and throughputs use batch_size=1,
+steps=5, topk=1, num_draft_tokens=6, and
+max_tokens=4096 in SGLang. The Qwen3-8B
+serving configuration is tp=1 on one H100; the
+MiniMax-M2.5 configuration is tp=4, ep=4 on
+4 B200. The same draft checkpoint is reused across
+the train and evaluation phases without further fine-
+
+
+tuning at inference time.
+D.1
+Serving-Configuration Sensitivity
+We vary one serving axis at a time on Qwen3-8B
+for Osprey and the EAGLE-3 baseline. Because
+SGLang couples chain steps and the number of
+draft tokens when topk=1, we sweep these two
+values together.
+Table 9: Serving sensitivity on one H100. Each cell
+reports accepted length (AL) / decoding throughput
+(tok/s). Unspecified settings use batch size 1, 5 steps, 6
+draft tokens, temperature 0, and top-k 1.
+Axis
+Setting
+EAGLE-3
+AL / tok/s
+Osprey
+AL / tok/s
+Batch size
+1
+2.34 / 217
+3.29 / 270
+4
+2.36 / 785
+3.32 / 970
+8
+2.35 / 1454
+3.34 / 1716
+16
+2.35 / 2534
+3.28 / 2855
+Steps,
+draft tokens
+(1, 2)
+1.67 / 182
+1.79 / 187
+(3, 4)
+2.22 / 227
+2.76 / 262
+(5, 6)
+2.34 / 217
+3.29 / 270
+(7, 8)
+2.36 / 202
+3.61 / 258
+Temperature
+0
+2.34 / 217
+3.29 / 270
+0.7
+2.29 / 207
+3.21 / 258
+1.0
+2.17 / 195
+2.92 / 231
+Accepted length is stable across batch sizes,
+while Osprey’s throughput gain remains positive
+(24% at batch size 1 and 13% at batch size 16). In-
+creasing the chain from 2 to 8 draft tokens widens
+Osprey’s accepted- length gain from 7% to 53%,
+as EAGLE-3 saturates near 6 tokens. The gain also
+persists under sampling (41% at temperature 0 and
+35% at temperature 1.0).
+Compute and Resource Accounting.
+Table 10
+provides the complete accounting of accelerator-
+hours, wall-clock time, tokens/steps, and target for-
+ward passes across pretraining and per-target adap-
+tation stages. While Stage 2 pretraining requires an
+upfront investment, per-target distillation incurs the
+same training cost as standard EAGLE-3 training.
+Why Not Scale From-Scratch Distillation? Ex-
+panding the training budget of a target-conditioned
+drafter to hundreds of billions of tokens is compute-
+prohibitive due to target forward pass overhead.
+Specifically, per-token FLOPs during target distil-
+lation are dominated by running the target model:
+FLOPs/token ≈2(Npθ + Nqϕ). For large targets
+(e.g., hundreds of billions of parameters such as
+MiniMax-M2.5 at 229B), distilling over hundreds
+of billions of tokens would require hundreds of
+thousands of GPU-hours. In contrast, Osprey’s
+Stage 2 pretraining operates solely on the shal-
+low drafter (FLOPs/token ≈6Nqϕ), requiring only
+≈3,040 H100-hours for 462B tokens with zero
+target forward passes. Target-agnostic pretraining
+is therefore orders of magnitude more compute-
+efficient for instilling general language priors than
+on-target distillation, and this learned prior is subse-
+quently shared across multiple target architectures.
+E
+Draft Model Sizes
+We report body parameters (transformer layers + 3-
+layer hidden combiner fc), excluding the input em-
+bedding and LM head. Under this matched count,
+Osprey 2L (265 M) is essentially the same size as
+the 1-layer EAGLE-3 scratch baseline (269 M) and
+smaller than the 2-layer parameter-matched scratch
+baseline (487 M).
+F
+Learning-Rate Comparison Matrices
+For comparison with Table 4, we report the full
+per-domain acceptance-length matrices in Table 12
+for the two drafts used in the learning-rate sensitiv-
+ity study. Each row is one single-domain adapted
+drafter evaluated on all five domains. Cells report
+acceptance length only; throughput is omitted for
+compactness.
+G
+Cross-Domain Warm-Start Ablation
+under DFlash
+Diffusion draft models have recently emerged as
+a promising alternative to autoregressive drafters
+in speculative decoding, motivated by the strong
+parallel-generation behaviour of diffusion language
+models (Chen et al., 2026). The question of specu-
+lative generalisation is therefore not specific to au-
+toregressive drafters. This appendix asks whether
+a target-agnostic warm start also helps under a
+diffusion-style drafting interface.
+The ablation first contrasts two initialisations of
+the same drafter under the original DFlash-style
+interface: a random-body baseline and a warm start
+from a diffusion language model. We then intro-
+duce an EAGLE-style DFlash variant that preserves
+the pretrained drafter attention pathway at initial-
+ization, in order to test whether reducing the target-
+feature interface mismatch improves cross-domain
+transfer.
+G.1
+Background on DFlash
+DFlash trains a block-parallel drafter whose self-
+attention ingests target hidden states through a
+key/value injection path rather than EAGLE-3’s
+stream-swap channel (Chen et al., 2026). At each
+
+
+Stage / Target
+Hardware
+Wall-clock
+GPU-Hours
+Tokens / Steps
+Target Fwd Passes
+Stage 2 Pretraining (55k)
+32× H100
+≈95 h
+3,040 h
+462B tokens
+0
+Stage 2 Pretraining (10k)
+32× H100
+≈18 h
+576 h
+84B tokens
+0
+Qwen3-8B Adaptation (Osprey)
+2× H100
+≈24 h
+48 h
+97.5k steps
+97.5k rollouts
+Qwen3-8B Scratch (EAGLE-3)
+2× H100
+≈24 h
+48 h
+97.5k steps
+97.5k rollouts
+MiniMax-M2.5 Adaptation (Osprey)
+4× B200
+≈36 h
+144 h
+35k steps
+35k rollouts
+MiniMax-M2.5 Scratch (EAGLE-3)
+4× B200
+≈36 h
+144 h
+35k steps
+35k rollouts
+Table 10: End-to-end compute and resource accounting for Osprey pretraining and target adaptation compared with
+from-scratch EAGLE-3 baselines.
+Draft
+L
+dh
+Body
+EAGLE-3 1L
+1
+4096
+269 M
+EAGLE-3 2L
+2
+4096
+487 M
+Osprey
+2
+2560
+265 M
+LayerSkip
+4
+2048
+294 M
+Table 11: Draft sizes on Qwen3-8B (body+fc only;
+embedding and LM head excluded for fair comparison).
+L = layers, dh = hidden.
+block of size B, the drafter consumes one veri-
+fied anchor token concatenated with B−1 [MASK]
+placeholders and emits B−1 proposal tokens per
+forward pass, with target features broadcast into ev-
+ery block. The proposal distribution at each masked
+position is therefore conditioned on the verified
+anchor, the local target features and, through the
+intra-block self-attention, the surrounding masked
+positions.
+G.2
+IDLM as a Diffusion Warm-Start Source
+A warm-start source for DFlash must itself be a
+diffusion language model, since DFlash drafts a
+block of tokens in parallel rather than autoregres-
+sively. We adopt the Introspective Diffusion Lan-
+guage Model (IDLM) of Yu et al. (2026), a recent
+diffusion language model with strong small-model
+performance.
+This diffusion warm-start source is analogous
+to the Shallow NTP used by Osprey in that it is
+target-agnostic, but it is not an NTP checkpoint:
+it is trained with a diffusion language-modeling
+objective and is used only for the DFlash ablation.
+IDLM is decoded via introspective strided de-
+coding (ISD), in which the model unifies decoding
+and verification of mask tokens in the same forward
+step. This decoding pattern is structurally similar
+to speculative decoding, making IDLM a natural
+warm-start source for a block-parallel drafter.
+The publicly released IDLM checkpoints are too
+large to use directly as draft models for speculative
+decoding. We instead train a compact diffusion lan-
+guage model by applying the IDLM training recipe
+to a four-layer LayerSkip-Llama backbone (El-
+houshi et al., 2024).
+Training uses NVIDIA’s
+Nemotron-Post-Training-Dataset-v2 (Nathawani
+et al., 2025; NVIDIA, 2025).
+This checkpoint
+is used as the warm-start source from which
+the DFlash drafter body weights are loaded; the
+random-body baseline shares everything except this
+body initialization.
+G.3
+Setup
+In this ablation, “body” refers only to the trans-
+former blocks, excluding the input embedding and
+LM head.
+Original DFlash-style configurations.
+• Baseline (random body). Four-layer Llama-
+shape drafter with a randomly initialized
+transformer-block body. The embedding and
+LM head are initialized from the same IDLM
+source as in the warm-start configuration and
+row-mapped to the Qwen3 vocabulary, so the
+ablation isolates the effect of body initializa-
+tion.
+• Warm start (IDLM). Identical to the base-
+line except that the transformer-block body
+is initialized from the compact IDLM-style
+diffusion checkpoint.
+The two configurations share architecture, em-
+bedding initialization, LM-head initialization, train-
+ing data and optimizer; the only variable is whether
+the transformer-block body starts from IDLM-style
+diffusion weights or from random weights.
+Target, training and evaluation.
+The target is
+Qwen/Qwen3-8B. Each configuration is fine-tuned
+for six epochs on the same 65k single-domain math
+split used in Section 3 (Qwen3 thinking chat tem-
+plate, sequence length 4096, effective batch 32,
+
+
+Table 12: Full acceptance-length matrices on Qwen3-8B for lr = 10−5 and lr = 10−4. Warm-start denotes
+qwen3_2layer; Scratch denotes vanilla_1layer. Bold marks the in-domain train=eval cell.
+LR
+Draft
+Train
+Chat
+Code
+Comm.
+Finance
+Math
+Mean
+OOD
+10−5
+Warm-start
+chat
+4.171
+2.688
+3.729
+3.876
+3.731
+3.639
+3.506
+code
+3.840
+3.822
+3.571
+3.717
+3.621
+3.714
+3.687
+commonsense
+3.795
+2.222
+4.116
+3.420
+3.029
+3.316
+3.116
+finance
+4.141
+2.911
+3.756
+4.119
+3.965
+3.779
+3.693
+math
+3.376
+2.170
+3.415
+3.166
+5.073
+3.440
+3.032
+Scratch
+chat
+1.621
+1.446
+1.602
+1.604
+1.734
+1.601
+1.597
+code
+2.245
+3.097
+2.278
+2.411
+2.638
+2.534
+2.393
+commonsense
+2.137
+1.441
+2.625
+1.960
+1.525
+1.938
+1.766
+finance
+1.939
+1.814
+1.976
+2.136
+2.393
+2.052
+2.031
+math
+1.733
+1.631
+2.103
+1.809
+4.864
+2.428
+1.819
+10−4
+Warm-start
+chat
+4.335
+2.867
+3.867
+4.124
+4.057
+3.850
+3.729
+code
+3.844
+4.145
+3.538
+3.855
+3.854
+3.847
+3.773
+commonsense
+3.793
+2.246
+4.259
+3.477
+3.228
+3.401
+3.186
+finance
+4.235
+3.096
+3.876
+4.335
+4.287
+3.966
+3.874
+math
+3.109
+2.189
+3.266
+3.048
+5.253
+3.373
+2.903
+Scratch
+chat
+3.755
+2.407
+3.245
+3.558
+3.581
+3.309
+3.198
+code
+3.399
+3.780
+3.182
+3.469
+3.558
+3.478
+3.402
+commonsense
+3.268
+1.951
+3.722
+2.997
+2.543
+2.896
+2.690
+finance
+3.454
+2.516
+3.113
+3.542
+3.736
+3.272
+3.205
+math
+2.533
+1.857
+2.721
+2.453
+5.058
+2.924
+2.391
+peak learning rate 6×10−4 with cosine decay to
+6×10−5 and warmup ratio 0.04, block size B=16).
+Cross-domain accepted length is reported on the
+five-domain evaluation protocol of the main paper
+(math, chat, code, commonsense, finance), with
+512 prompts per domain through live SGLang.
+G.4
+EAGLE-Style Target Interface for DFlash
+The original DFlash-style interface feeds target-
+model features into the drafter through target-
+derived key/value streams. This creates a mismatch
+for a pretrained IDLM body: during diffusion pre-
+training, its attention layers see key/value repre-
+sentations produced by the drafter itself, whereas
+during DFlash fine-tuning they receive key/value in-
+puts derived from the target model. This key/value
+distribution drift can reduce the effective reuse of
+pretrained attention computation, limiting the gain
+from body warm-starting.
+To test this hypothesis, we add an EAGLE-style
+DFlash variant that keeps the baseline DFlash path
+untouched but changes how target features enter
+each attention layer. Each attention layer keeps
+the pretrained drafter projections and adds zero-
+initialized target-side projections:
+Q = WQh + W tgt
+Q ct,
+K = WKh + W tgt
+K ct,
+V = WV h + W tgt
+V ct.
+where h is the drafter hidden state and ct is the
+projected target feature. At initialization, the target-
+side projections contribute nothing, so the attention
+computation is identical to a pretrained-only for-
+ward. During fine-tuning, the zero channel gradu-
+ally learns to incorporate target features.
+The target feature ct is gathered once at the
+block’s verified anchor position and broadcast
+across the block. This avoids inserting extra target-
+derived key/value positions into intra-block atten-
+tion; the block attention remains the drafter’s own
+self-attention path.
+
+
+Eval
+Original DFlash-style
+EAGLE-style DFlash
+domain
+Baseline
+IDLM WS
+IDLM WS
+math (ID)
+5.96
+6.03
+5.25
+chat
+1.50
+1.53
+1.88
+code
+1.58
+1.63
+1.93
+common
+1.88
+1.92
+2.21
+finance
+1.60
+1.65
+1.99
+OOD avg.
+1.64
+1.68
+2.00
+Table 13: Cross-domain accepted length under DFlash
+variants. The original DFlash-style columns compare a
+random-body baseline with an IDLM WS (warm start);
+the two configurations share architecture, embedding
+initialization, LM-head initialization, training data and
+optimizer, and differ only in transformer-block body ini-
+tialization. The EAGLE-style DFlash variant preserves
+the pretrained drafter attention path at initialization us-
+ing zero-initialized target-side projections. Bolded value
+indicates best performance. "math (ID)" means math
+in-domain.
+We also match the IDLM pretraining conven-
+tion by using causal intra-block attention and shift-
+by-one labels: position k predicts the token at
+k+1. This contrasts with the original DFlash set-
+ting, which uses bidirectional block attention and
+same-position labels. Both changes preserve the
+pretrained attention and label conventions more
+closely than the original DFlash-style interface.
+G.5
+Results
+Table 13 reports all DFlash ablations. The first two
+columns compare random-body and IDLM-warm-
+start initialization under the original DFlash-style
+interface. The last column reports the EAGLE-style
+DFlash variant under the aligned HF protocol.
+Under the original DFlash-style interface, warm-
+starting from the IDLM-style diffusion checkpoint
+helps both in domain and out of domain, but the
+gain is small: the warm start improves over the
+random-body baseline by at most 0.07 accepted
+tokens in any domain. The random-body baseline
+reaches 5.96 accepted tokens on math, but its four-
+domain OOD mean is only 1.64; the IDLM warm
+start improves this mean slightly to 1.68.
+We hypothesize that the small warm-start gain
+is partly caused by key/value distribution drift in
+the original DFlash-style interface. Because the
+drafter attention consumes target-derived key/value
+streams, the pretrained IDLM body does not see the
+same key/value distribution it saw during diffusion
+pretraining. This mismatch can reduce the amount
+of pretrained attention computation that is reusable
+after fine-tuning, allowing the random-body base-
+line to catch up quickly.
+The EAGLE-style DFlash variant reduces this
+mismatch by preserving the pretrained drafter at-
+tention path at initialization and adding target con-
+ditioning through zero-initialized projections. It
+reaches an OOD mean accepted length of 2.00,
+substantially above the original DFlash-style warm-
+start column.
+This suggests that, for diffusion
+drafters as well, warm-start benefits are more likely
+to survive fine-tuning when the target interface does
+not overwrite the pretrained drafter’s attention path-
+way.
+Use of AI Assistants
+The authors used AI assistants for limited writing
+and coding support, including drafting language,
+editing for clarity, generating LaTeX snippets, and
+checking code or table formatting. All technical
+ideas, experimental design, implementation deci-
+sions, analyses, and final paper content were re-
+viewed and verified by the authors, who remain
+fully responsible for the submission.
