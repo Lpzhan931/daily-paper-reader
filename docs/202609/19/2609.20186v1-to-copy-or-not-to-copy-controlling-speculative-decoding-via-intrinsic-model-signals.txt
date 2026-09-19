@@ -1,0 +1,366 @@
+Title: To Copy or Not to Copy: Controlling Speculative Decoding via Intrinsic Model Signals
+
+URL Source: https://arxiv.org/pdf/2609.20186v1
+
+Published Time: Fri, 18 Sep 2026 01:10:58 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# To Copy or Not to Copy: Controlling Speculative Decoding via Intrinsic Model Signals 
+
+Roy Eisenstadt 1,2 , Ido Cohen 2, Edo Cohen-Karlik 2
+
+Lior Wolf 1, Itamar Zimerman 1,2 
+
+## Abstract 
+
+Speculative Decoding (SD) has significantly accelerated Large Language Model (LLM) inference, yet existing approaches face a fundamental tradeoff between two drafting strategies: neural drafting and context-based copying. Neural drafts (e.g., EAGLE3) provide robust performance across diverse text settings, while copy-based methods achieve higher speedups in copy-intensive regimes by generating candidates faster and exploiting long repetition spans for near-perfect speculation. We analyze existing copy-based methods and find that they are prone to accidental repetitions where surface-level n-gram overlap does not reflect a structural intent to copy, leading to false-positive triggers that ultimately degrade throughput. We introduce SwitchSD , an adaptive framework that treats copying as a latent control signal of the LLM. By training lightweight probes on the target model’s internal representations, SwitchSD identifies genuine copy-intent with high precision (AUC 
+
+> 0.99). This allows the system to dynamically switch between neural drafting (e.g., EAGLE) and context-based copying. Our results across Llama and Qwen families demonstrate throughput gains of up to 15% over state-of-the-art baselines like EAGLE3, effectively turning “copying” from a noisy heuristic into a principled, model-aware decoding regime. 
+
+## 1 Introduction 
+
+Large Language Models (LLMs) have redefined state-of-the-art performance across nearly all NLP domains, often exhibiting emergent reasoning abilities [Kojima et al., 2022]. However, these gains are increasingly gated by the computational cost of autoregressive decoding. This bottleneck is most acute in the test-time scaling regime [Snell et al., 2024, Welleck et al., 2024], where generating exhaustive chain-of-thought (CoT) sequences significantly inflates latency. As LLMs move toward deeper reasoning, the sequential nature of decoding remains the primary hurdle to real-world deployment. Speculative decoding (SD) has emerged as the standard remedy for this bottleneck [Leviathan et al., 2023, Chen et al., 2023], utilizing a lightweight draft model to propose token sequences that the target model verifies in parallel. Beyond standard neural drafts, non-neural approaches such as Prompt Lookup Decoding (PLD) [Saxena, 2023] and retrieval-based speculators [Quan et al., 2025] have attempted to bypass neural overhead by copying directly from the context via n-gram search. Building on these ideas, recent innovations like CopySpec [Dumitru et al., 2025] introduced a hybrid heuristic: if a prefix has appeared previously in the context, the system speculates the subsequent continuation, falling back to a neural draft strategy if no previous occurrence is found. While intuitive, this approach relies on a brittle assumption that surface-level n-gram overlap always implies a structural intent to reproduce context. Our analysis reveals a critical flaw in these surface-level heuristics: they cannot distinguish between 
+
+true copy-intent and accidental repetitions . As shown in Figure 2, repeated prefixes often arise  
+
+> 1Tel Aviv University 2Stealth Startup, Tel Aviv Preprint. arXiv:2609.20186v1 [cs.CL] 17 Sep 2026
+
+Figure 1: Token generation process under our method. After every verification step by the target model, given the final accepted token (shown in green), there are three possible cases: (i) No repetition contains the currently generated token. In this case, a standard neural draft model is used. Otherwise, a repetition containing the current token exists. In this case: (ii) if the probe (shown in red) identifies copy-intent, speculative tokens are drafted by copying from the context, and (iii) if no copy-intent is identified, the neural draft model is used. The neural draft model is shown in gray, the copy draft in orange, generated tokens in blue, and repeated input tokens with underline. The example in the figure contains the three cases in their numbered order. 
+
+Case A: Latent Copy-Intent (High Yield)      
+
+> Context (Source):
+> def truncate(n): """Given a positive number, it can be decomposed into an integer part and decimals..."""
+> Current Prefix:
+> Assistant: def truncate(number):
+> Target (Intentional Copy):
+> """Given a positive number, it can be decomposed into..."""
+> Copy Draft: """Given a positive number, it can...
+> Result: 20 Tokens Accepted
+> Neural Draft: """\n
+> Result: 2 Tokens Accepted
+
+Case B: Accidental Repetition (Zero Yield)          
+
+> Context (Problem):
+> Smallest perfect cube sum of 3 consecutive integers...
+> ... Next, let’s try n=2. If n=2, sum is 9 (not a cube).
+> Current Prefix:
+> Next, let’s try n =
+> Target (Novel Reasoning):
+> 3. If n=3, then the sum is 12...
+> Copy Draft (Naive): 2. If n=2, then...
+> Result: 0 Tokens Accepted
+> Neural Draft: 3. If n=3, then...
+> Result: 8 Tokens Accepted
+
+Figure 2: Latent Copy-Intent vs. Accidental Repetition. (Left) SwitchSD identifies copy-intent in docstrings. (Right) In reasoning tasks, n-gram overlaps are incidental; SwitchSD correctly defaults to neural drafting. from coincidental associative patterns (e.g., in math reasoning) rather than a deliberate reproduction of structured text. Triggering a copy-based draft in these accidental regimes results in immediate rejection, incurring a “speculation tax” that degrades throughput compared to standard neural drafting. We argue that copying is not a surface phenomenon but is driven by a latent control signal encoded within the model’s internal representations. Motivated by this, we propose SwitchSD , the first model-aware SD framework that replaces noisy heuristics with a principled, representation-driven decision mechanism. By extracting latent copy-signals directly from the target model’s intrinsic representations , SwitchSD identifies the intent to copy which allows for dynamic orchestration: speculating via context-copying only when the model is in a “copy-regime,” and falling back to state-of-the-art neural speculators (e.g., EAGLE3 [Li et al., 2025]) otherwise. This selective mechanism eliminates false-positive copy attempts, transforming context-copying from a brittle heuristic into a robust, high-yield acceleration strategy. 
+
+Our main contributions are as follows: (i) We introduce SwitchSD , an adaptive SD framework that dynamically switches between neural drafting and context copying using lightweight probes over the target model’s hidden representations. Our approach is orthogonal to existing SD methods and 2consistently improves strong baselines, including EAGLE3, by up to 15% throughput across multiple benchmarks and model families. (ii) We show that SD contains heterogeneous decoding regimes with substantially different acceptance-length characteristics. In particular, copy-favorable regions produce significantly longer accepted continuations than standard generative regions. Exploiting this structure enables more effective draft-policy selection and improved tuning of speculative lookahead. (iii) Through extensive ablations and analysis, we demonstrate that internal model representations provide reliable control signals for adaptive SD and systematically analyze the impact of probe design, training data, threshold selection, and drafting strategies on overall decoding efficiency. 
+
+## 2 Background and Related Work 
+
+This section establishes the formal framework for SD and context-copying mechanisms. 
+
+Auto-Regressive Transformers. Modern LLMs [Vaswani et al., 2017] consist of stacked Trans-former blocks where hidden representations Hℓ are transformed through self-attention and MLP sublayers. Under the pre-normalization formulation, a block is defined as:      
+
+> ˜Hℓ=Hℓ+ Attn
+> 
+> LN( Hℓ)
+> 
+> ,Hℓ+1 = ˜Hℓ+ FFN
+> 
+> LN( ˜Hℓ)
+> 
+> .
+> (1)
+
+In autoregressive LLMs, tokens xt are generated sequentially, conditioned on the full preceding context. Our work specifically utilizes the intermediate representations Hℓ at layer ℓ to detect latent decoding regimes. 
+
+Speculative Decoding. SD [Leviathan et al., 2023, Chen et al., 2023] accelerates inference by using a lightweight draft model to propose k candidate tokens, which are verified in parallel by the target model. Efficiency is governed by the acceptance rate α = 1 − KL (p, q ), where p and q represent the target and draft distributions, and the cost ratio c = Tp/T q between the two models. While neural drafts like EAGLE [Li et al., 2024] or distillation methods [Zhou et al., 2024] improve α through alignment, they typically apply a uniform drafting policy regardless of the underlying text structure. 
+
+Context-Based and Adaptive Speculation. Beyond neural drafting, context-based methods like 
+
+Prompt Lookup Decoding (PLD) [Saxena, 2023] use n-gram matching to propose candidates directly from the context. CopySpec [Dumitru et al., 2025] introduced a heuristic switch between n-gram matching and neural drafting. However, these methods remain model-agnostic and fail at “accidental repetitions.” Recent work has explored statistical orchestration: BanditSpec [Hou et al., 2025] treats strategy selection as a multi-armed bandit problem, using UCB-based feedback on throughput to optimize drafting. Unlike these statistical “black-box” approaches that require noisy exploration phases, SwitchSD uses a “white-box” signal-probing internal states to identify copy-intent with high precision before speculation begins. 
+
+The Copy Mechanism in LLMs. We distinguish between memorization (training-data copying) and associative copying (contextual reproduction). The latter is driven by specific circuits known as 
+
+induction heads [Olsson et al., 2022, Elhage et al., 2021]. Conceptually, SwitchSD echoes the gating logic of Pointer-Generator Networks [See et al., 2017], which used a learned scalar to switch between generation and pointing. However, we pivot this concept from generation-time vocabulary gating to inference-time speculation orchestration. Following evidence that task-relevant information is linearly encoded in Hℓ [Park et al., 2024, Hendel et al., 2023, Eisenstadt et al., 2025], we hypothesize that copy-intent manifests as a linearly separable signal, allowing us to train lightweight probes as high-precision control signals for SD. 
+
+## 3 Method 
+
+3.1 Motivation: The Efficiency Tax of Accidental Repetitions 
+
+We define accidental repetitions as scenarios where the current context contains an n-gram overlap with the past, yet the model’s target distribution p does not align with the historical continuation. 3As illustrated in Figure 2, these cases frequently arise from coincidental associative patterns (e.g., repeating the variable name “ n” in a mathematical derivation) rather than structured reproduction. In such instances, indiscriminate copying incurs a significant speculation tax : the system spends computational budget on draft proposals and parallel verification only to suffer a 0-token acceptance rate. Our analysis shows that in reasoning-heavy tasks, these false-positives trigger over 50% of all copy attempts. This motivates the need for a latent-aware trigger -one that bypasses surface-level coincidences by directly querying the model’s internal representations for genuine copy-intent. 
+
+3.2 Learning a Copy-Intent Probe 
+
+Drawing on the insight that copying constitutes a distinct decoding regime, we develop a task-agnostic procedure to probe for copy-intent directly within the model’s hidden states. Unlike heuristic triggers that monitor surface-level text, our probe identifies the underlying latent mode of the transformer. 
+
+Problem Formulation. We formulate copy-intent detection as a binary classification task. Since surface-level repetitions are inherently noisy, we adopt a conservative proxy for our ground-truth training labels. We define a token position as a copy-mode instance ( Y = 1 ) if it belongs to a verbatim sequence of at least ntrain = 5 tokens that appears earlier in the context. This threshold ensures that our probe ignores incidental n-gram overlaps and focuses on sustained, deliberate copying behavior. All other positions are labeled as non-copy ( Y = 0 ). Our objective is not to claim that copy intent is fully characterized by exact n-gram overlap, but rather to use longer verbatim spans as a practical indicator of an underlying latent copy mode . Further discussion of this matter is in Appendix E. 
+
+Controlled Probing Dataset. Because long repeated n-grams are sparse in standard pretraining corpora, we construct a calibrated stimulus set to isolate the copy-circuit. We utilize Claude Sonnet [Anthropic, 2025] to generate 1,000 prompts that exhibit diverse repetition structures, ranging from structured code boilerplate to repetitive linguistic templates. By having the target model generate completions for these prompts, we extract a dataset Dℓ of hidden representations H(ℓ) 
+
+> j
+
+paired with their corresponding copy-labels Yj :
+
+Dℓ := {(H(ℓ) 
+
+> i,j
+
+, Y i,j ) | i ∈ [1000] , j ∈ { Mi, . . . , N i}} , (2) where Mi denotes the start of the decoded response. This procedure provides hundreds of thousands of labeled token-level instances, ensuring a high signal-to-noise ratio for probe training. Appendix C provides representative prompts from the dataset, illustrating their varying degrees of copy-inducing behavior. 
+
+Probe Architecture and Training. Consistent with the hypothesis that task-relevant features are linearly encoded in the residual stream [Park et al., 2024], we implement the probe as a strictly linear projection . For each layer ℓ, we train an independent probe PR ℓ that operates directly on the hidden representation H(ℓ) 
+
+> j
+
+∈ Rd without a bias term: 
+
+pℓ(j) = σ(w⊤ 
+
+> ℓ
+
+H(ℓ) 
+
+> j
+
+) , (3) where pℓ(j) represents the probability that the model is in copy-mode. Probes are trained using binary cross-entropy loss with ℓ2 regularization. This minimal architecture ensures that probe predictions are purely a function of the vector direction in the latent space, adding negligible computational overhead. Empirically, we find that probes trained on representations extracted after the attention sublayer 
+
+consistently outperform those from the MLP sublayers, reinforcing the connection to attention-driven induction circuits. 
+
+Layer and Threshold Selection. After training probes across all L layers, we select a single optimal layer using a greedy F1-score maximization on a held-out validation set. This identifies the specific depth at which copy-intent is most linearly separable, typically in the intermediate layers (e.g., layer 14 for Llama-3.1-8B). We then fix a decision threshold τ by maximizing the F1-score on the same validation split. At inference time, SwitchSD enables copy-based drafting only when the probe score PR (H(ℓ) 
+
+> j
+
+) ≥ τ , providing a high-precision gate that filters out accidental repetitions. 
+
+3.3 SwitchSD : Copy-Intent-Aware SD 
+
+Building upon the selected probe PR , SwitchSD employs a dynamic speculative framework that switches between neural drafting and context-copying strategies. At each decoding step, the system 4extracts the hidden representation H(ℓ) 
+
+> i
+
+and queries the probe to determine the optimal drafting regime (see Figure 1). 
+
+Copy-Intent Decision Rule. Let i denote the current token position. Copy-based speculation is enabled if and only if the latent probe score exceeds the threshold τ , and the current context provides structural evidence for a repetition: 
+
+PR (H(ℓ) 
+
+> i
+
+) ≥ τ where PR (H(ℓ) 
+
+> i
+
+) = σ(w⊤H(ℓ) 
+
+> i
+
+) . (4) To suppress accidental short-prefix matches, we further require that the κ-gram ending at the current token (xi−κ+1 , . . . , x i) matches at least one prior occurrence in the context (we set κ = 5 ). If Eq. 4 holds but no κ-gram match is found, SwitchSD falls back to neural drafting, ensuring that speculation is only triggered when both internal intent and external structure align. 
+
+Copy-Based Speculative Generation. When the copy-regime is triggered, SwitchSD retrieves up to W candidate continuations, each of length D, from the context. These candidates are ranked by recency, prioritizing the most recent linguistic patterns. This yields a candidate set of plausible verbatim continuations without requiring any additional draft model parameters. 
+
+Parallel Verification with Block-Triangular Attention. To verify these W candidates efficiently, we adopt a block-triangular attention pattern, enabling parallel validation in a single target-model forward pass. We concatenate the W candidates sequentially after the anchor position. The attention mask is structured such that tokens within a specific candidate w ∈ [W ] can attend to: (i) the full original prefix, and (ii) preceding tokens within candidate w itself, while remaining isolated from other candidates. This allows the target model to verify all hypotheses simultaneously. SwitchSD 
+
+then selects the longest validated continuation for the next decoding step. 
+
+Non-Copy Speculative Tokens. In generative regimes where copy-intent is not detected, SwitchSD 
+
+delegates drafting to traditional SD mechanisms. To demonstrate the framework’s flexibility, we evaluate SwitchSD using both vanilla Speculative Sampling (SPS) and the state-of-the-art EAGLE3 
+
+[Li et al., 2024]. This "orchestrator-first" design proves that signal-aware switching provides benefits that are orthogonal to the specific choice of a neural draft model. 
+
+KV Cache Synchronization. Orchestrating between copy-based and neural-based paths requires careful coordination of Key-Value (KV) caches. When a copy-based sequence is accepted, the draft model’s KV cache may lag behind. SwitchSD resolves this via lazy propagation : accepted tokens are passed through the draft model during the subsequent forward pass. By merging this synchronization with the next drafting step, the synchronization cost is effectively amortized , ensuring that both the target and draft caches remain coherent with minimal latency overhead. 
+
+Overall Framework. SwitchSD acts as an orchestration layer over SD: at each step, it dynamically selects between copy-based and draft-based speculation, while delegating final verification to the target model. This design preserves correctness guarantees and is fully compatible with both classical speculative sampling and state-of-the-art methods such as EAGLE3 .
+
+## 4 Experiments 
+
+This section presents a systematic evaluation of SwitchSD . We begin by reporting main results across multiple benchmarks, comparing SwitchSD against heuristic, statistical, and neural baselines (§4.1). We then provide a detailed model analysis to characterize how latent signals improve acceptance lengths (§4.2). Finally, we justify our design choices through dedicated ablation studies (§4.3). Additional experiments analyzing the impact of temperature sampling are provided in App. A, showing that SwitchSD maintains SoTA performance even at high temperatures, and additional comparisons against context-exploitation baselines are presented in App. B. 
+
+4.1 Main Result 
+
+We evaluate SwitchSD across three primary domains: coding (HumanEval [Chen et al., 2021]), mathe-matical reasoning (Math500 [Hendrycks et al., 2021]), and summarization (CNN/DailyMail [Hermann et al., 2015]). Performance is measured by decoding throughput (tokens per second) and the resulting speedup relative to vanilla autoregressive decoding. 5Table 1: Throughput & speedup (relative to vanilla) across datasets and models. Each model block reports Tok/s, Speedup, and the copy/EAGLE3 iteration breakdown as % iterations and mean acceptance length.                                                                                                                                                                                                                                                        
+
+> Dataset Method
+> LLaMA-3.1-8B-Instruct LLaMA-3.3-70B-Instruct Qwen3-8B
+> Tok/s Speedup Copy EAGLE3 Tok/s Speedup Copy EAGLE3 Tok/s Speedup Copy EAGLE3 %mean %mean %mean %mean %mean %mean
+> CNN/DM
+> Vanilla 38.24 1.00 ×––––11.46 1.00 ×––––25.67 1.00 ×––––PLD 50.70 1.33 ×100% 1.51 ––––––––––––––BanditSpec 63.60 1.66 ×21.0% 0.44 79.0% 2.42 11.60 1.01 ×96.0% 0.34 4.0% 0.89 49.80 1.93 ×2.0% 0.05 98.0% 2.15 CopySpec 66.39 1.74 ×14.2% 1.50 85.8% 2.32 15.74 1.37 ×10.0% 1.01 90.0% 0.98 50.04 1.95 ×5.7% 0.84 94.3% 2.19 EAGLE3 70.84 1.85 ×––100% 2.60 15.71 1.37 ×––100% 1.03 51.44 2.00 ×––100% 2.20
+> SwitchSD 77.00 2.01 ×10.6% 2.84 89.4% 2.46 16.22 1.42 ×5.4% 1.96 94.6% 1.04 53.23 2.07 ×2.1% 1.97 97.9% 2.20
+> Math500
+> Vanilla 38.75 1.00 ×––––11.80 1.00 ×––––27.11 1.00 ×––––PLD 53.10 1.37 ×100% 1.54 ––––––––––––––BanditSpec 72.50 1.87 ×5.0% 0.30 95.0% 2.58 11.70 0.99 ×91.0% 0.28 9.0% 0.66 59.02 2.18 ×1.0% 0.15 99.0% 2.58 CopySpec 74.00 1.91 ×30.3% 2.09 69.7% 2.34 15.82 1.34 ×19.0% 1.50 81.0% 0.85 55.28 2.04 ×17.4% 1.00 82.6% 2.58 EAGLE3 79.38 2.05 ×––100% 2.87 15.87 1.35 ×––100% 0.96 59.77 2.20 ×––100% 2.65
+> SwitchSD 88.74 2.29 ×17.9% 5.39 82.1% 2.41 17.41 1.48 ×8.9% 4.45 91.1% 0.82 62.67 2.31 ×9.3% 2.68 90.7% 2.57
+> HumanEval
+> Vanilla 38.30 1.00 ×––––11.73 1.00 ×––––26.02 1.00 ×––––PLD 53.00 1.38 ×100% 1.59 ––––––––––––––BanditSpec 75.00 1.96 ×28.0% 0.45 72.0% 3.25 12.70 1.08 ×75.0% 0.30 25.0% 1.11 64.63 2.49 ×1.0% 0.13 99.0% 2.88 CopySpec 77.72 2.03 ×27.3% 1.83 72.7% 2.82 19.17 1.63 ×14.4% 1.72 85.6% 1.32 61.92 2.38 ×15.8% 1.01 84.2% 2.92 EAGLE3 87.50 2.28 ×––100% 3.44 19.52 1.66 ×––100% 1.44 66.52 2.56 ×––100% 2.97
+> SwitchSD 98.63 2.58 ×14.2% 5.88 85.8% 2.93 20.46 1.74 ×7.0% 4.65 93.0% 1.27 67.98 2.61 ×7.9% 3.16 92.1% 2.91
+
+Baselines & Models. We compare SwitchSD against three classes of speculative decoding: (i) 
+
+Heuristic-based: PLD [Saxena, 2023] (naive n-gram search) and CopySpec [Dumitru et al., 2025] (prefix-based switching). (ii) Neural-only: EAGLE3 [Li et al., 2025], the current state-of-the-art in neural speculative drafting. (iii) Statistical-Adaptive: BanditSpec [Hou et al., 2025], which uses a UCB-based bandit to switch between strategies based on throughput rewards. For model selection, we conduct experiments using models that are already supported by EAGLE3. In particular, we evaluate models from the LLaMA-3 [Grattafiori et al., 2024] and Qwen-3 [Yang et al., 2025] families. Table 2: Decoding throughput and speedup for Qwen3-8B (8-bit) using SPS with a Qwen3-0.6B draft model. Copy and SPS statistics re-port % iterations and mean acceptance length. 
+
+Dataset Method Tok/s Speedup Copy SPS % mean % mean 
+
+CNN/DM 
+
+Vanilla 7.53 1.00 × – – – –CopySpec 10.30 1.37 × 5.8 1.77 94.2 2.46 SPS 9.74 1.29 × – – 100 2.72 
+
+SwitchSD 10.43 1.38 × 3.2 2.79 96.8 2.47 
+
+Math500 
+
+Vanilla 7.84 1.00 × – – – –CopySpec 13.18 1.68 × 17.7 2.05 82.3 3.09 SPS 13.47 1.72 × – – 100 3.77 
+
+SwitchSD 13.85 1.77 × 8.6 4.08 91.4 3.10 
+
+HumanEval 
+
+Vanilla 7.87 1.00 × – – – –CopySpec 12.31 1.56 × 14.3 2.08 85.7 2.88 SPS 12.35 1.57 × – – 100 3.39 
+
+SwitchSD 13.09 1.66 × 7.2 4.37 92.8 2.89 
+
+Throughput and Speedup. Across all 9 configu-rations in Table 1, SwitchSD consistently achieves the highest throughput, outperforming all baselines. On average, we achieve speedups of 2.31 × on HumanEval, 2.03 × on Math500, and 1.83 × on CNN/DM. Notably, SwitchSD provides a consis-tent performance gain over EAGLE3 (up to 15%), demonstrating that signal-aware context-copying is orthogonal and complementary to the strongest neu-ral speculators. These trends hold even when using a weaker draft model (SPS) on Qwen3-8B (Table 2), where SwitchSD continues to dominate. 
+
+Internal Signals vs. Statistical Exploration. Akey finding is our performance relative to Bandit-Spec . While BanditSpec attempts to adaptively switch strategies, it suffers from a significant ex-ploration penalty . As a black-box optimizer, it must "explore" the copy strategy in generative regions to collect throughput statistics. On Llama-3.3-70B, this leads to a near-total collapse in efficiency (e.g., 0.99 × on Math500), where it over-selects copying (91% of iterations) despite a catastrophic mean acceptance length of only 0.28. In contrast, SwitchSD achieves a 1.48 × speedup on the same task. By leveraging internal hidden-state signals, SwitchSD identifies copy-intent before drafting, allowing it to be more selective (triggering only 8.9% of the time) but achieving a much higher yield (4.45 mean acceptance). This isolates the core benefit of our approach: internal representation probing provides a deterministic control signal that far exceeds the efficiency of reward-based statistical feedback. 6High-Yield Speculation. The breakdown of acceptance lengths in Table 1 reveals that SwitchSD 
+
+achieves its gains not through frequency, but through precision . Compared to CopySpec, SwitchSD 
+
+triggers copy-based drafting less often but attains significantly longer accepted runs, for instance, 5.88 vs. 1.83 on Llama-3.1-8B HumanEval. This confirms that our probe successfully identifies the high-yield “copy-regimes” of the model while suppressing the noisy “accidental repetitions” that plague heuristic and statistical methods. 
+
+Robustness Across SD Architectures. To evaluate whether the benefits of SwitchSD are tied to specific neural SD architectures, we report results for Qwen3-8B using standard Speculative Sampling (SPS) with a 0.6B draft model in Table 2. Unlike EAGLE3, which predicts future feature states, SPS relies on token-level sampling from a smaller model. Despite this shift in the underlying neural speculator, SwitchSD consistently achieves the highest throughput across all benchmarks. For example, on HumanEval, it increases throughput to 13.09 Tok/s, outperforming both the base SPS (12.35) and the heuristic-based CopySpec (12.31). These results confirm that signal-aware orchestration is draft-agnostic ; the ability to identify a “copy-regime” via internal representations provides a significant efficiency layer that is orthogonal to the strength or type of the neural draft model. 
+
+Precision Advantage Carries Across SD Architectures. A comparative analysis of the iteration statistics in Table 2 reveals the fundamental mechanism behind our gains. Across all datasets, 
+
+SwitchSD invokes copying significantly more selectively than the heuristic CopySpec, yet achieves 
+
+longer accepted spans . This “less is more” pattern is the mathematical signature of our latent copy-intent probe: (i) HumanEval: SwitchSD triggers context-copying in only 7.2% of steps (vs. 14.3% for CopySpec), yet yields a mean acceptance length of 4.37 (vs. 2.08). (ii) Math500: We trigger copying in only 8.6% of steps (vs. 17.7%), but accept 4.08 tokens on average (vs. 2.05). By filtering out the “accidental repetitions” where n-gram overlaps exist but the model’s actual intent remains generative, SwitchSD ensures that context-copying is only utilized when it can provide high-yield leaps. This precision allows the neural draft model to focus on the generative regions where it excels, leading to a more efficient division of labor in the decoding pipeline. 
+
+Task-Specific Performance. The performance gains are most pronounced in structured domains like coding and mathematics. In these tasks, the model transitions between rigid, repetitive logic (copy-heavy) and novel reasoning (generative). SwitchSD successfully navigates these transitions by “listening” to the model’s internal state. In contrast, on CNN/DailyMail, where the repetition is naturally weaker, the gains are more modest but still favor the signal-aware approach. Together, these results demonstrate that SwitchSD acts as a robust, universal orchestrator that optimizes the interplay between contextual and neural speculation. 
+
+4.2 Model Analysis 4.2.1 Regime Separation and Acceptance Yield 
+
+Figure 3: Copy acceptance length conditioned on probe pre-diction. Distribution of the number of speculative tokens accepted from the copy-based draft partitioned by the probe’s prediction of copy intent. Red bars correspond to steps where copy intent is identified (probe active), while blue bars correspond to steps where copy intent is not predicted (probe inactive). 
+
+In this section, we provide a fine-grained analysis of SwitchSD ’s inter-nal mechanics, demonstrating how latent-signal probing successfully par-titions decoding into two distinct mathematical regimes. To quantify the probe’s ability to iden-tify high-yield sequences, we perform a post-hoc analysis on H UMAN EVAL 
+
+using Llama-3.1-8B-Instruct .We execute both the context-copying and EAGLE3 paths at every step, partitioning the results based on the probe’s prediction. Figure 3 illus-trates the resulting probability mass functions for speculative acceptance 7lengths. The distributions reveal a near-total separation of decoding modes. When the probe is 
+
+inactive (blue), the copy-based draft suffers from a heavy concentration of short acceptances ( 0–2
+
+tokens), representing the “accidental repetition” regime where copying is inefficient. Conversely, when the probe is active (red), the distribution shifts dramatically toward high-yield runs. Most notably, 30.0% of trajectories reach the maximum speculative length of 20 tokens when the probe is active, compared to a mere 4.7% when it is inactive. This 6.3 × increase in maximum-length yield confirms that our probe identifies a latent state of high predictability that surface-level heuristics cannot detect. These results suggest that the probe captures an internal copy-intent signal rather than simply detecting surface-level repetition patterns. We provide a broader discussion of this interpretation and its limitations in Appendix E. 
+
+4.2.2 Impact on Optimal Lookahead ( γ)
+
+Table 3: Best draft lookahead γ selected on the evaluation set for EAGLE3 and SwitchSD .         
+
+> Approach LLaMA-3.1-8B Qwen3-8B LLaMA-3.3-70B Vanilla 757SwitchSD 655
+
+The partitioning of decoding into “copy” and “gen-erative” regimes has significant implications for the neural draft’s optimal lookahead, γ. Typically, γ is tuned based on the average acceptance rate across all tokens. However, context-copying tokens are inher-ently easier to speculate, which artificially inflates the global acceptance rate. By routing these high-probability tokens through the copy path, SwitchSD removes the “easy” examples from the neural draft’s workload. As a result, the remaining tokens assigned to the neural speculator are harder on average, leading to the slightly lower optimal γ values observed in Table 3 (e.g., a shift from 7 to 5 for Llama-3.3-70B). This separation enables a critical system-level optimization : instead of over-speculating on generative tokens with a high global γ, SwitchSD allows for targeted tuning. By using a shorter, more appropriate lookahead for the neural draft and a high-yield span for the copy draft, we eliminate computational waste and maximize the throughput of both paths. This refined resource allocation is a primary driver of the speedups reported in §4.1. 
+
+4.3 Ablation Studies 
+
+We conduct a series of ablations to isolate the impact of our training data, representational placement, and decision thresholds on SwitchSD ’s performance. 
+
+4.3.1 Importance of Intent-Driven Training Data 
+
+Figure 4: Confusion matrices for copy-intent probes evaluated on MT-Bench at their selected decision thresholds. Each cell reports the percentage of tokens from the total evaluation set. 
+
+To evaluate our synthetic data con-struction, we compare the efficacy of probes trained on three distinct data distributions: (i) ConstructedCopy ,a non-semantic dataset of repeated random token spans; (ii) WikiText-103 , representing natural linguistic repetition without explicit prompt-completion structure; and (iii) Copy-Diversity (our method), which utilizes model-generated completions across diverse repetition templates. As shown in Figure 4, the non-semantic ConstructedCopy yields the weakest performance ( F 1 = 0.65 ), confirming that copy-intent is not merely a structural phenomenon but is tied to the model’s semantic processing. While WikiText-103 improves performance to 0.81 , it remains significantly below our full method ( 0.87 ). The confusion matrices illustrate this gap: probes trained on natural text or random spans suffer from higher false-positive rates on MT-B ENCH , likely failing to distinguish between coincidental reuse and intentional reproduction. These results underscore that high-precision probing requires intent-driven supervision that aligns with the target model’s actual behavior. 84.3.2 Architectural Placement: Layer and Sublayer Selection 
+
+Figure 5: Position and layer selection for probing. F1 (left) and ROC–AUC (right) of probes trained on repre-sentations extracted after the attention sublayer (green) or after the MLP sublayer (blue) across transformer lay-ers. 
+
+A critical design choice is the selection of inter-nal representations. We evaluate probes trained on representations extracted from every layer at two positions: (i) after the self-attention sub-layer ( X′) and (ii) after the MLP sublayer ( Y ). Figure 5 reveals two key insights. First, probes trained on attention representations consistently outperform those from MLP sublayers. This result aligns with our hypothesis in §2, sug-gesting that copy-intent is primarily carried by attention-driven induction circuits rather than feed-forward transformations. Second, the sig-nal strength peaks in the intermediate layers 
+
+(peaking at layer 14 for Llama-3.1-8B), while declining in the final layers as representations transform into vocabulary logits. This validates our choice of intermediate attention-based hidden states as the optimal control signal. 
+
+4.3.3 Threshold Selection and Linear Separability 
+
+Figure 6: Threshold selection for probing. F1 score as a function of the decision threshold (right) and the corresponding ROC curve (left) for probes trained on attention representations at layer 14. 
+
+Finally, we analyze the impact of the decision threshold τ . Figure 6 (left) demonstrates that an F1-optimal threshold lies near 0.4 for the Llama-3.1-8B model. The corresponding ROC curve (Figure 6, right) exhibits an AUC > 0.99 , indicating near-perfect linear separability of the copy-mode. This ex-ceptional clarity suggests that copy-intent is a 
+
+first-order feature in the model’s residual stream. Such high separability allows SwitchSD to oper-ate as a high-precision gate, achieving the signif-icant speedups reported in §4.1 with negligible risk of false-positive copy triggers. 
+
+## 5 Conclusions 
+
+We introduced SwitchSD , a framework that establishes a new direction for latent-aware orchestration 
+
+in speculative decoding. By moving beyond surface-level n-gram heuristics and statistical bandits, we demonstrate that a model’s internal representations provide a high-precision, “white-box” control signal for switching between decoding regimes. Across diverse model families (Llama-3, Qwen) and benchmarks (Math500, HumanEval, CNN/Dailymail), SwitchSD consistently delivers significant throughput gains, outperforming state-of-the-art neural speculators like EAGLE3 by up to 15% while preserving exact generation quality. Our findings suggest that the future of efficient LLM inference lies in model-aware systems that exploit the intrinsic representational states of the transformer to optimize the division of labor between neural and contextual speculation. Furthermore, our binary copy-intent probe could be extended into a multi-modal orchestrator capable of predicting optimal speculation lengths ( γ) or selecting between multiple specialized draft models based on latent task-type signals. Finally, we believe that deeper mechanistic interpretability of the “copy-circuits” identified in this work could lead to even more refined probes, further closing the gap between the theoretical understanding of transformer internals and the practical requirements of low-latency inference. 9References 
+
+Anthropic. Introducing claude sonnet 4.5. https://www.anthropic.com/news/ claude-sonnet-4-5 , 2025. Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 , 2023. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mohammad Bavarian, Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebgen Guss, Alex Nichol, Alex Paino, Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shantanu Jain, William Saunders, Christopher Hesse, Andrew N. Carr, Jan Leike, Josh Achiam, Vedant Misra, Evan Morikawa, Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. Evaluating large language models trained on code. 2021. Razvan-Gabriel Dumitru, Minglai Yang, Vikas Yadav, and Mihai Surdeanu. Copyspec: Accel-erating llms with speculative copy-and-paste without compromising quality. arXiv preprint arXiv:2502.08923 , 2025. Roy Eisenstadt, Itamar Zimerman, and Lior Wolf. Overclocking llm reasoning: Monitoring and controlling thinking path lengths in llms. arXiv preprint arXiv:2506.07240 , 2025. Nelson Elhage, Neel Nanda, Catherine Olsson, Tom Henighan, Nicholas Joseph, Ben Mann, Amanda Askell, Yuntao Bai, Anna Chen, Tom Conerly, et al. A mathematical framework for transformer circuits. Transformer Circuits Thread , 1(1):12, 2021. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 , 2024. Roee Hendel, Mor Geva, and Amir Globerson. In-context learning creates task vectors. In Conference on Empirical Methods in Natural Language Processing , 2023. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the math dataset. arXiv preprint arXiv:2103.03874 , 2021. Karl Moritz Hermann, Tomás Kociský, Edward Grefenstette, Lasse Espeholt, Will Kay, Mustafa Suleyman, and Phil Blunsom. Teaching machines to read and comprehend. ArXiv , abs/1506.03340, 2015. URL https://api.semanticscholar.org/CorpusID:6203757 .Yunlong Hou, Fengzhuo Zhang, Cunxiao Du, Xuan Zhang, Jiachun Pan, Tianyu Pang, Chao Du, Vincent Y. F. Tan, and Zhuoran Yang. Banditspec: Adaptive speculative decoding via bandit algo-rithms. ArXiv , abs/2505.15141, 2025. URL https://api.semanticscholar.org/CorpusID: 278782841 .Yuxuan Hu, Ke Wang, Xiaokang Zhang, Fanjin Zhang, Cuiping Li, Hong Chen, and Jing Zhang. Sam decoding: Speculative decoding via suffix automaton. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 12187–12204, 2025. Takeshi Kojima, Shixiang Shane Gu, Machel Reid, Yutaka Matsuo, and Yusuke Iwasawa. Large language models are zero-shot reasoners. Advances in neural information processing systems , 35: 22199–22213, 2022. Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR, 2023. 10 Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle: Speculative sampling requires rethinking feature uncertainty. arXiv preprint arXiv:2401.15077 , 2024. Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. Eagle-3: Scaling up inference ac-celeration of large language models via training-time test. arXiv preprint arXiv:2503.01840 ,2025. Catherine Olsson, Nelson Elhage, Neel Nanda, Nicholas Joseph, Nova DasSarma, Tom Henighan, Ben Mann, Amanda Askell, Yuntao Bai, Anna Chen, et al. In-context learning and induction heads. 
+
+arXiv preprint arXiv:2209.11895 , 2022. Kiho Park, Yo Joong Choe, and Victor Veitch. The linear representation hypothesis and the geometry of large language models. In International Conference on Machine Learning , pages 39643–39666. PMLR, 2024. Guofeng Quan, Wenfeng Feng, Chuzhan Hao, Guochao Jiang, Yuewei Zhang, and Hao Henry Wang. RASD: Retrieval-augmented speculative decoding. In Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Mohammad Taher Pilehvar, editors, Findings of the Association for Computational Linguistics: ACL 2025 , pages 6167–6177, Vienna, Austria, July 2025. Association for Computational Linguistics. ISBN 979-8-89176-256-5. doi: 10.18653/v1/2025.findings-acl.320. URL https://aclanthology.org/2025.findings-acl.320/ .Apoorv Saxena. Prompt lookup decoding, November 2023. URL https://github.com/ apoorvumang/prompt-lookup-decoding/ .A. See, Peter J. Liu, and Christopher D. Manning. Get to the point: Summarization with pointer-generator networks. In Annual Meeting of the Association for Computational Linguistics , 2017. URL https://api.semanticscholar.org/CorpusID:8314118 .Charlie Snell, Jaehoon Lee, Kelvin Xu, and Aviral Kumar. Scaling llm test-time compute optimally can be more effective than scaling model parameters. arXiv preprint arXiv:2408.03314 , 2024. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems , 30, 2017. Sean Welleck, Amanda Bertsch, Matthew Finlayson, Hailey Schoelkopf, Alex Xie, Graham Neubig, Ilia Kulikov, and Zaid Harchaoui. From decoding to meta-generation: Inference-time algorithms for large language models. arXiv preprint arXiv:2406.16838 , 2024. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 ,2025. Yao Zhao, Zhitian Xie, Chen Liang, Chenyi Zhuang, and Jinjie Gu. Lookahead: An inference acceleration framework for large language model with lossless generation accuracy. In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining , pages 6344– 6355, 2024. Yongchao Zhou, Kaifeng Lyu, Ankit Singh Rawat, Aditya Krishna Menon, Afshin Rostamizadeh, Sanjiv Kumar, Jean-François Kagy, and Rishabh Agarwal. Distillspec: Improving speculative decoding via knowledge distillation, 2024. URL https://arxiv.org/abs/2310.08461 .
+
+## A Impact of Sampling Temperature 
+
+All main experiments in the paper are conducted with temperature T = 0 .0, following the standard setup commonly used in SD evaluations Leviathan et al. [2023], Chen et al. [2023]. Since SD performance depends on the agreement between the draft and target model distributions, increasing the sampling temperature generally reduces acceptance rates and therefore lowers the achievable speedup. 11 Temperature Base Tok/s EAGLE3 Tok/s SwitchSD Tok/s Speedup (SwitchSD) 0.0 38.3 87.5 98.6 2.57 ×                    
+
+> 0.2 36.3 83.1 88.5 2.44 ×
+> 0.4 36.7 80.6 83.9 2.29 ×
+> 0.6 36.2 79.7 80.6 2.22 ×
+> 0.8 36.4 73.3 74.9 2.05 ×
+> 1.0 36.8 53.9 56.5 1.54 ×
+
+Table 4: Throughput across different sampling temperatures on HumanEval using LLaMA-3.1-8B. To evaluate the robustness of SwitchSD under different decoding configurations, we additionally measure throughput across a range of sampling temperatures on HumanEval using LLaMA-3.1-8B-Instruct. Results are reported in Table 4. Overall, SwitchSD consistently outperforms EAGLE3 across all evaluated temperatures. As expected, the performance gap gradually decreases as temperature increases. Higher temperatures induce more stochastic and diverse generations, reducing repetition frequency and lowering speculative token acceptance rates for both copy-based and neural drafting strategies. Nevertheless, even at T = 1 .0,
+
+SwitchSD still achieves a substantial 1.54 × speedup over vanilla decoding while maintaining an advantage over EAGLE3. 
+
+## B Additional Comparison to Context-Exploitation Baselines 
+
+To further evaluate the effectiveness of SwitchSD against non-parametric context-exploitation methods, we compare out method against several additional baselines that rely on context copying and n-gram retrieval mechanisms, including Prompt Lookup Decoding (PLD) [Saxena, 2023], Sam decoding (SAMD) [Hu et al., 2025], and Lookahead Decoding [Zhao et al., 2024]. All experiments are conducted using LLaMA-3.1-8B-Instruct.                                         
+
+> Dataset Method Tok/s Speedup MAL (copy/EAGLE) HumanEval PLD 53.0 1.38 ×1.59 SAMD 48.4 1.26 ×1.63 Lookahead 77.7 2.03 ×3.17
+> SwitchSD 98.63 2.58 ×5.88 / 2.93
+> Math500 PLD 53.1 1.37 ×1.54 SAMD 52.3 1.35 ×1.60 Lookahead 80.3 2.07 ×3.10
+> SwitchSD 88.74 2.29 ×5.39 / 2.41
+> CNN/DailyMail PLD 50.7 1.33 ×1.51 SAMD 44.7 1.17 ×1.53 Lookahead 63.9 1.67 ×2.85
+> SwitchSD 77.00 2.01 ×2.84 / 2.46
+
+Table 5: Comparison against additional context-exploitation SD baselines using LLaMA-3.1-8B-Instruct. MAL denotes mean accepted length. Results are presented in Table 5. Across all datasets, SwitchSD consistently achieves the highest throughput and speedup. In particular, while PLD and SAMD often produce short accepted copy spans, and Lookahead improves acceptance through more aggressive retrieval strategies, SwitchSD 
+
+obtains substantially longer accepted copy continuations while preserving the benefits of neural drafting through EAGLE3. These results further demonstrate that selectively activating copying based on intrinsic copy-intent signals is substantially more effective than indiscriminate context exploitation. 12 C CopyDiversity Dataset 
+
+CopyDiversity is a curated dataset designed to capture a wide spectrum of copy behavior in language model generation, ranging from strict verbatim reproduction to fully open-ended responses. The dataset contains 800 training samples spanning 17 prompt types, intentionally constructed to vary the degree to which copying from the input context is expected or beneficial. This diversity enables systematic analysis of copy intent and accidental repetition under realistic generation conditions. The dataset consists of 800 train examples and 200 validation examples. 
+
+Heavy Copy prompts (10.6% of the data) explicitly require verbatim reproduction of provided content. Representative examples include: • JSON Echo : User profile: 
+
+{"name": "Bob", "age": 45, "city": "London", "skills": ["SQL", "JavaScript"] }
+
+Output the same JSON with proper formatting. Copy the JSON exactly. 
+
+• Quote Extraction : "Text: The Nile River is the longest river in the world. It flows through 11 countries in northeastern Africa. Gravity is the force that attracts objects toward each other. On Earth, it gives weight to physical objects. Photosynthesis converts sunlight into chemical energy. Plants use this process to produce glucose and oxygen. Identify and quote exactly 3 important sentences from the passage:" 
+
+In these settings, faithful copying is essential for correctness. 
+
+Medium Copy prompts (11.7% of the data) require partial reuse of the input content, typically combined with light transformation or selective extraction. Example prompts include: • Definition Recall :
+
+Key terms: Graph: A collection of nodes (vertices) connected by edges representing relationships between elements. Algorithm: A step-by-step procedure for solving a problem or accomplishing a task. Interpreter: A program that executes source code line by line without prior compilation. Linked List: A linear data structure where elements are stored in nodes connected by pointers. Server: A computer program or device that provides services and resources to other programs or devices. Define each term using the exact definitions above: 1. What is a graph? 2. What is an algorithm? 3. What is an interpreter? 4. What is a linked list? 5. What is a server? 
+
+• Summarize and Quote : "Article: The Amazon rainforest produces 20% of the world’s oxygen. It is home to millions of species. The Pacific Ocean is the largest and deepest ocean on Earth. It covers more than 60 million square miles. Summarize briefly, then include 2 exact quotes from the passage." 
+
+These tasks exhibit mixed behavior, where copying is necessary but must be integrated with genera-tion. 
+
+Light or No Copy prompts (77.7% of the data) are open-ended and do not require verbatim reuse of the input. Examples include: 13 • Creative Writing : Describe a world where dreams can be shared between people. 
+
+• Reasoning Problem : A lily pad doubles in size every day. If it takes 48 days to cover a lake, on which day is the lake half covered? 
+
+In these cases, copying is generally incidental and often undesirable. By explicitly balancing prompt types across these three regimes, CopyDiversity supports fine-grained evaluation of copy intent detection and copy-aware decoding strategies across diverse and realistic use cases. 
+
+## D Implementation Details 
+
+We use PyTorch for all experiments. Across all models, SwitchSD generates up to 10 copy-based candidate sequences per step, each with a maximum length of 20 tokens, which are verified in parallel by the target model. All experiments were conducted on NVIDIA H100 GPUs, with individual runs ranging from 45 minutes to 17 hours, depending on model size and dataset. 
+
+## E Discussion: What Does the Probe Learn? 
+
+Learning copy intent is inherently challenging, since there is no direct ground-truth annotation for this behavior. We therefore train the probe with weak supervision: automatically identified long repetitions are used as proxy labels for copy-oriented behavior. A natural concern is that the resulting probe may learn surface-level repetition rather than the copy-intent signal it is designed to capture. Our design addresses this concern in three ways: 
+
+(i) Weak supervision. Repeated spans are used only as a supervisory proxy, not as the definition of copy intent. Long verbatim continuations provide high-precision examples of situations in which copying is likely to be useful. 
+
+(ii) Representational Bottleneck. While verbatim spans provide the supervisory labels, the probe’s input is strictly constrained to the hidden representation of a single token at a single timestep. This creates a significant information bottleneck: the probe does not have access to the speculative buffer or the context window as a sequence. Consequently, the probe cannot be performing a post-hoc string match. To achieve high precision, it must isolate a specialized "copy-intent" signature distilled within the latent space, a signal that indicates the model has transitioned its internal logic from novel synthesis to contextual reproduction. 
+
+(iii) Data quality. The training data is constructed from diverse, model-generated completions with varying degrees of copying, rather than from arbitrary repeated tokens. This exposes the probe to realistic decoding contexts and encourages generalization beyond simple string matching. 
+
+(iv) Regularized representation. The probe is a lightweight classifier trained on frozen LLM hidden representations, rather than a module that directly observes the full context, token embeddings, or KV cache. Finally, the empirical results support this interpretation. Compared with heuristic copy methods such as CopySpec and BanditSpec, SwitchSD invokes copying less frequently but achieves longer accepted copy spans and higher throughput. Moreover, when conditioning on positions where a copy candidate exists, probe-active states yield substantially longer accepted spans, whereas probe-inactive states mostly lead to short or zero-token acceptances. Thus, the probe is best understood as learning copy-readiness: an internal signal that predicts when a surface repetition is likely to match the target model’s continuation. 14
