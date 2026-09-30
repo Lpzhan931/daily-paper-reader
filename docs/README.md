@@ -6,71 +6,57 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-09-29
-- 运行时间：2026-09-29 23:30:27 UTC
+- 最新运行日期：2026-09-30
+- 运行时间：2026-09-30 23:26:14 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：6
-- 速读区：11
+- 本次总论文数：11
+- 精读区：5
+- 速读区：6
 
 ### 今日简报（AI）
-今日精读 6 篇、速读 11 篇共 17 篇，聚焦推测解码的并行草稿与推理加速。最值得看的是《When Parallel Drafter Meets Parallel Speculative Decoding》和《Mentored Decoding》，均为 9.0 分。普通读者可优先从这两篇入手，再按需浏览树回放与自推测方向。
-- 详情：[/202609/29/README](/202609/29/README)
+今日扫读11篇、精读5篇，主线集中在推理加速与解码优化。
+
+最值得看的是精读中的《Mentored Decoding》（9.0/10）和《NebulaSD》（8.0/10），两篇都指向更快的推测解码；速读里的Flash-dLLM、Distance-KV、SPIDER也围绕KV缓存、长上下文与多模态剪枝提效。
+
+普通读者可先从“推测解码如何不掉精度地提速”入手，再按需关注长上下文和显存优化方向。
+- 详情：[/202609/30/README](/202609/30/README)
 
 ### 精读区论文标签
-1. [When Parallel Drafter Meets Parallel Speculative Decoding](/202609/29/2609.27396v1-when-parallel-drafter-meets-parallel-speculative-decoding)  
-   标签：评分：9.0/10、query:vlm-spec
-   evidence：并行投机解码，保证草稿与验证重叠
-2. [Mentored Decoding: Faster Inference meets Boosting](/202609/29/2609.30474v1-mentored-decoding-faster-inference-meets-boosting)  
+1. [Mentored Decoding: Faster Inference meets Boosting](/202609/30/2609.30474v1-mentored-decoding-faster-inference-meets-boosting)  
    标签：评分：9.0/10、query:llm-sd
-   evidence：宽松验证的有损投机解码
-3. [Resource-Efficient Speculative Decoding for Long-Context LLM Serving](/202609/29/2609.33184v1-resource-efficient-speculative-decoding-for-long-context-llm-serving)  
-   标签：评分：9.0/10、query:llm
-   evidence：结合KV缓存卸载的长上下文LLM投机解码服务
-4. [H-Spec: Parallel Speculative Decoding Without a Drafter-Side KV Cache](/202609/29/2609.24197v1-h-spec-parallel-speculative-decoding-without-a-drafter-side-kv-cache)  
+   evidence：有损投机解码与宽松接受准则，并用Boosting理论证明
+2. [NebulaSD: Many-for-Many Speculative Decoding](/202609/30/2609.29364v1-nebulasd-many-for-many-speculative-decoding)  
    标签：评分：8.0/10、query:llm
-   evidence：无需草稿端KV缓存的并行投机解码加速LLM推理
-5. [Adapting Tree-Structured Speculative Decoding to DeepSeek-V4 for Efficient Inference](/202609/29/2609.24698v1-adapting-tree-structured-speculative-decoding-to-deepseek-v4-for-efficient-inference)  
+   evidence：分离草稿与目标资源池的投机解码系统
+3. [Whisper-Flash: Acoustically Conditioned Parallel Drafting for Faster Whisper Decoding](/202609/30/2609.32869v1-whisper-flash-acoustically-conditioned-parallel-drafting-for-faster-whisper-decoding)  
    标签：评分：8.0/10、query:llm-sd
-   evidence：带分支感知因果验证的树结构投机解码
-6. [NebulaSD: Many-for-Many Speculative Decoding](/202609/29/2609.29364v1-nebulasd-many-for-many-speculative-decoding)  
+   evidence：起草加验证的投机解码加速解码
+4. [Resource-Efficient Speculative Decoding for Long-Context LLM Serving](/202609/30/2609.33184v1-resource-efficient-speculative-decoding-for-long-context-llm-serving)  
    标签：评分：8.0/10、query:llm
-   evidence：面向LLM加速的投机解码系统
+   evidence：结合KV卸载的投机解码用于LLM服务
+5. [Shallow Queries, Mature Values: Depth-Asynchronous Self-Speculation for Looped Transformers](/202609/30/2609.34538v1-shallow-queries-mature-values-depth-asynchronous-self-speculation-for-looped-transformers)  
+   标签：评分：8.0/10、query:llm
+   evidence：自投机解码加速循环Transformer推理
 
 ### 速读区论文标签
-1. [Tsubame: Tree Replay for Diffusion-Based Speculative Decoding](/202609/29/2609.33652v1-tsubame-tree-replay-for-diffusion-based-speculative-decoding)  
-   标签：评分：8.0/10、query:vlm-spec
-   evidence：投机解码的验证策略与树重放
-2. [Shallow Queries, Mature Values: Depth-Asynchronous Self-Speculation for Looped Transformers](/202609/29/2609.34538v1-shallow-queries-mature-values-depth-asynchronous-self-speculation-for-looped-transformers)  
-   标签：评分：8.0/10、query:llm
-   evidence：草稿与验证深度解耦的自投机解码以加速LLM推理
-3. [SPECTRA: Adaptive Execution of Speculative Decoding on a Runtime-Reconfigurable Tiled Architecture](/202609/29/2609.24847v1-spectra-adaptive-execution-of-speculative-decoding-on-a-runtime-reconfigurable-tiled-architecture)  
+1. [Flash-dLLM: IO-Aware KV Caching and Parallel Decoding for Fast, Memory-Efficient Diffusion LLMs](/202609/30/2609.26796v1-flash-dllm-io-aware-kv-caching-and-parallel-decoding-for-fast-memory-efficient-diffusion-llms)  
    标签：评分：7.0/10、query:llm
-   evidence：面向投机解码验证的可重构硬件架构
-4. [Flash-dLLM: IO-Aware KV Caching and Parallel Decoding for Fast, Memory-Efficient Diffusion LLMs](/202609/29/2609.26796v1-flash-dllm-io-aware-kv-caching-and-parallel-decoding-for-fast-memory-efficient-diffusion-llms)  
+   evidence：面向LLM推理加速的KV缓存与并行解码
+2. [Distance-KV: Exploiting Relative Distance for Efficient Long-Context Inference](/202609/30/2609.32663v1-distance-kv-exploiting-relative-distance-for-efficient-long-context-inference)  
    标签：评分：7.0/10、query:llm
-   evidence：IO感知KV缓存与并行解码加速LLM推理
-5. [Whisper-Flash: Acoustically Conditioned Parallel Drafting for Faster Whisper Decoding](/202609/29/2609.32869v1-whisper-flash-acoustically-conditioned-parallel-drafting-for-faster-whisper-decoding)  
-   标签：评分：7.0/10、query:llm
-   evidence：投机解码加速解码
-6. [P4Q: Co-designing Token Pruning and Quantization for Vision-Language Model Acceleration](/202609/29/2609.34867v1-p4q-co-designing-token-pruning-and-quantization-for-vision-language-model-acceleration)  
+   evidence：面向长上下文LLM高效推理的KV缓存压缩
+3. [SPIDER: Multi-Layer Semantic Token Pruning and Adaptive Sub-Layer Skipping in Multimodal Large Language Models](/202609/30/2609.34977v1-spider-multi-layer-semantic-token-pruning-and-adaptive-sub-layer-skipping-in-multimodal-large-language-models)  
    标签：评分：7.0/10、query:vlm-spec
-   evidence：剪枝与量化协同的VLM推理加速
-7. [Beneath the Tokens: A Performance Engineering Study of Multi-Token Prediction in GPU-Accelerated LLM Inference](/202609/29/2609.35188v1-beneath-the-tokens-a-performance-engineering-study-of-multi-token-prediction-in-gpu-accelerated-llm-inference)  
+   evidence：通过token剪枝与子层跳过多模态大模型推理加速
+4. [Beneath the Tokens: A Performance Engineering Study of Multi-Token Prediction in GPU-Accelerated LLM Inference](/202609/30/2609.35188v1-beneath-the-tokens-a-performance-engineering-study-of-multi-token-prediction-in-gpu-accelerated-llm-inference)  
    标签：评分：7.0/10、query:llm
-   evidence：面向GPU加速LLM推理的多令牌预测加速
-8. [SCOPD: Sparse-Context On-Policy Self-Distillation for Efficient Vision-Language Models](/202609/29/2609.34044v1-scopd-sparse-context-on-policy-self-distillation-for-efficient-vision-language-models)  
+   evidence：多令牌预测加速LLM推理吞吐
+5. [NavJev: Efficient Vision-Language Navigation via Action-Centric Visual Compression and Discriminative Action-Semantic Memory](/202609/30/2609.34969v1-navjev-efficient-vision-language-navigation-via-action-centric-visual-compression-and-discriminative-action-semantic-memory)  
    标签：评分：6.0/10、query:vlm-spec
-   evidence：稀疏上下文自蒸馏提升VLM推理效率
-9. [Text-Vision Synergistic Token Caching: A Training-Free Framework for Efficient Vision-Language-Action Inference](/202609/29/2609.34319v1-text-vision-synergistic-token-caching-a-training-free-framework-for-efficient-vision-language-action-inference)  
+   evidence：高效视觉语言导航降低多模态推理延迟
+6. [Just MLPs: Efficient Visual State Reconstruction for Multimodal Language Models](/202609/30/2609.34972v1-just-mlps-efficient-visual-state-reconstruction-for-multimodal-language-models)  
    标签：评分：6.0/10、query:vlm-spec
-   evidence：面向视觉-语言-动作高效推理的免训练令牌缓存
-10. [ACPruner: Visual Token Pruning as Biased Attention Coverage Maximization in LVLMs](/202609/29/2609.34558v1-acpruner-visual-token-pruning-as-biased-attention-coverage-maximization-in-lvlms)  
-   标签：评分：6.0/10、query:vlm-spec
-   evidence：免训练视觉Token剪枝加速LVLM推理
-11. [When Text Matters: Design Principles for Visual Token Pruning in Vision-Language Model](/202609/29/2609.34861v1-when-text-matters-design-principles-for-visual-token-pruning-in-vision-language-model)  
-   标签：评分：6.0/10、query:vlm-spec
-   evidence：视觉词元剪枝降低VLM推理成本
+   evidence：降低多模态大模型视觉token计算开销
 
 
 <div class="dpr-home-promo-card">
