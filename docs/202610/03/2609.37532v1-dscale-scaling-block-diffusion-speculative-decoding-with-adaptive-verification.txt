@@ -1,0 +1,981 @@
+Title: DScale: Scaling Block-Diffusion Speculative Decoding with Adaptive Verification
+
+URL Source: https://arxiv.org/pdf/2609.37532v1
+
+Published Time: Wed, 30 Sep 2026 01:52:26 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+> IEEE TRANSACTIONS ON COMPUTERS 1
+
+# DScale: Scaling Block-Diffusion Speculative Decoding with Adaptive Verification 
+
+Rongjian Chen , Minxian Xu , Senior Member, IEEE ,Zhengxin Fang , Graduate Student Member, IEEE ,Kejiang Ye , Senior Member, IEEE , and Chengzhong Xu , Fellow, IEEE 
+
+Abstract —Growing large language model applications demand efficient inference. At high concurrency, block-diffusion specu-lative decoding suffers from verification padding, rejected can-didates, and incompatibility between variable prefixes and fixed-shape graphs. Uniform truncation sacrifices acceptable tokens. We present DScale, preserving drafter architecture, weights, and full draft length. A separate 112K-parameter predictor requires neither confidence calibration nor hardware speed-curve preparation. Path-aware tiles reduce padding. Dynamic verify-length (DVL) allocation packs scored prefixes into half the native verification capacity. Fixed-address workspaces propagate changing boundaries through verification and acceptance while reusing captured graphs. On A100-40GB with tensor parallelism 1, Qwen3-8B and Qwen3-4B cover four datasets and concurrency 8–32, reusing each target’s frozen predictor. Geometric-mean throughput gains across these configurations are respectively 43.9% and 48.8% over DFlash, 22.2% and 37.7% over DSpark, and 24.4% and 32.0% over Domino, with lower request latency. Cumulative ablations show that adding the three mechanisms successively increases geometric-mean throughput, while budget adjustment improves accepted-token retention. GPU profiling shows that complete decode-step time on GSM8K decreases by 30.8–52.5% relative to DFlash. 
+
+Index Terms —Block-diffusion speculative decoding, DFlash, large language model (LLM) serving, verify-side optimization 
+
+I. I NTRODUCTION 
+
+# SERVING large language models (LLMs) under concurrent demand requires low latency and high throughput [1], [2]. However, LLMs commonly use autoregressive decoding, executing one full model forward per token. This sequential execution limits generation speed. 
+
+Speculative decoding uses a small draft model to generate candidates that the larger target model verifies in parallel [3], [4]. Accepting the longest prefix consistent with the target dis-tribution produces multiple tokens per forward when drafting is accurate. EAGLE and Medusa improve candidate quality through target-feature reuse and tree-structured drafting [5]– [8]. Using block diffusion [9], DFlash conditions a lightweight drafter on fused hidden features from multiple target layers, 
+
+R. Chen, M. Xu, and K. Ye are with the Shenzhen Institutes of Advanced Technology, Chinese Academy of Sciences, Shenzhen 518052, China, and also with the University of Chinese Academy of Sciences, Beijing 100049, China (e-mail {rj.chen2, mx.xu, kj.ye}@siat.ac.cn). Z. Fang is with Victoria University of Wellington, Wellington, New Zealand. C. Xu is with the Institute of AI and Brain Sciences, Department of Computer Science, University of Macau, Macau 999078, China (e-mail czxu@um.edu.mo). Corresponding author: Minxian Xu (e-mail mx.xu@siat.ac.cn). Supplementary material accompanies this submission. Users  DFlash 
+
+Verify 
+
+One request, one head 
+
+16 live 
+
+112 masked 
+
+R1 
+
+R2 
+
+Rn 
+
+... 
+
+Next step 
+
+Draft candidates 
+
+N × 16 slots 
+
+R1 
+
+R2 
+
+Rn 
+
+1 Tile routing gap 
+
+Verify graph 
+
+2 Unequal acceptance 
+
+R1  3
+
+R2  11 
+
+Rn  14 
+
+Acceptance and update 
+
+3 Native graph layout 
+
+Prefill 
+
+Same 
+
+B=128 
+
+Target forward 
+
+R1  R2 
+
+Naive fixed slice 
+
+This step  24 slots 
+
+R1:4  R2:12  R3:8 
+
+Next step  24 slots 
+
+R1:10  R2:8  R3:6 
+
+Keep 16 per request 
+
+R1 
+
+R2 
+
+R3 
+
+24 selected, 48 slots 
+
+Reads R1  Misses R2 
+
+Or CPU re-slicing 
+
+CPU  Re-slice 
+
+GPU  Lengths  Wait  Verify 
+
+R3 
+
+R4 
+
+R5 
+
+R6 
+
+Fig. 1. Three connected challenges in DFlash serving. (1) A shared prefill and verify tile leaves 16 live and 112 masked rows per request and head. (2) Equal 16-slot windows accommodate unequal accepted prefixes. (3) Changed boundaries make old slices read R1 and miss R2. Equal-width padding restores 16 slots per request, while CPU re-slicing delays verification. The dashed arrow links Challenges 2 and 3. Token lengths are illustrative. 
+
+injected into each draft layer’s KV cache. Given this context and the last verified token, it generates a complete block in one parallel forward pass for target verification [10]. At low concurrency, spare GPU capacity can absorb extra ver-ification work. However, target verification dominates GPU-kernel time in our Qwen3-8B profile at concurrency 16, detailed in Section II. DSpark combines a purpose-trained semi-autoregressive drafter with confidence calibration and hardware-profiled scheduling [11]. Target verification replays the smallest pre-captured token-capacity bucket covering the batch’s selected tokens. Reducing verification work must still preserve accepted tokens. Here, accepted tokens are newly drafted tokens retained by the target’s acceptance rule as a contiguous prefix, excluding the known anchor. Fig. 1 follows DFlash from request arrival through drafting, verification, and acceptance. We retain the selected DFlash drafters’ training-time block configuration, reserving W =16 
+
+target-verification slots per request for one known anchor and 15 new candidates. Equal widths but unequal accepted prefixes expose three connected challenges. 
+
+Challenge 1: Workload-shaped tiles. A tile groups query rows for attention. Prefill processes long input sequences, arXiv:2609.37532v1 [cs.DC] 29 Sep 2026 IEEE TRANSACTIONS ON COMPUTERS 2
+
+whereas verification processes short candidate blocks. Shar-ing their tile layout leaves most verify positions as inactive padding. 
+
+Challenge 2: Request-varying acceptance. Requests differ in how many drafted tokens they will accept, but the accepted prefix is unknown until the target verifies the candidates. A fixed width cannot match these request-level differences. 
+
+Challenge 3: Dynamic prefixes under a fixed verification-graph interface. Request-specific lengths move packed boundaries between steps. Padding them back to DFlash’s equal-width interface restores wasted work. CPU re-slicing adds a host dependency. Early-stopping methods adapt autoregressive draft length [12], [13], whereas DFlash generates a full block in one parallel forward without token-by-token stopping [10]. We study serving the same batch with reduced candidate-slot capacity per verification graph while preserving the drafter’s architecture, weights, and full draft length. The problem is to allocate this smaller capacity among request-specific candidate prefixes according to acceptance potential, preserving generation progress while carrying changing request boundaries through compact verification execution and captured-graph replay. 
+
+To address these challenges, we present DScale , a draft-training-free runtime for high-concurrency block-diffusion speculative decoding. It reuses DFlash’s drafter, retaining its architecture, weights, and full draft length, without offline confidence calibration or hardware speed-curve profiling. A 112K-parameter predictor trained once per target–drafter pair allocates prefixes within half of each verification graph’s native candidate-slot capacity. Our contributions are as follows.  
+
+> •
+
+We design path-aware tile routing to select precom-piled attention tiles for prefill and verification, removing padding beyond the verify width while preserving prefill reuse.  
+
+> •
+
+We develop dynamic verify-length (DVL) budget alloca-tion. Predictor scores guide per-request prefix selection under a halved shared budget, and flat-pack compaction preserves long useful prefixes without shortening draft generation.  
+
+> •
+
+We integrate decision and verification graphs through a fixed-shape compact workspace with dynamic request boundaries. Both graphs share prefixes and boundaries through acceptance, preserving compact execution with-out fixed-width padding or CPU re-slicing.  
+
+> •
+
+Across four datasets, two target models, and concurrency 8–32, DScale improves geometric-mean throughput by 43.9–48.8% and reduces aggregate mean E2E latency by 31.4–33.1% over DFlash. Cumulative ablations show geometric-mean throughput rising with each added mech-anism. Budget adjustment raises accepted-token retention from about 71% to over 91%. On GSM8K, GPU pro-filing shows 30.8–52.5% shorter complete decode steps than DFlash. Prediction, budget allocation, and packing together account for 3.08–4.08% of step time in GPU execution at c = 8 .II. B ACKGROUND AND MOTIVATION 
+
+DFlash starts with target prefill to establish the prompt context. At each decode step, a block-diffusion drafter uses the context and a known anchor to propose 15 candidates in one parallel forward. The anchor and candidates occupy 
+
+W =16 verification slots. One target forward evaluates the block. Acceptance retains the longest valid candidate prefix and produces a successor token at the first rejection or after all candidates pass. The successor becomes the next anchor, and drafting resumes with the updated context until the request finishes [10]. The native verification profile uses Qwen3-8B with a five-layer, approximately 1B-parameter DFlash drafter. Nsight Systems [14] profiling of native DFlash on GSM8K, A100, TP1, and concurrency 16 attributes 83.3% of summed GPU-kernel time to the target verify graph, 10.9% to the draft graph, and 5.7% to kernels outside these graphs. We collect 700 decode steps after 40 warmup steps, sum kernel durations by graph launch excluding host time, and show that verification is dominant and exposes three distinct bottlenecks requiring different remedies. 
+
+A. Verify Inherits Prefill’s Tile 
+
+As illustrated by Challenge 1 in Fig. 1, native DFlash uses the same attention tile configuration for prefill and speculative verification despite their different query lengths. Prefill can supply thousands of query rows per request, allowing a wide tile to reuse loaded KV data across rows. Verification supplies only a short candidate block. The native selector chooses a compile-time tile from hardware and head dimensions, without distinguishing these two workloads. Batch growth leaves this mismatch intact. Each computation block handles one request’s query-row tile for one head. Adding requests increases the number of blocks without filling their unused query rows. Distinct KV contexts and causal boundaries prevent requests from simply sharing a tile. In the evaluated A100 configuration, the native tile has 128 rows, whereas each verification request supplies W =16 . Thus 112 rows, or 87.5%, are masked. Masking excludes invalid rows from attention but does not compact the compiled tile or resize its intermediate arrays. DSpark’s confidence scheduler selects candidates for verifi-cation [11], but does not resize the compiled attention tile. In the shared kernel above, shorter prefixes reduce active query rows but leave vacant rows within the tile. 
+
+Opportunity. Explore path-aware attention granularity based on the different query lengths of prefill and speculative verification. Match short verification tiles to the candidate width to reduce inactive query-row positions, while retaining wide-tile KV reuse for prefill. The two paths can then use layouts suited to their respective workloads rather than share one layout. 
+
+B. Request-Level Acceptance Variability and Verification Bud-get Allocation 
+
+Verification processes even rejected candidates. Reducing candidate rows lowers general matrix multiplication (GEMM) IEEE TRANSACTIONS ON COMPUTERS 3
+
+and LM-head computation and intermediate-data traffic, but must preserve tokens that advance generation. Our fixed verification-width experiment retains full-length drafting and verifies the first 4, 6, 8, 10, 12, 14, or 16 slots per request. Each prefix includes one known root token, the anchor, followed by draft candidates. All requests use the same width without a predictor. Fig. 2 shows a mixed-dataset DFlash trace collection. Per-request progress, counting one anchor plus accepted draft tokens, has mean 6.09 and a tail reaching 16. Fig. 3 shows the width comparison on GSM8K at concurrency 8. All widths below 16 yield lower throughput than full-width verification. Width 8 reduces throughput by 15% and mean progress from 5.92 to 4.96 tokens. Width 4 further lowers progress to 3.37 tokens, whereas width 14 retains 5.83 tokens but reduces selected verification slots by only 12.5%. Although eight exceeds the mean progress, a common cutoff wastes slots on short prefixes and truncates long ones. Actual acceptance is only known after verification. Fully verifying blocks to choose their lengths defeats the saving. Fig. 4 shows that draft-side signals already distinguish acceptance potential. The mean Top1–Top2 logit gap across 15 draft positions correlates positively with full-width accepted draft length, with Spearman correlations of 0.741 on 8B and 0.722 on 4B. These signals are available before target verification, motivating request-level prefix prediction. DSpark couples acceptance estimation to drafter training. Its confidence head is jointly trained with the backbone drafter and sequential module [11]. DSpark’s hardware-aware prefix scheduler uses held-out sequential temperature scaling (STS) to calibrate confidence and a steps-per-second (SPS) curve pro-filed at engine initialization to select verification budgets. To overlap scheduling with execution, its asynchronous scheduler chooses the current total budget using confidence from two steps earlier, while ranking current candidates by their current scores [11]. Thus, current candidate ranking operates within a capacity chosen from historical estimates, which may differ from current prefix survival. In contrast, these signals come directly from the existing DFlash drafter, motivating acceptance prediction independent of drafter training. DScale trains only a separate 112K-parameter predictor on draft logits, hidden-state features, and batch context, preserving the drafter’s architecture, weights, and full draft length. This draft-training-free design adds request-level budget allocation to the existing drafter without STS calibration or SPS profiling. 
+
+Opportunity. Predict acceptance before verification from draft signals, independently of drafter training and without STS calibration or SPS profiling. Retain full-length drafting and prioritize verification slots for candidate prefixes pre-dicted to be accepted within a preset reduced shared budget. 
+
+C. Adapting Dynamic Prefixes to Fixed Verification Graphs 
+
+Shorter logical prefixes do not automatically produce smaller graph executions. For N live requests, DFlash’s na-tive interface reserves N × 16 candidate slots. Padding each shortened prefix back to its reserved width leaves GEMM 1 3 5 7 9 11 13 15 Progress tokens per request-step (incl. anchor) 010000 20000 30000 40000 Request-step count  uniform width-8 cut fits width 8 prefix truncated                            
+
+> Fig. 2. DFlash progress on 306,215 request-steps from a mixed-dataset training-split trace collection at c= 8 . Progress includes one anchor. The dashed line marks the mean, 6.09. Prefixes to the right of the width-8 boundary lose their excess tokens under uniform truncation. 46810 12 14 16 0250 500 750 1,000 1,250 1,500 1,750 2,000
+> Tokens per second
+> 46810 12 14 16 0246
+> Mean progress (tokens) Verification width (slots)
+> Fig. 3. Fixed verification widths on Qwen3-8B and GSM8K, A100, TP1, temperature 0, c= 8 , with full-length DFlash drafting and no predictor. Each width uses one run with 8 warmup and 256 measured requests. Left shows output-token throughput. Right averages periodically logged progress lengths, including the anchor. Width 16 is native DFlash. 0510 0510 15
+> Accepted draft tokens
+> Spearman ρ= 0.741
+> (a) Qwen3-8B
+> 0510
+> Spearman ρ= 0.722
+> (b) Qwen3-4B
+> Mean Top1–Top2 logit gap
+> Fig. 4. Draft logit gaps and acceptance on 31,814 Qwen3-8B and 31,188 Qwen3-4B held-out request-steps. Each point gives mean gap and accepted draft tokens in one of ten equal-count bins. Acceptance excludes the anchor. Spearman correlations use all request-steps.
+
+and projection dimensions unchanged. Realizing the savings from Challenge 2 therefore requires reducing the candidate-row capacity processed by the graph, not merely marking shorter request lengths. The observed mean progress of 6.09 motivates testing 8N
+
+slots instead of 16 N , halving GEMM and projection input rows at the same request count. The distribution’s long tail argues against imposing eight slots on every request. This calls for sharing the smaller capacity among unequal prefixes while retaining full-length drafting. Here, halving concerns each IEEE TRANSACTIONS ON COMPUTERS 4
+
+verification graph’s candidate slots, not its request capacity or the draft length. Smaller capacity still leaves a layout problem. In Chal-lenge 3 of Fig. 1, lengths change from [4 , 12 , 8] to [10 , 8, 6] .Both use 24 slots, but R2’s start moves from 4 to 10. Its old slice would mix requests, while equal-width padding expands 24 rows back to 48. The changed boundaries must consistently identify verification inputs, their sequence positions and KV references, and the outputs used for acceptance. CPU re-slicing must read back GPU-computed lengths, re-construct request boundaries, and prepare the next verification inputs before submission. Verification therefore waits on host preparation, placing CPU work on the GPU critical path; if other computation cannot hide it, bubbles appear between successive GPU stages. Compact verification must reduce candidate rows without per-step host synchronization for slice reconstruction. DSpark packs unequal prefixes and selects the smallest token bucket covering their scheduled total from graphs cap-tured at initialization [11]. For example, reducing a 16-request batch from 111 to 97 verification rows still selects the 112-slot graph. The 96-slot graph becomes usable only when the total falls to 96 or below. Thus, fine-grained prefix pruning produces only bucket-grained capacity reductions. Within a bucket, fewer admitted candidates do not shrink the captured shape. Optional bucket filling spends the spare capacity on additional candidates instead of reducing it. 
+
+Opportunity. Let unequal-length prefixes share halved verification capacity while retaining full-length drafting. Keep request boundaries consistent across verification and acceptance as lengths change, and reuse captured graphs without per-step CPU length readback or slice reconstruc-tion. 
+
+III. S YSTEM DESIGN AND IMPLEMENTATION 
+
+A. Overview 
+
+We implement DScale on top of SGLang v0.5.14. For a fixed workload R and generation settings, let π assign verifica-tion lengths to active requests at each step. OutputTokens r (π)
+
+counts the output tokens returned for measured request r,and ElapsedTime( π) is the measurement window’s wall-clock duration. The system objective is 
+
+max 
+
+> π
+
+X
+
+> r∈R
+
+OutputTokens r (π)ElapsedTime( π) . (1) SGLang forms the active batch, and π allocates verification slots within it. Fig. 5 shows DScale’s request flow. The Request scheduler batches prefilled arrivals with unfinished requests. DFlash drafter generates full-length candidate blocks, and Input stag-ing prepares replay inputs. Within the DVL allocator, the Acceptance predictor estimates prefix lengths, the Budget allo-cator redistributes the shared budget, and the Flat-buffer packer writes selected prefixes into the Fixed-address workspace (Section III-C). Here KV refs are cache locations for this step’s anchor and draft candidates. The Target verifier consumes packed inputs through its Path-aware tile router, retaining separate prefill specialization (Section III-B). Target inference evaluates candidates, the Prefix verifier determines accepted prefixes, and the Output builder prepares output tokens. State commit updates token and cache state, returning unfinished requests to the scheduler and completed results to users. Graph integration connects the two replays through the shared workspace (Section III-D). 
+
+B. Path-Aware Tile Routing 
+
+To address Challenge 1 in Section II-A, DScale selects tiles by path. Maximum per-request query length ℓmax ≤ W = 16 
+
+selects tile height B = 16 for verification. Prefill and longer queries retain hardware-selected Bhw = 128 here for reuse. For Nrun requests and H heads, the runtime selects matching warps and grid = ( Nrun , H, ⌈ℓmax /B ⌉). Each computation block handles one request’s query tile for one head. Bucketed replay sets Nrun = Nbs .For a request with query length ℓ > 0, tile height B gives the following query-row capacity and inactive-row fraction 
+
+rows( ℓ, B ) = B
+
+ ℓB
+
+
+
+, padding( ℓ, B ) = 1 − ℓ
+
+rows( ℓ, B ) .
+
+(2) With ℓ = 16 , B = 16 fits the block. Larger tiles add inactive rows. Smaller tiles remove no further padding and split key-value reuse across blocks. Section IV-D evaluates this trade-off between padding and reuse. Tile routing removes padding beyond the maximum verify width. DVL separately packs M = N × 8 verification rows for GEMM and the LM-head (Section III-C). 
+
+C. DVL Budget Allocation 
+
+To address Challenge 2 in Section II-B, DVL uses draft signals available before verification to predict acceptance and allocate unequal prefixes under a halved shared budget, retaining full-length drafting. For live count N , request-bucket capacity Nbs , and block width W = 16 including the anchor, the captured capacity and active budget are 
+
+Mbs = W N bs 
+
+2 , Mlive = W N 
+
+2 ,
+
+> N
+
+X
+
+> i=1
+
+ki = Mlive .
+
+(3) Lengths ki ∈ {1, . . . , W } can span the full block, with sentinels at the bucket tail. Tile selection uses W = 16 .
+
+Acceptance predictor. Each request combines signals from 15 new draft positions and batch context. Each position contributes the highest logit, its 15 gaps to ranks 2–16, the top token’s log-probability, and distribution entropy. These 
+
+1 + 15 + 1 + 1 = 18 preference and uncertainty values give 
+
+15 × 18 = 270 confidence features in draft order. Fixed matrices project each hidden-state vector to 64 values and each mean-centered vocabulary-logit vector to 32. Con-catenating positions gives 15 × 64 = 960 hidden-state and 
+
+15 × 32 = 480 logit features. The 25-value batchContext i
+
+uses live count N in its first entry, an initial-state flag of IEEE TRANSACTIONS ON COMPUTERS 5DScale 
+
+Graph integration  runtime boundary 
+
+Request arrivals 
+
+> R1
+> R2
+> R3
+
+Request 
+
+scheduler  DFlash draft 
+
+> Active batch
+
+Prefill path 
+
+Input staging 
+
+> Draft outputs
+
+DVL allocator 
+
+> Acceptance predictor
+> Budget allocator
+> Flat-buffer packer
+> Decision graph replay
+
+Fixed-address workspace 
+
+> Verification graph replay
+
+Target verifier 
+
+Path-aware tile router  
+
+> Prefill tile Verify tile
+> Shared specialization
+> Packed
+> inputs
+
+State commit     
+
+> Unfinished requests
+> Done
+> Dashed: captured graphs
+> lengths offsets tokens positions KV refs
+> Target inference
+> Prefix verifier
+> Output builder R4
+> Rn
+> Next step
+> Users
+
+Fig. 5. DScale request flow and module organization. Dashed boxes mark captured graphs, excluding input staging and state commit. The dashed prefill branch shares tile specialization. Lower and right paths return unfinished requests to the scheduler and completed results to users, respectively. 
+
+1 in its fourth, and zeros elsewhere. Appending it gives 
+
+270 + 960 + 480 + 25 = 1735 features per request 
+
+features i = Concat(confidence i, hiddenProj i,
+
+logitProj i, batchContext i) ∈ R1735 . (4) Before verification, a 1735 –64 –15 multilayer perceptron (MLP) with ReLU produces one output per new draft position 
+
+predLogits i = Predictor(features i) ∈ RW −1. (5) Sigmoid σ gives acceptance scores, with q0 = 1 for the known anchor. Acceptance requires accepted predecessors. Cumulative minima therefore enforce nonincreasing prefix scores 
+
+q0 = 1 ,qj = min  qj−1, σ (predLogits j ), j = 1 , . . . , W −1. (6) Summing request i’s 15 prefix scores estimates accepted draft count ˆℓi. Rounding and clipping to [1 , W ] initializes heuristic slot count k(0)  
+
+> i
+
+, including the anchor 
+
+ˆℓi = 
+
+> W−1
+
+X
+
+> j=1
+
+qi,j ,k(0)  
+
+> i
+
+= min 
+
+n
+
+W, max 
+
+n
+
+1,
+
+jˆℓi + 12
+
+koo 
+
+.
+
+(7) Thus ˆℓi = 6 .2 initializes one anchor and five new candidates. The Budget allocator adjusts this seed using Q = ( qi,j ) and the shared budget in Fig. 6. Position j is labeled 1 if full-width verification accepts at least j new tokens. Training minimizes mean binary cross-entropy plus 0.02 times mean squared error between the raw 
+
+Algorithm 1 DVL allocation and flat-pack 
+
+Require: features , tokens , positions , KV refs 
+
+1: 1 ≤ N ≤ Nbs , W = 16 , M live = 8 N, M bs = 8 Nbs 
+
+Ensure: buffer bs ; PNi=1 ki = Mlive 
+
+2: predLogits ← Predictor(features) 
+
+3: Q ← [1, CumMin j (σ(predLogits))] 
+
+4: k(0)  
+
+> i
+
+← min {W, max {1, ⌊PW −1 
+
+> j=1
+
+qi,j + 12 ⌋}} 
+
+5: k1: N ← k(0) ; ∆ ← Mlive − PNi=1 ki
+
+6: while ∆ > 0 do 
+
+7: i∗ ← arg max 1≤i≤N, k i<W qi,k i
+
+8: (ki∗ , ∆) ← (ki∗ + 1 , ∆ − 1) 
+
+9: end while 
+
+10: while ∆ < 0 do 
+
+11: i∗ ← arg min 1≤i≤N, k i>1 qi,k i−1
+
+12: (ki∗ , ∆) ← (ki∗ − 1, ∆ + 1) 
+
+13: end while 
+
+14: offset 1: N +1 ← (0 , cumsum( k1: N )) 
+
+15: for all (i, j, field) : 1 ≤ i ≤ N, 0 ≤ j < k i do 
+
+16: s ← offset i + j
+
+17: buffer bs .field[ s] ← field i[j]
+
+18: end for 
+
+19: (ki, offset i+1 ) ← (0 , M live ), ∀ N < i ≤ Nbs 
+
+20: buffer bs [s] ← (0 , 0, KV refs 1[0]) , ∀ Mlive ≤ s < M bs 
+
+21: return buffer bs 
+
+sigmoid sum and accepted draft count, before monotonicity enforcement. The supplement gives reproduction details. 
+
+Budget allocator. The prefix-score objective for the sched-IEEE TRANSACTIONS ON COMPUTERS 6
+
+uler’s N requests is 
+
+max 
+
+> {ki}
+> N
+
+X
+
+> i=1
+> ki−1
+
+X
+
+> j=0
+
+qi,j s.t. 
+
+> N
+
+X
+
+> i=1
+
+ki = Mlive , 1 ≤ ki ≤ W. (8) DVL starts at ki = k(0)  
+
+> i
+
+with ∆ = Mlive − P 
+
+> i
+
+ki. Next-slot gain qi,k i and last-slot loss qi,k i−1 determine the request to adjust 
+
+i∗ =
+
+
+
+arg max   
+
+> i:ki<W
+
+qi,k i , ∆ > 0,
+
+arg min   
+
+> i:ki>1
+
+qi,k i−1, ∆ < 0. (9) The adjustment loop executes in one GPU computation block within the decision graph, without host round trips or inter-block synchronization. 
+
+Proposition 1: For integer seeds 1 ≤ k(0)  
+
+> i
+
+≤ W , integer budget N ≤ Mlive ≤ N W , nonincreasing scores, and ∆0 =
+
+Mlive − P 
+
+> i
+
+k(0)  
+
+> i
+
+, Algorithm 1 preserves prefixes and anchors and meets the budget in |∆0| updates. It maximizes Eq. (8) over integer lengths subject additionally to ki ≥ k(0)  
+
+> i
+
+for every 
+
+i if ∆0 > 0, or ki ≤ k(0)  
+
+> i
+
+if ∆0 < 0. Zero gap retains the seed. The proof is provided in the supplementary material. Algorithm 1’s k and offset reside in buffer bs , Fig. 5’s Fixed-address workspace. KV refs identify candidate cache locations. Lines 2–4 predict logits, apply sigmoid and cu-mulative minimum, then round draft-only score sums into initial lengths. Line 5 sets the budget gap ∆. Lines 6–9 grow the highest-scoring next slot. Lines 10–13 remove the lowest-scoring tail. Both preserve anchored prefixes and stop at ∆ = 0 .Line 14 computes offsets. Lines 15–18 pack token IDs, positions, and cache references with identical row mappings. 
+
+For all permits independent parallel GPU iterations. Lines 19– 20 zero inactive lengths, set their offsets to Mlive , and initialize tail placeholders. Line 21 returns the buffer with 8N live slots. 
+
+Flat-buffer packer. Allocated prefixes of lengths ki occupy 
+
+buffer bs of capacity Mbs , using prefix-sum offsets 
+
+offset i = X
+
+> j<i
+
+kj (10) The packer applies this mapping to each field in tokens, positions, and cache references 
+
+buffer bs .field[offset i + j] = field i[j], 0 ≤ j < k i. (11) Each attention block handles one request and head, masking rows beyond ki. Acceptance reuses the offsets (Section III-D). In Fig. 6, Initial lengths k(0) = [5 , 10 , 7, 9] total 31 against budget 32. Prefix scores denote Q. Growing R1 gives adjusted lengths k = [6 , 10 , 7, 9] , offsets [0 , 6, 16 , 23] , and end bound-ary 32. R2’s dashed tail illustrates alternative shrinkage. 
+
+Complexity analysis. Given draft features, prediction costs 
+
+O(Nbs dh ) for input dimension d = 1735 and hidden dimen-sion h = 64 . Rounding costs O(Nbs W ). Packing scans re-quest boundaries for each slot, costing O(Mbs Nbs ), including 
+
+O(Mbs ) row writes and tail initialization. At most O(N W )
+
+adjustments each scan O(Nbs W ) scores, yielding 
+
+Work DVL = O(Nbs dh + N N bs W 2 + Mbs Nbs ). (12) DVL allocator         
+
+> Acceptance
+> predictor
+> Budget
+> allocator
+> Flat-buffer packer
+> Draft
+> signals
+> R1
+> R2
+> R3
+> R4
+> Initial
+> lengths
+> Budget
+> R1
+> R2
+> R3
+> R4
+> grow
+> shrink
+> lengths
+> Candidates R1
+> R2
+> R3
+> R4
+> R1 R2 R3 R4
+> offsets 0616 23
+> Packed inputs
+> Under budget: max next gain
+> Over budget: min tail loss
+> Prefix
+> scores
+> Fig. 6. DVL allocator. The predictor supplies initial lengths and prefix scores to the Budget allocator. The Flat-buffer packer stores prefixes and offsets. Short strips select from full draft blocks. Grow and shrink are alternative budget conditions. Colors identify requests.
+
+For W = 16 , the adjustment count is |8N − P 
+
+> i
+
+k(0)  
+
+> i
+
+| ≤ 7N .Each batch-score scan costs O(Nbs ), giving O(N N bs ) adjust-ment work. Equation (12) bounds aggregate GPU-thread work, not parallel elapsed time. On GSM8K at c = 8 , combined GPU execution of the Acceptance predictor, Budget allocator, and Flat-buffer packer accounts for 3.08% of DScale’s complete decode-step time on Qwen3-8B and 4.08% on Qwen3-4B, as measured in Fig. 11(c). 
+
+D. Graph Integration for Ragged Decisions 
+
+To address Challenge 3 in Section II-C, a fixed-address workspace carries changing boundaries through packing, ver-ification, and acceptance. Each workspace tensor array bs 
+
+retains its address and shape across steps 
+
+addr(array (t+1) bs ) = addr(array (t)bs ),
+
+shape(array (t+1) bs ) = shape(array (t)bs ). (13) After full-length drafting, Input staging selects from finite captured capacities B
+
+Nbs = min {b ∈ B | b ≥ N }. (14) Inactive lengths are zero. Including tail slots excluded from ac-ceptance, capacity remains half that of DFlash’s same request bucket 
+
+Mlive + 8( Nbs − N ) = 8 Nbs = 16 Nbs 
+
+2 . (15) For greedy decoding, Algorithm 2, lines 3–7, allocates workspaces and captures Fig. 5’s two pipelines. Features constructs predictor inputs, and DVL invokes Algorithm 1. Target, Accept, and Output denote tile-routed Target inference, the Prefix verifier, and the Output builder. Lines 9–11 perform Input staging and decision replay. The request state supplies context lengths ctxLen , request IDs reqID , and cache map-pings cacheMap . Line 12 orders GPU reads after decision and prior cache writes. IEEE TRANSACTIONS ON COMPUTERS 7
+
+Algorithm 2 Fixed-address graph capture and replay 
+
+Require: B, requests , draft , requestState  
+
+> 1:
+
+∅̸ = B ⊂ Z>0, 1 ≤ | requests | ≤ max B
+
+Ensure: Committed outputs and remaining requests  
+
+> 2:
+
+Capture once  
+
+> 3:
+
+for Nbs ∈ B do  
+
+> 4:
+
+buffer bs ← Alloc( Nbs , 8Nbs ) 
+
+> 5:
+
+Gdec bs ← Capture bs [Features → DVL]  
+
+> 6:
+
+Gverify bs ← Capture bs [Target → Accept → Output]  
+
+> 7:
+
+end for  
+
+> 8:
+
+Replay each step  
+
+> 9:
+
+N ← | requests |, Nbs ← min {b ∈ B | b ≥ N } 
+
+> 10:
+
+buffer bs .inputs ← (N, draft , requestState)  
+
+> 11:
+
+Replay( Gdec bs ) 
+
+> 12:
+
+WaitGPU( Gdec bs , KVWrite prior ) 
+
+> 13:
+
+for all 1 ≤ i ≤ Nbs do  
+
+> 14:
+
+(qStart i, qEnd i) ← (offset i, offset i + ki) 
+
+> 15:
+
+end for  
+
+> 16:
+
+for all 1 ≤ i ≤ N, 0 ≤ j < ctxLen i do  
+
+> 17:
+
+historyKV i[j] ← cacheMap[reqID i, j ] 
+
+> 18:
+
+end for  
+
+> 19:
+
+Replay( Gverify bs ) 
+
+> 20:
+
+outputs ← ReadOutputs(buffer bs ) 
+
+> 21:
+
+for all req i ∈ requests do  
+
+> 22:
+
+Append(req i, outputs i.tokens)  
+
+> 23:
+
+req i.length ← outputs i.length  
+
+> 24:
+
+req i.next ← outputs i.next  
+
+> 25:
+
+end for  
+
+> 26:
+
+requests ← { req i ∈ requests | ¬ Finished(req i)} 
+
+> 27:
+
+return requests , outputs 
+
+Lines 13–15 set qStart and qEnd from k and offset .Lines 16–18 gather ctxLen i committed-context indices from 
+
+cacheMap row reqID i into historyKV i. These views reside in persistent buffer bs metadata. For all executes indepen-dent operations in parallel on the GPU. historyKV indexes unmoved context KV, while candidate KV refs identify new writes. Line 19 replays verification, acceptance, and output construction. Attention retains its grid and masks rows by 
+
+valid i(j) = 1{1 ≤ i ≤ N ∧ 0 ≤ j < k i}. (16) Valid rows read offset i + j with request-local causal masking and the supplied cache references. 
+
+Prefix verifier. Let P denote the target decoding policy’s next-token distribution conditioned on the current prefix. A deterministic top-1 draft candidate x is accepted with proba-bility P (x). At the first rejection, draw a successor from P
+
+with x removed and the remaining probabilities renormalized. If all ki −1 selected candidates pass, use the unmodified target distribution. After ai accepted candidates, row offset i + ai
+
+supplies the successor. Output the accepted candidates fol-lowed by this successor, which anchors the next step. DVL chooses lengths independently of acceptance random numbers. Section 3 of the supplementary material derives the resulting output distribution. The Output builder also materializes projected draft cache. Line 20 retrieves tokens, committed lengths, and successors. Lines 21–25 implement State commit outside capture, append-ing valid tokens under stopping rules and updating committed lengths. Lines 26–27 remove finished requests and return remaining requests and outputs. IV. E XPERIMENTAL EVALUATION AND DISCUSSION 
+
+A. Experimental Setup 
+
+Hardware and models. The main-paper benchmarks run on a single A100-40GB GPU with tensor parallelism 1 and generation temperature 0. We evaluate Qwen3-8B and Qwen3-4B [15] as target models. 
+
+Workloads. We use four math and code benchmarks.  
+
+> •
+
+GSM8K [16] covers multi-step grade-school math.  
+
+> •
+
+MATH500 [17] has 500 competition math problems.  
+
+> •
+
+HumanEval [18] tests docstring-based completion.  
+
+> •
+
+MBPP [19] tests text-to-Python programming. Each formal configuration runs 32 warmup requests fol-lowed by 512 measured requests, using fixed request manifests with deterministic prompt repetitions shared across systems. The measured manifests contain 256, 256, 164, and 255 distinct prompts for GSM8K, MATH500, HumanEval, and MBPP, respectively. Thinking is disabled, and the output cap is 2048 tokens. Token throughput is the total output tokens generated by the measured requests divided by their measure-ment window’s wall-clock duration. The separate motivation collections use the protocols specified with their figures. 
+
+Concurrency sweep. With matched seeds and prompts, we sweep c ∈ { 8, 12 , 16 , 20 , 24 , 28 , 32 }, report five-repetition me-dians, and compute aggregate throughput ratios as geometric means over dataset–concurrency cells. Here c is both the num-ber of closed-loop client workers and the server’s maximum running requests; each worker submits its next request upon completion until queue exhaustion, then outstanding requests drain, while the active decode batch can vary with scheduling. 
+
+Baselines. We compare four SGLang-based systems under the same request protocol. (i) DFlash [10] is the SGLang v0.5.14 implementation before our modifications, using block diffusion at width 16 with the default 128-row verify tile. (ii) DSpark [11] is the implementation in SGLang v0.5.16, configured with its corresponding draft model for each target. We use v0.5.16 because v0.5.14 does not include a DSpark im-plementation. (iii) Domino [20] uses its official draft configu-ration. (iv) DScale is our runtime built on the SGLang v0.5.14 DFlash implementation. DFlash and DScale use the same released DFlash draft checkpoint for each target. DSpark and Domino use their respective target-matched draft checkpoints. Tokenization, prompt formatting, stopping criteria, maximum output length, and generation temperature are held fixed. 
+
+B. Throughput Results 
+
+Overall gains. For the results in Fig. 7, taking the geometric mean of per-cell throughput ratios across all four datasets and seven concurrencies, DScale improves over DFlash, DSpark, and Domino by 43.9%, 22.2%, and 24.4%, respectively, on Qwen3-8B, and by 48.8%, 37.7%, and 32.0% on Qwen3-4B. 
+
+Concurrency scaling. Four-dataset geometric-mean gains over DFlash increase with concurrency on both models. At IEEE TRANSACTIONS ON COMPUTERS 88 12 16 20 24 28 32 1500 2000 2500 3000 3500 
+
+> Qwen3-8B Throughput (tok/s)
+
+(a) GSM8K       
+
+> 812 16 20 24 28 32 1500 2000 2500 3000 3500 4000
+
+(b) MATH500       
+
+> 812 16 20 24 28 32 1500 2000 2500 3000 3500 4000
+
+(c) HumanEval       
+
+> 812 16 20 24 28 32 1500 2000 2500 3000 3500
+
+(d) MBPP       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 2000 3000 4000 5000
+> Qwen3-4B Throughput (tok/s)
+
+(e) GSM8K       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 2000 3000 4000 5000 6000
+
+(f) MATH500       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 2000 3000 4000 5000
+
+(g) HumanEval       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 2000 3000 4000 5000
+
+(h) MBPP     
+
+> DFlash DSpark Domino DScale
+> Fig. 7. Token throughput at concurrency 8–32. Top and bottom rows show Qwen3-8B and Qwen3-4B. Columns show GSM8K, MATH500, HumanEval, and MBPP.
+
+c = 8 , gains are 23 .2% on Qwen3-8B and 24 .0% on Qwen3-4B. They reach 42 .8% and 49 .7% at c = 16 , then 59 .6% 
+
+and 62 .3% at c = 32 . Against DSpark, gains at these three concurrencies are 20 .4% , 25 .8% , and 23 .4% on Qwen3-8B, and 27 .9% , 39 .8% , and 43 .8% on Qwen3-4B. Gains over Domino also grow from 6.7% to 39 .1% on 8B and from 10 .5% 
+
+to 43 .4% on 4B between c = 8 and c = 32 .
+
+Dataset differences. For each dataset, we take the geomet-ric mean of paired throughput ratios over all seven concurren-cies from 8 to 32. In GSM8K, MATH500, HumanEval, and MBPP order, gains over DFlash are 40.0%, 44.1%, 46.5%, and 45.3% on Qwen3-8B, and 44.9%, 51.4%, 50.7%, and 48.5% on Qwen3-4B. In the same dataset order, gains over DSpark are 7.7%, 40.8%, 28.0%, and 14.8% on Qwen3-8B, and 17.4%, 60.1%, 46.7%, and 30.3% on Qwen3-4B. Gains over Domino are 1.6%, 33.9%, 34.7%, and 30.6% on Qwen3-8B, and 6.3%, 44.1%, 45.1%, and 36.6% on Qwen3-4B. 
+
+Sampling and tensor parallelism. Supplementary Figs. 5– 7 show geometric-mean gains over DFlash of 45.2% on Qwen3-8B and 45.8% on Qwen3-4B under TP1 at tempera-ture 1, and 43.9–55.8% under TP2 at temperatures 0 and 1. The same predictors thus support sampling and tensor parallelism without retraining. 
+
+C. End-to-End Latency 
+
+End-to-end (E2E) request latency is measured in millisec-onds. For mean, p95, and p99, reductions are one minus the geometric mean of DScale-to-baseline ratios of five-repetition medians across four datasets and seven concurrencies. Mean E2E latency reductions relative to DFlash, DSpark, and Domino are 31.4%, 18.4%, and 20.2% on Qwen3-8B, and 33.1%, 27.1%, and 24.7% on Qwen3-4B. The p95 and p99 reductions relative to DFlash are 30.7% and 29.3% on Qwen3-8B, and 32.9% and 31.9% on Qwen3-4B. Relative to DSpark, they are 16.8% and 13.1% on Qwen3-8B, and 26.4% and 26.8% on Qwen3-4B. Relative to Domino, they are 22.3% and 21.4% on Qwen3-8B, and 28.5% and 27.0% on Qwen3-4B. Fig. 8 shows lower cross-dataset medians for both mod-els than all three baselines at every concurrency for mean, p95, and p99. Supplementary Figs. 1–4 separate the datasets. Geometric-mean p99 reductions over seven concurrencies range from 26.1% to 34.6% relative to DFlash, covering both math and code workloads. 
+
+D. Component Ablation 
+
+The GSM8K ablation holds the runtime, target, drafter, and request set fixed, using temperature 0 and memory frac-tion 0.85. Its DFlash control disables all three optimizations and is measured separately from the main-comparison base-line. Fig. 9 adds tile routing, DVL allocation, and Graph inte-gration successively, using five-repetition medians, 32 warmup requests, and 512 measured requests. Optimized variants share the model-specific predictor and projections. IEEE TRANSACTIONS ON COMPUTERS 92000 3000 4000 5000 
+
+> Qwen3-8B Latency (ms)
+
+(a) E2E mean 
+
+> 4000 6000 8000 10000
+
+(b) E2E p95 
+
+> 4000 6000 8000 10000 12000 14000
+
+(c) E2E p99       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 1000 1500 2000 2500 3000 3500
+> Qwen3-4B Latency (ms)
+
+(d) E2E mean       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 2000 3000 4000 5000 6000 7000
+
+(e) E2E p95       
+
+> 812 16 20 24 28 32
+
+Concurrency 
+
+> 4000 6000 8000 10000
+
+(f) E2E p99     
+
+> DFlash DSpark Domino DScale
+> Fig. 8. End-to-end request latency at concurrency 8–32. Top and bottom rows show Qwen3-8B and Qwen3-4B. Columns show mean, p95, and p99. Each point is the median across four datasets of their five-repetition medians.
+
+Taking geometric means across the seven concurrencies, tile routing improves throughput over the DFlash control by 14 .7% on Qwen3-8B and 20 .8% on Qwen3-4B. Adding DVL to the tile-routed variant yields a further 11 .8% and 
+
+3.9% , respectively. Adding Graph integration to that combined variant provides another 9.8% and 15 .2% .Relative to the same DFlash control, the cumulative geometric-mean gains reach 28 .2% on 8B and 25 .5% on 4B after adding DVL, then rise to 40 .8% and 44 .6% with all three mechanisms. DVL’s gains are more pronounced at higher concurrency. The complete DScale system exceeds the DFlash control at every evaluated concurrency on both models. 
+
+Predictor quality and budget adjustment. Accepted-length regression on the prompt-disjoint holdout reaches R2 ≈
+
+0.70 on Qwen3-8B and 0.68 on Qwen3-4B. We compare accepted-token retention before and after budget adjustment on the deployed predictors’ frozen validation splits, holding logged features and histories fixed. Full-width acceptance labels are yi. For a window ki including one anchor slot, retention is P 
+
+> i
+
+min( yi, k i − 1) / P 
+
+> i
+
+yi. As shown in Fig. 10, raw predictor windows retain 71.6% of accepted tokens on Qwen3-8B and 70.5% on Qwen3-4B. Score-guided adjustment raises these to 91.3% and 91.6%, respectively. For each model, the same model-specific predictor is used before and after budget adjustment. This single-step evaluation includes both score-guided redistribution and budget expansion. Mean windows increase from 5.11 slots on 8B and 5.08 on 4B to eight on both models, with a total budget of 8N per retained-row cohort. 
+
+Current-runtime decode profile. We profile DFlash and DScale CUDA workers on GSM8K with Nsight Systems, using the TP1 protocol in Section IV-A, memory fraction 0.85, and one run per c ∈ { 8, 16 , 32 }. We average 700 step inter-vals after discarding 40. Intervals span consecutive nonempty decode-worker entries, including host gaps but excluding prefill and idle boundaries. Kernels are timed in full even when they outlast the CPU step. Fig. 11(a) and (b) support the throughput gains with 30.8–52.5% shorter intervals, using 
+
+1 − TDScale /T DFlash . Under TP2 at c = 32 , Supplementary Fig. 8 shows 50.7% and 52.8% reductions on Qwen3-8B and Qwen3-4B, supporting the two-GPU throughput gains. 
+
+Allocator kernel costs. Fig. 11(c) breaks down the c = 8 
+
+costs. The Acceptance predictor, Budget allocator, and Flat-buffer packer together account for 4.08% of step time on 4B and 3.08% on 8B. Predictor timing includes feature extraction, shared Top1 selection, and input preparation, excluding the LM-head. The fused cost covers budget adjustment, metadata, candidate assembly, and flat-pack. 
+
+E. Graph-Pool Memory 
+
+Fig. 11(d) reports graph-pool reserved memory for the eval-uated TP1 configurations with at most 32 active requests and memory fraction 0.85. After initialization, we sum allocator segment sizes across distinct nondefault graph pools, including IEEE TRANSACTIONS ON COMPUTERS 10                                 
+
+> TABLE I VERIFICATION -SIDE SERVING CAPABILITIES OF THE COMPARED EXECUTION PATHS .Method Drafter reused a
+> Per-request budget b
+> Compact variable-length verify CUDA Graph integration c
+> Extra predictor d
+> No hardware performance-curve profiling for budget scheduling e
+> DFlash [2], [10] ✓××✓×✓
+> DSpark [11] ×✓✓✓✓×
+> Domino [20] ×××✓×✓
+> DScale ✓✓✓✓✓✓✓means the property holds, and ×means it does not. The baselines follow the experimental setup in Section IV-A. aDrafter reuse means retaining the existing DFlash drafter’s architecture and weights. bPer-request budget denotes adaptive prefix-length selection before verification. cGraph integration indicates a captured execution path. dExtra predictor denotes an acceptance estimator for budget selection. DSpark integrates a confidence head trained with its drafter, whereas DScale trains a separate predictor and retains the drafter. eDSpark uses a premeasured SPS curve for budget scheduling.
+
+1500 2000 2500 3000 3500 
+
+> Throughput (tok/s)
+
+Qwen3-8B 
+
+8 12 16 20 24 28 32 
+
+Concurrency 
+
+2500 3000 4000 5000 
+
+> Throughput (tok/s)
+
+Qwen3-4B 
+
+DFlash DScale w/o DVL allocator and Graph integration DScale w/o Graph integration DScale  
+
+> Fig. 9. GSM8K cumulative ablation using five-repetition medians, succes-sively adding tile routing, DVL, and Graph integration.
+
+unused reserved space. DScale retains 832 MiB on Qwen3-8B and 724 MiB on Qwen3-4B. This is 20.2% and 11.3% below DFlash, 27.1% and 26.1% below DSpark, and 42.4% and 36.5% below Domino, respectively. V. R ELATED WORK 
+
+Speculative decoding. Medusa and EAGLE use draft trees and target features [5]–[8]. Lookahead uses Jacobi n-grams [21], LayerSkip uses early exit [22], and SpecIn-fer batches draft-tree verification [23]. DSpark and Domino combine parallel backbones with token-dependent sequential correction [11], [20]. Block diffusion generates tokens in parallel within a block [9], while DFlash emits its candidate block in one draft forward [10]. SpecDec++ and AdaEDL stop an autoregressive drafter using predicted acceptance or Qwen3-8B Qwen3-4B 020 40 60 80 100 
+
+> Accepted-token retention (%)
+
+71.6 70.5 91.3 91.6 
+
+Before adjustment After adjustment     
+
+> Fig. 10. Accepted-token retention before and after budget adjustment on 31,814 validation request-steps for Qwen3-8B and 31,188 for Qwen3-4B. Features and full-width labels are fixed. Each collection-step cohort of N
+> retained rows receives 8Nslots after adjustment.
+
+an entropy-based bound [12], [13]. Instead, DScale retains full-block drafting and allocates reduced verification-graph capacity among already-generated candidate prefixes across requests, without token-by-token draft stopping. Table I com-pares these serving capabilities. 
+
+KV cache optimization. PagedAttention reduces KV-memory fragmentation and supports cache sharing [1]. SGLang’s RadixAttention reuses common-prefix caches across requests [2]. H 2O retains heavy-hitter and recent tokens while evicting other KV entries [24]. These methods optimize stored context, while DScale reduces the candidate verification work added at each decode step. 
+
+Serving scheduling and resource adaptation. Orca com-bines iteration-level scheduling with selective batching, while Sarathi-Serve and DeepSpeed-FastGen schedule mixed prefill and decode workloads [25]–[27]. DistServe separates the two phases across GPUs, and DOPD dynamically reallocates their instances [28], [29]. TightLLM reduces offloading overhead through adaptive KV recomputation and cross-batch weight loading, whereas BrownoutServe merges experts and applies brownout for bursty MoE workloads, trading accuracy for SLO attainment [30], [31]. DScale instead preserves target computation while allocating per-request verification budgets within reusable GPU graphs. 
+
+Operator and attention optimization. FlashDecod-IEEE TRANSACTIONS ON COMPUTERS 11 8 16 32        
+
+> Concurrency
+> 025 50 75
+> Mean decode-step time (ms)
+> 26.69 39.76 72.45 18.48
+> −30.8%
+> 23.06
+> −42.0%
+> 35.37
+> −51.2%
+> (a) Qwen3-8B
+> 816 32
+> Concurrency
+> 19.51 27.99 47.83 12.36
+> −36.7%
+> 14.94
+> −46.6%
+> 22.72
+> −52.5%
+> (b) Qwen3-4B
+> 4B 8B
+> Target model
+> 0.0 0.2 0.4 0.6
+> Allocator GPU time (ms)
+> 0.479 0.025
+> 4.08%
+> 0.541 0.027
+> 3.08%
+> (c) Allocator at c = 8
+> 0800 1600
+> Reserved memory (MiB)
+> 8B 4B
+> 1042 816 1142 980 1444 1140 832 724
+> (d) Graph-pool memory
+> DFlash DScale Acceptance predictor Budget allocator + Flat-buffer packer DFlash DSpark Domino DScale
+
+Fig. 11. Decode-step time, allocator costs, and graph-pool memory under TP1. Panels a–c use GSM8K at temperature 0. Panels a and b show mean step times and reductions from DFlash. Panel c reports c = 8 allocator time in milliseconds and as a percentage of DScale step time. Overlapping component intervals count once. The Budget allocator and Flat-buffer packer are timed together. Panel d reports reserved memory in MiB, showing means and sample standard deviations over three independent process starts. 
+
+ing++Next improves inference execution through asyn-chronous softmax, shape-aware flat GEMM optimization, and activation-buffer reuse [32]. MInference assigns sparse pat-terns to attention heads and constructs input-dependent sparse indices to accelerate long-context prefill [33]. FlexPrefill adapts sparse patterns and computation budgets to each input and attention head [34]. These sparse methods select attention connections. DScale jointly adapts query-row tiles, candidate budgets, and captured-graph interfaces for short verification, preserving prefill tiles and full-length drafting. VI. C ONCLUSION 
+
+DScale combines path-aware tiles, score-guided half-capacity verification, and fixed-address graphs with dynamic request boundaries. It preserves the drafter’s architecture, weights, and full draft length, training only a small predictor without confidence calibration or hardware speed-curve prepa-ration. On A100 with TP1, two target models, four datasets, and concurrency 8–32, geometric-mean throughput improves by 43.9–48.8% over DFlash, 22.2–37.7% over DSpark, and 24.4–32.0% over Domino, with lower request latency. Ab-lations, accepted-token retention analysis, and GPU profiling quantify the three mechanisms’ gains and costs. We retain the selected DFlash drafters’ 16-slot blocks and leave other block widths for future adaptation and evaluation. ACKNOWLEDGMENT 
+
+This work is supported by the National Key R&D Pro-gram of China (No. 2026YFE0199800), National Natural Science Foundation of China under Grant 62572462, Guang-dong Science and Technology Cooperation Project (No. 2025A0505020065), Guangdong Basic and Applied Basic Research Foundation (No. 2024A1515010251), Key Research and Development and Technology Transfer Program of In-ner Mongolia Autonomous Region (2025YFHH0110) and Shenzhen Science and Technology Program under Grants JCYJ20240813155810014 and ZDYJ20251211121533004. REFERENCES [1] W. Kwon et al. , “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the 29th ACM Symposium on Operating Systems Principles , 2023, pp. 611–626. [2] L. Zheng et al. , “SGLang: Efficient execution of structured language model programs,” in Advances in Neural Information Processing Sys-tems , vol. 37, 2024, pp. 62 557–62 583. [3] Y. Leviathan, M. Kalman, and Y. Matias, “Fast inference from transform-ers via speculative decoding,” in Proceedings of the 40th International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 202. PMLR, 2023, pp. 19 274–19 286. [4] C. Chen, S. Borgeaud, G. Irving, J.-B. Lespiau, L. Sifre, and J. Jumper, “Accelerating large language model decoding with speculative sam-pling,” 2023, arXiv:2302.01318. [5] Y. Li, F. Wei, C. Zhang, and H. Zhang, “EAGLE: Speculative sampling requires rethinking feature uncertainty,” in Proceedings of the 41st International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 235. PMLR, 2024, pp. 28 935–28 948. [6] T. Cai et al. , “Medusa: Simple LLM inference acceleration framework with multiple decoding heads,” in Proceedings of the 41st International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 235. PMLR, 2024, pp. 5209–5235. [7] Y. Li, F. Wei, C. Zhang, and H. Zhang, “EAGLE-2: Faster inference of language models with dynamic draft trees,” in Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing .Association for Computational Linguistics, 2024, pp. 7421–7432. [8] Y. Li, F. Wei, C. Zhang, and H. Zhang, “EAGLE-3: Scaling up inference acceleration of large language models via training-time test,” in Advances in Neural Information Processing Systems , vol. 38, 2025, pp. 151 568–151 587. [9] M. Arriola et al. , “Block diffusion: Interpolating between autoregressive and diffusion language models,” in International Conference on Learn-ing Representations , 2025, pp. 50 726–50 753. [10] J. Chen, Y. Liang, and Z. Liu, “DFlash: Block diffusion for flash speculative decoding,” in Proceedings of the 43rd International Conference on Machine Learning , ser. Proceedings of Machine Learning Research, vol. 306. PMLR, 2026. [Online]. Available: https://z-lab.ai/projects/dflash/ [11] X. Cheng et al. , “DSpark: Confidence-scheduled speculative decoding with semi-autoregressive generation,” 2026, arXiv:2607.05147. [12] K. Huang, X. Guo, and M. Wang, “SpecDec++: Boosting speculative decoding via adaptive candidate lengths,” in Proceedings of the 2nd Conference on Language Modeling , 2025. [Online]. Available: https://openreview.net/forum?id=Y131N9fUbU [13] S. Agrawal, W. Jeon, and M. Lee, “AdaEDL: Early draft stopping for speculative decoding of large language models via an entropy-based lower bound on token acceptance probability,” in Proceedings of the 4th NeurIPS Efficient Natural Language and Speech Processing Workshop ,ser. Proceedings of Machine Learning Research, vol. 262. PMLR, IEEE TRANSACTIONS ON COMPUTERS 12 
+
+2024, pp. 355–369. [Online]. Available: https://proceedings.mlr.press/ v262/agrawal24a.html [14] NVIDIA Corporation, “NVIDIA Nsight Systems,” accessed: Sep. 10, 2026. [Online]. Available: https://developer.nvidia.com/nsight-systems [15] A. Yang et al. , “Qwen3 technical report,” 2025, arXiv:2505.09388. [16] K. Cobbe et al. , “Training verifiers to solve math word problems,” 2021, arXiv:2110.14168. [17] H. Lightman et al. , “Let’s verify step by step,” in Proceedings of the 12th International Conference on Learning Representations , 2024, pp. 39 578–39 601. [18] M. Chen et al. , “Evaluating large language models trained on code,” 2021, arXiv:2107.03374. [19] J. Austin et al. , “Program synthesis with large language models,” 2021, arXiv:2108.07732. [20] J. Huang, Y. Zhang, Q. Zhang, H. Lin, H. Xu, and L. Zhang, “Domino: Decoupling causal modeling from autoregressive drafting in speculative decoding,” in Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing , 2026. [Online]. Available: https://arxiv.org/abs/2605.29707 [21] Y. Fu, P. Bailis, I. Stoica, and H. Zhang, “Break the sequential depen-dency of LLM inference using lookahead decoding,” in Proceedings of the 41st International Conference on Machine Learning , ser. Pro-ceedings of Machine Learning Research, vol. 235. PMLR, 2024, pp. 14 060–14 079. [22] M. Elhoushi et al. , “LayerSkip: Enabling early exit inference and self-speculative decoding,” in Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,2024, pp. 12 622–12 642. [23] X. Miao et al. , “SpecInfer: Accelerating large language model serving with tree-based speculative inference and verification,” in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 , 2024, pp. 932–949. [24] Z. Zhang et al. , “H 2O: Heavy-hitter oracle for efficient generative inference of large language models,” in Advances in Neural Information Processing Systems , vol. 36, 2023, pp. 34 661–34 710. [25] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, “Orca: A distributed serving system for Transformer-Based generative models,” in Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementation , 2022, pp. 521–538. [26] A. Agrawal et al. , “Taming throughput-latency tradeoff in LLM infer-ence with Sarathi-Serve,” in Proceedings of the 18th USENIX Sympo-sium on Operating Systems Design and Implementation , 2024, pp. 117– 134. [27] C. Holmes et al. , “DeepSpeed-FastGen: High-throughput text generation for LLMs via MII and DeepSpeed-Inference,” 2024, arXiv:2401.08671. [28] Y. Zhong et al. , “DistServe: Disaggregating prefill and decoding for goodput-optimized large language model serving,” in Proceedings of the 18th USENIX Symposium on Operating Systems Design and Imple-mentation , 2024, pp. 193–210. [29] J. Liao et al. , “DOPD: A dynamic PD-disaggregation architecture for maximizing goodput in LLM inference serving,” IEEE Transactions on Services Computing , vol. 19, no. 2, pp. 1134–1147, Mar./Apr. 2026. [30] Y. Hu et al. , “TightLLM: Maximizing throughput for LLM inference via adaptive offloading policy,” IEEE Transactions on Computers , vol. 74, no. 7, pp. 2195–2209, Jul. 2025. [31] J. Hu, M. Xu, K. Ye, and C. Xu, “BrownoutServe: SLO-aware inference serving under bursty workloads for MoE-based LLMs,” IEEE Transac-tions on Computers , vol. 75, no. 4, pp. 1636–1649, Apr. 2026. [32] G. Dai et al. , “FlashDecoding++Next: High throughput LLM inference with latency and memory optimization,” IEEE Transactions on Comput-ers , vol. 74, no. 10, pp. 3263–3276, Oct. 2025. [33] H. Jiang et al. , “MInference 1.0: Accelerating pre-filling for long-context LLMs via dynamic sparse attention,” in Advances in Neural Information Processing Systems , vol. 37, 2024, pp. 52 481–52 515. [Online]. Available: https://proceedings.neurips.cc/paper_files/paper/2024/hash/ 5dfbe6f5671e82c76841ba687a8a9ecb-Abstract-Conference.html [34] X. Lai, J. Lu, Y. Luo, Y. Ma, and X. Zhou, “FlexPrefill: Acontext-aware sparse attention mechanism for efficient long-sequence inference,” in Proceedings of the Thirteenth International Conference on Learning Representations , 2025, pp. 963–989. [Online]. Available: https://openreview.net/forum?id=OfjIlbelrT 
+
+Rongjian Chen received the bachelor’s degree from Guangdong University of Finance and Economics. He is currently working toward the master’s degree with the Shenzhen Institutes of Advanced Tech-nology, Chinese Academy of Sciences. His main research interests include large language models inference optimization and system management. 
+
+Minxian Xu (Senior Member, IEEE) received the PhD degree from the University of Melbourne, in 2019. He is currently an associate professor with the Shenzhen Institutes of Advanced Technology, Chi-nese Academy of Sciences. His research interests in-clude resource scheduling and optimization in cloud computing. He has co-authored 90+ peer-reviewed papers published in prominent international journals and conferences. His PhD thesis was awarded the 2019 IEEE TCSC Outstanding PhD Dissertation Award. He was also awarded the 2023 IEEE TCSC Award for Excellence (Early Career Award). 
+
+Zhengxin Fang (Graduate Student Member, IEEE) received his bachelor and master degrees at South China Normal University and Harbin Institute of Technology, in 2019 and 2021, respectively. He is currently pursuing the Ph.D. degree in Computer Science at Victoria University of Wellington, New Zealand. His research interests include cloud com-puting, microservice resource allocation, evolution-ary computation, graph neural networks, reinforce-ment learning and large language model assisted optimization. 
+
+Kejiang Ye (Senior Member, IEEE) received the BSc and PhD degrees from Zhejiang University, in 2008 and 2013, respectively. He was also a joint PhD student with the University of Sydney from 2012 to 2013. After graduation, he works as post-doc researcher with Carnegie Mellon University from 2014 to 2015 and Wayne State University from 2015 to 2016. He is currently a professor with the Shenzhen Institutes of Advanced Technology, Chinese Academy of Sciences. His research interests focus on the performance, energy, and reliability of cloud computing and network systems. 
+
+Chengzhong Xu (Fellow, IEEE) received the PhD degree in computer science and engineering from the University of Hong Kong, in 1993. He is with the Institute of AI and Brain Sciences and the Depart-ment of Computer Science, University of Macau. He published two research monographs and more than 300 peer-reviewed papers in journals and conference proceedings. His papers received about 17K citations with an H-index of 72. His main research interests lie in parallel and distributed computing and cloud computing.
