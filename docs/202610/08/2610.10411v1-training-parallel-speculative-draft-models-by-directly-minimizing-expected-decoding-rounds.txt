@@ -1,0 +1,1635 @@
+Title: Training Parallel Speculative Draft Models by Directly Minimizing Expected Decoding Rounds
+
+URL Source: https://arxiv.org/pdf/2610.10411v1
+
+Published Time: Thu, 08 Oct 2026 01:46:38 GMT
+
+Number of Pages: 25
+
+Markdown Content:
+# Training Parallel Speculative Draft Models by Directly Minimizing Expected Decoding Rounds 
+
+## Yunxiao Zhao ∗ Changxiao Cai ∗
+
+## October 8, 2026 
+
+Abstract 
+
+Speculative decoding accelerates large language model inference by using a low-cost draft model to propose tokens that the full-size target model verifies in parallel. Parallel and semi-autoregressive (semi-AR) drafters improve drafting efficiency by proposing an entire block in a single forward pass, but training them raises a new difficulty: the draft distribution for a given position depends on where the decoding round starts, and where rounds start depends on how many tokens earlier rounds accepted. Existing training objectives typically rely on block-local surrogates that ignore this cross-round coupling, and therefore do not directly optimize the global decoding efficiency. In this work, we develop a theoretical framework for training and evaluating these drafters by representing speculative decoding as a Markov reward process. This formulation yields the Expected Decoding Rounds (EDR) objective, which weights local rejection costs by state occupancies and exactly equals the expected number of decoding rounds. Unlike prior surrogate objectives, EDR introduces no auxiliary hyperparameters. We then derive an exact temporal-difference gradient that supports unbiased stochastic optimization from target-model rollouts. The same framework also yields an exact offline evaluator for round counts, enabling paired drafter comparisons on shared target rollouts without running speculative decoding. Finetuning two state-of-the-art drafters, DSpark and DFly, with EDR consistently improves mean accepted length and outperforms existing training objectives across nine benchmarks spanning math reasoning, code generation, and chat. 
+
+§ https://github.com/y-x-zhao/AngelSpec-EDR 
+
+# Contents 
+
+1 Introduction 22 Preliminaries 33 Main Results 4
+
+3.1 Speculative Decoding as a Markov Reward Process . . . . . . . . . . . . . . . . . . . . . . . . 53.2 The EDR Objective . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 63.3 TD-Form Gradient of EDR . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 73.4 Exact Offline Evaluation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 83.5 Suboptimality of Block-Local Surrogates . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+
+4 Related Work 9
+
+4.1 Literature Review . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 94.2 Comparison of Training Objectives . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10 
+
+5 Experiments 12 
+
+5.1 Experimental Setup . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12 5.2 Experimental Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13 
+
+> ∗
+
+Department of Industrial and Operations Engineering, University of Michigan, Ann Arbor, MI, USA. Email: 
+
+{zhyx,cxcai}@umich.edu .
+
+1arXiv:2610.10411v1 [cs.LG] 7 Oct 2026 6 Conclusion 13 A Speculative Decoding Algorithm 17 B Proofs 17 
+
+B.1 Markov Process Formulation in Section 3.1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17 B.2 Proofs of Proposition 1 and Proposition 2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20 B.3 Proof of Theorem 1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21 B.4 Proof of Theorem 2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21 B.5 Proof of Theorem 3 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22 
+
+C Additional Details for Expected Decoding Rounds 24 
+
+C.1 Draft EOS Probability Does Not Reduce EDR . . . . . . . . . . . . . . . . . . . . . . . . . . 24 C.2 Fixed-Size Anchor Sampling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24 
+
+D Additional Details for Experiments 25 
+
+# 1 Introduction 
+
+Autoregressive (AR) generation is a central bottleneck in large language model (LLM) inference. Since each token can be produced only after its preceding tokens are available, the number of function evaluations required to generate a text sequence grows linearly with its length. Speculative decoding (Leviathan et al., 2023; Chen et al., 2023) reduces this sequential cost by using a lightweight draft model to propose multiple candidate tokens, which the full-size target model verifies in parallel in a single forward pass. With rejection-sampling verification, the generated sequence follows the target model’s distribution exactly. Therefore, speculative decoding accelerates inference without sacrificing quality, and the goal is to reduce expensive target model verifications—equivalently, decoding rounds—while keeping drafting itself inexpensive. Early work employed AR drafters (Li et al., 2024b) that predict draft tokens sequentially, so the latency contributed in the drafting phase grows linearly with the draft block size. To reduce the sequential work of drafting, parallel drafters (Cai et al., 2024; Chen et al., 2026a) have emerged to propose multiple draft tokens in one forward pass, typically built on masked diffusion language models (Sahoo et al., 2024; Shi et al., 2024). Their semi-AR variants (Cheng et al., 2026; Liu et al., 2026) add limited sequential dependence within each draft block to improve the draft quality. Parallel drafting supports longer draft blocks and deeper drafter networks, with potential to significantly accelerate the inference of a large target model. 
+
+Challenges in parallel drafter training: cross-round dependence. For a fixed architecture, a drafter’s quality affects inference speed primarily through the number of decoding rounds, so the natural training objective is to minimize the expected number of rounds. For an AR drafter, the proposal at position t is conditioned on the full realized prefix x<t regardless of where the current round started, so its acceptance probability depends only on this prefix. As a result, the standard local training objective for AR drafters—matching the target model’s next-token distribution at every prefix—is directly aligned with this goal (Yin et al., 2024a). In contrast, for a parallel or semi-AR drafter, the proposal can instead depend on an earlier prefix x≤n with n < t (in a round starting at n), with access to only some or none of the intermediate tokens. Consequently, the same output position can have different draft distributions depending on where the round starts. This additional dependence breaks the direct link between local distribution matching and global decoding efficiency. The draft for position t from a round starting at n matters only if the decoding trajectory first reaches a round starting at n and then accepts all preceding draft tokens in that round up to position t − 1.Both events depend on earlier acceptance outcomes induced by the drafter itself. Thus, changing the drafter affects both acceptance within a round and which draft distributions are encountered in subsequent rounds, making the training objective inherently coupled across rounds. However, existing objectives for parallel and semi-AR drafters do not account for these cross-round dependencies and instead rely on local surrogates. Examples include the expected number of tokens accepted 2within a single round (Li et al., 2026c) and draft-target distributional discrepancies under hand-crafted weights (Chen et al., 2026a; Wu et al., 2026). This motivates the central question: 
+
+Can we train parallel and semi-AR drafters by directly minimizing the expected number of decoding rounds? 
+
+Our contributions. We answer this question affirmatively. Our approach relies on two key observations. First, conditioned on the output sequence, speculative decoding with a parallel or semi-AR drafter can be formulated as a Markov reward process (MRP) (Howard, 1971): each state records where the current round started and which position is being verified, and each rejection costs one round. Second, since rejection-sampling verification ensures that the output follows the same target distribution for every drafter, averaging over target rollouts recovers the expected number of rounds of actual decoding. Together, these insights allow us to capture the dependencies across decoding rounds explicitly and characterize the expected number of decoding rounds exactly, yielding a unified framework for training and evaluating drafters. Building on this framework, we introduce the Expected Decoding Rounds (EDR) objective, whose mini-mization is equivalent to minimizing the expected number of decoding rounds. We then derive a temporal-difference gradient estimator, enabling drafter training from target-model rollouts. EDR applies across drafter architectures and introduces no hyperparameters. We further prove that drafters maximizing the expected accepted length for each round can be strictly suboptimal for EDR, theoretically justifying the advantages of our global objective. The framework also yields an exact offline evaluator of expected round counts, enabling comparisons of drafters on the same target-model rollouts without running online specula-tive decoding. Empirically, we finetune two state-of-the-art (SOTA) drafters, DSpark (Cheng et al., 2026) and DFly (Liu et al., 2026), with EDR while keeping their architectures and inference procedures unchanged. Across nine benchmarks spanning mathematical reasoning, code generation, and chat, a single epoch of EDR finetuning consistently improves mean accepted length over the original drafters and existing training objectives. Our main contributions are summarized as follows: • A Markov reward process formulation. We provide a theoretical framework that exactly charac-terizes expected speculative decoding rounds for parallel and semi-AR drafters. • An exact and trainable global objective. We introduce EDR, establish its equivalence to mini-mizing the expected number of decoding rounds, derive a tractable gradient for drafter training, and prove its advantage over local surrogates. • An exact offline evaluator. We provide an offline evaluator of the expected number of decoding rounds, enabling paired evaluation of drafters on the same target-model rollouts. • Consistent empirical gains. EDR finetuning improves two SOTA drafters across nine benchmarks, outperforming existing training objectives. 
+
+# 2 Preliminaries 
+
+Let V be a vocabulary of ordinary tokens and V := V ∪ { <EOS> }, where <EOS> denotes the end-of-sequence token. For two distributions p, q , define the total variation (TV) distance TV (p, q ) := P 
+
+> v∈V
+
+[p(v) − q(v)] +,where [z]+ := max(0 , z ). For any sequence x = ( x1, x 2, . . . ), we denote x≤a = ( x1, x 2, . . . , x a), x<a := x1: a−1,and xa:b := ( xa, x a+1 , . . . , x b) for 1 ≤ a ≤ b. For a > b , xa:b := ∅.
+
+Target distribution. Let p denote the distribution of the target model. It generates tokens autoregres-sively as xt ∼ pt(· | x<t ) for t ≥ 1 and stops upon sampling <EOS> . Denote by L := inf {ℓ ≥ 0 : xℓ+1 = <EOS> }
+
+the sequence length excluding <EOS> . We assume L has a universal constant upper bound for x ∼ p. Acomplete sequence x = ( x1: L, <EOS> ) has probability QLt=1 pt(xt | x<t )pL+1 (<EOS> | x1: L), and we call x
+
+target-supported if p(x) > 0.3Speculative decoding. Speculative decoding generates a token sequence x in rounds. Consider a round that starts from a committed prefix x1: n. A drafter q first proposes a block of B draft tokens exn+1: n+B with 
+
+ext ∼ qt. For simplicity, we write qt for the draft distribution at position t in the current round, suppressing its dependence on the round start n, committed prefix x1: n, and preceding within-block proposals exn+1: t−1.We will make this explicit in the next paragraph. The target model then verifies the draft block from left to right in a single forward pass. When position 
+
+t is verified, all earlier drafts in the block have been accepted, so the current prefix is x<t = ( x1: n, exn+1: t−1).Write pt = pt(· | x<t ). The draft ext is accepted with probability min {1, p t(ext)/q t(ext)}, in which case it is committed as xt = ext. Otherwise, it is replaced with a correction token xt ∼ rt drawn from the residual distribution rt(v) := [ pt(v) − qt(v)] +/TV (pt, q t), v ∈ V . The remaining drafts in the block are discarded, and the next round begins from the updated prefix x1: t. If all B draft tokens are accepted, the same forward pass also yields one additional bonus token xn+B+1 ∼ pn+B+1 (· | x≤n+B ), and the next round starts after it. Generation stops when <EOS> is committed. This rejection-sampling verification ensures that the output sequence satisfies x ∼ p for any drafter q (Leviathan et al., 2023). 
+
+Draft distribution. Drafters differ in what qt conditions on. An AR drafter proposes each token from the full prefix, whereas parallel and semi-AR drafters propose the whole block from the prefix committed at the start of the round. We now refine the shorthand qt to make this explicit. For a round starting from a committed prefix x1: n, let qn,t (· | x1: n; exn+1: t−1) denote the draft distribution for position t = n+1 , . . . , n +B.The subscript t identifies the position being predicted, and n records the position where the round starts. The semicolon separates the committed prefix x1: n from the preceding within-block proposals exn+1: t−1, which the drafter may use in whole or in part. This notation covers AR, parallel, and semi-AR drafters. An AR drafter is the special case qn,t (· | 
+
+x1: n; exn+1: t−1) = qt(· | x1: n, exn+1: t−1), which conditions on the concatenated prefix and has no further dependence on the round start n. A parallel drafter samples the block independently given the committed prefix x1: n, i.e., qn,t (· | x1: n; exn+1: t−1) = qn,t (· | x1: n). A semi-AR drafter allows partial dependence on preceding within-block drafts while maintaining parallel prediction across some positions. For parallel and semi-AR drafters, the same current prefix can therefore induce different draft distributions depending on the round start n. This dependence is the main difference from AR drafters and the central challenge this work addresses. We give the Pseudocode for speculative decoding process we considered in Algorithm 2 in Appendix A. 
+
+Decoding rounds and mean accepted length. Each decoding round requires one forward pass of the target model. Let T q denote the number of decoding rounds needed to produce a complete output under drafter q, including the one that produces <EOS> . A common metric is the mean accepted length (MAL), the ratio of the expected output length to the expected number of rounds, 
+
+MAL (q) := E[L + 1] 
+
+E[T q ] , (1) where L + 1 is the length of the complete output counting all committed tokens, including correction tokens, bonus tokens, and the terminal <EOS> token. As the output sequence follows the target distribution, E[L]
+
+is independent of the drafter q for a fixed target model and evaluation corpus. Consequently, maximizing 
+
+MAL (q) is equivalent to minimizing E[T q ].
+
+# 3 Main Results 
+
+This section presents our main results. Section 3.1 presents a Markov reward process (MRP) formulation for speculative decoding. Section 3.2 introduces the EDR objective and Section 3.3 presents a temporal-difference form of its gradient. Section 3.4 gives offline estimators for the decoding statistics, and suboptimality of block-local objectives is discussed in Section 3.5. 43.1 Speculative Decoding as a Markov Reward Process 
+
+Recall that T q denotes the number of decoding rounds in a speculative decoding run with drafter q, and let X = ( X1, . . . , X L, <EOS> ) be the output sequence of the same run. Since speculative decoding ensures 
+
+X ∼ p for any drafter q, the overall expected number of decoding rounds satisfies 
+
+E[T q ] = EX∼p[τ q (X)] , with τ q (x) := E[T q | X = x], (2) where τ q (x) is the expected number of rounds conditioned on producing the sequence x. Therefore, it suffices to characterize τ q (x) for any target-supported sequence x.
+
+Markov reward process. In light of this, we fix a target-supported sequence x = ( x1, . . . , x L, <EOS> ).Conditioned on the output x of a speculative decoding run, the remaining randomness is which positions are filled by accepted drafts and which by the target model after a rejection, and this determines the number of decoding rounds T q (x).This can be described as a Markov chain on states (n, t ) for 0 ≤ n < t ≤ L + 1 . (see Appendix B.1 for a detailed derivation). State (n, t ) indicates that the current round started after n (i.e., x1: n was committed) and is verifying the draft for position t. Decoding starts at (0 , 1) and terminates when <EOS> is produced at position L + 1 .Note that at state (n, t ) with t ≤ n + B, the draft for position t is drawn from qn,t (· | x1: n; xn+1: t−1). By Bayes’ rule, given that position t outputs xt, the probablity that it was produced by an accepted draft is 
+
+Aqn,t (x≤t) := min 
+
+
+
+1, qn,t (xt | x1: n; xn+1: t−1)
+
+pt(xt | x<t )
+
+
+
+. (3) Denote by Rqn,t := 1 − Aqn,t the rejection probability. Acceptance continues the current round, whereas rejection starts a new round after position t, provided that xt̸ = <EOS> . Therefore, the Markov chain has two transitions: 
+
+(n, t ) −→ 
+
+(
+
+(n, t + 1) , with probability Aqn,t (x≤t),
+
+(t, t + 1) , with probability Rqn,t (x≤t). (4) We set Aqn,t = 0 and Rqn,t = 1 for t > n + B, so the same transition rule covers the case when all tokens in a draft block are accepted and a new round starts after that. Let ωqn,t (x) denote the occupancy of state (n, t ): the probability that this state is visited, conditioned on the output sequence being x. It is not hard to see that ωqn,t (x) depends on x only through x<t and hence we write ωqn,t (x<t ) = ωqn,t (x). Starting from ωq
+
+> 0,1
+
+(x) = 1 , the occupancies satisfy the forward recursion: 
+
+ωqn,t +1 (x≤t) = ωqn,t (x<t )Aqn,t (x≤t), n < t ≤ L, (5a) 
+
+ωqt,t +1 (x≤t) = 
+
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t )Rqn,t (x≤t), 1 ≤ t ≤ L. (5b) Since every round begins at a diagonal state (t, t +1) , the number of rounds equals the number of diagonal states visited, yielding the following exact expression (see Appendix B.2 for proof). 
+
+Proposition 1. For any target-supported sequence x = ( x1: L, <EOS> ) and any drafter q, the expected number of decoding rounds to produce x is 
+
+τ q (x) = 
+
+> L
+
+X
+
+> t=0
+
+ωqt,t +1 (x≤t) = 1 + 
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t )Rqn,t (x≤t). (6) The second identity has a direct MRP interpretation. Rejection starts a new round and incurs unit cost, while acceptance incurs zero cost. Hence, the rejection probability Rqn,t is the expected cost of visiting state 
+
+(n, t ), and the occupancy-weighted sum of costs gives the round count. 53.2 The EDR Objective 
+
+By (2), averaging (6) over x ∼ p provides an exact expression for the overall expected number of decoding rounds E[T q ]. However, each rejection probability Rqn,t (x≤t) uses the target only through the single realized token xt, even though the full distribution pt(· | x<t ) is available. Hence, we average over this token under the target distribution pt, conditioned on xt being a non-EOS token. 
+
+Definition 1. Define the local rejection cost of state (n, t ), for 0 ≤ n < t ≤ L, as 
+
+cqn,t (x<t ) := E
+
+> Xt∼p′
+> t(·| x<t )
+
+[Rqn,t (x<t , X t)] (7) where p′
+
+> t
+
+(v | x<t ) := pt(v | x<t )/(1 − pt(<EOS> | x<t )) for v̸ = <EOS> is the target distribution normalized over non-EOS tokens. For t ≤ n + B, its value is given by 
+
+cqn,t (x<t ) = 11 − pt(<EOS> | x<t )
+
+X
+
+> v∈V
+
+[pt(v | x<t ) − qn,t (v | x1: n; xn+1: t−1)] +, (8) and for t > n + B, it is equal to 1. Note that cqn,t is well-defined because every position t ≤ L outputs a non-EOS token so pt(<EOS> | x<t ) < 1. We denote cqn,L +1 (x) = 0 for notational convenience, since the EOS token incurs no cost. In words, the cost cqn,t (x<t ) is the rejection probability associated with state (n, t ), given that the com-mitted output token xt is non-EOS. It measures the local distributional discrepancy between the drafter 
+
+qn,t and target pt for position t, given by the TV distance between the draft and target distributions for position t, excluding EOS and normalized by the target’s non-EOS mass. Excluding EOS reflects the fact that when the target model produces EOS, it never starts another decoding round and incurs no penalty for draft rejection. We now introduce the Expected Decoding Rounds (EDR) objective, which exactly equals the overall expected number of decoding rounds, as formalized in Theorem 1 below. The proof can be found in Ap-pendix B.3. 
+
+Theorem 1. For any drafter q, the EDR objective equals the expected number of decoding rounds: 
+
+LEDR (q) := 1 + EX∼p
+
+" LX
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (X<t )cqn,t (X<t )
+
+#
+
+= EX∼p[τ q (X)] = E[T q ]. (9) The EDR objective is a sum of local rejection costs cqn,t , measuring the local distributional discrepancy between the drafter qn,t and target pt, each weighted by the corresponding occupancy ωqn,t . The quantity inside the expectation, which we call the per-sequence EDR loss ,
+
+bLEDR (q; x) := 1 + 
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t ) cqn,t (x<t ) (10) can be computed exactly given a target-sampled sequence x via the forward occupancy recursion (5) and the local rejection cost (7). Therefore, averaging over a batch of target rollouts provides an empirical EDR loss for drafters that directly targets minimizing the expected number of rounds. We make several important remarks. • Replacement of Rqn,t with cqn,t . The EDR loss (10) replaces Rqn,t (x≤t) in (6) with its conditional expectation cqn,t (x<t ). For an individual rollout, it generally differs from τ q (x), but they agree after averaging over x ∼ p. In return, the EDR loss uses the next-token distribution rather than one sampled token, so its gradient aggregates information across the vocabulary. • Exact occupancy weighting. Prior surrogate objectives (Chen et al., 2026a; Wu et al., 2026) do not account for EOS termination in their local discrepancy terms, and more importantly, weight them in a heuristic way. These weights can be interpreted as fixed surrogates for the drafter-dependent occupancies ωqn,t . In contrast, EDR combines EOS-aware local costs with the actual occupancies, yielding an exact objective for the expected number of decoding rounds. 6Algorithm 1 One EDR training step ( sg( ·) denotes the stop-gradient operator) 
+
+Require: drafter qθ , target model p, block size B 
+
+> 1:
+
+For each prompt i = 1 , . . . , M , sample an independent target rollout x(i) = ( x(i)1: Li , <EOS> ) from the target model p 
+
+> 2:
+
+Compute pt(· | x(i)
+
+> <t
+
+) for all i and t in one batched target forward pass  
+
+> 3:
+
+for i = 1 , . . . , M (in parallel) do  
+
+> 4:
+
+Compute A(i) 
+
+> n,t
+
+and c(i) 
+
+> n,t
+
+from qθ at all states (n, t ) 
+
+> 5:
+
+Compute ω(i) 
+
+> n,t
+
+by (5) and V (i) 
+
+> n,t
+
+by (12), without gradients  
+
+> 6:
+
+end for  
+
+> 7:
+
+ℓ(θ) ← M −1 PMi=1 
+
+PLi
+
+> t=1
+
+Pt−1 
+
+> n=0
+
+sg( ω(i)
+
+> n,t
+
+)c(i) 
+
+> n,t
+
++ A(i) 
+
+> n,t
+
+sg( V (i) 
+
+> n,t +1
+
+− V (i)
+
+> t,t +1
+
+) 
+
+> 8:
+
+Update θ using ∇θ ℓ(θ)
+
+• Parallel vs. AR drafters. For an AR drafter, qn,t (· | x1: n; xn+1: t−1) = qt(· | x<t ) for all n < t . Without a block cap ( B = ∞), EDR reduces to 
+
+LEDR (q) = 1 + EX∼p
+
+ LX
+
+> t=1
+
+ct(X<t )
+
+
+
+with ct(x<t ) := 
+
+P 
+
+> v∈V
+
+[pt(v | x<t ) − qt(v | x<t )] +
+
+1 − pt(<EOS> | x<t ) . (11) EDR hence decouples into local prefix costs, each minimized by matching qt to pt. This recovers the result of Yin et al. (2024a, Theorem 1) established for AR drafters and extends it to sequences that terminate with EOS. A finite block size adds only a mild dependence on n through the boundary states. Therefore, Theorem 1 highlights the key difference between parallel and AR drafters, and EDR captures the cross-round dependencies exactly. 
+
+## 3.3 TD-Form Gradient of EDR 
+
+The per-sequence EDR loss in (10) depends on the drafter q through both the local costs cqn,t and the occupancies ωqn,t . Differentiating it with respect to q directly is expensive because it must backpropagate through the entire forward recursion for occupancy ωqn,t (5). Fortunately, the MRP formulation gives the gradient in a temporal-difference (TD) (Sutton, 1988) form that uses only local derivatives. For a fixed target-supported x, consider the MRP with transitions (4) and costs cqn,t (x<t ) from (7). Define the value function V qn,t (x), the expected cumulative cost starting from state (n, t ). The value function satisfies the Bellman equation (Bellman, 1966) 
+
+V qn,t (x) = cqn,t (x<t ) + Aqn,t (x≤t)V qn,t +1 (x) + Rqn,t (x≤t)V qt,t +1 (x), 0 ≤ n < t ≤ L, (12) with the terminal condition V qn,L +1 (x) = 0 for all 0 ≤ n ≤ L. Unlike the cost and occupancy, the value function V qn,t (x) depends on the whole sequence x. The value function of the initial state gives the per-sequence EDR loss: 
+
+V q
+
+> 0,1
+
+(x) = bLEDR (q; x) − 1. (13) We now present the gradient of the per-sequence EDR loss in the following theorem. The proofs of (13) and Theorem 2 are given in Appendix B.4. 
+
+Theorem 2 (EDR gradient) . We parametrize the drafter q = qθ by neural network parameters θ. For any target-supported sequence x, the gradient of the per-sequence EDR loss (10) is given by 
+
+∇θ bLEDR (qθ ; x) = 
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t ) ∇θ cqn,t (x<t ) + ∇θ Aqn,t (x≤t)  V qn,t +1 (x) − V qt,t +1 (x) . (14) 
+
+As a result, one has 
+
+EX∼p
+
+h
+
+∇θ bLEDR (qθ ; X)
+
+i
+
+= ∇θ LEDR (qθ ). (15) 7The gradient has a standard one-step TD form, separated into two contributions: the immediate effect on the local rejection cost, and the downstream effect of changing the acceptance probability. The latter is weighted by the value gap, which measures the difference between the cumulative costs of the two possible subsequent states. The occupancies account for how often each state is reached. 
+
+Implementation. We compute the occupancies ωqn,t by the forward recursion (5) and the value functions 
+
+V qn,t by the backward Bellman recursion (12). Since they enter the gradient expression (14) only as weights, we hold them fixed during differentiation. Gradients are required only through the local quantities cqn,t and 
+
+Aqn,t .By (15), averaging (14) over a batch of i.i.d. target rollouts gives an unbiased stochastic gradient of EDR, which directly optimizes the expected number of decoding rounds. One EDR training step is summarized in Algorithm 1. 
+
+## 3.4 Exact Offline Evaluation 
+
+The MRP formulation also yields exact offline evaluators for any drafter, computed from target-model rollouts alone without running speculative decoding. We first give an unbiased estimator of the expected number of decoding rounds, from which we obtain an estimator of the MAL. We then extend it to a finer-grained statistic, the expected number of rounds that commit at least k tokens, which yields an estimator of the position-wise acceptance rate. 
+
+3.4.1 Expected Decoding Rounds and MAL 
+
+By Proposition 1, the expected number of decoding rounds conditioned on the output X = x equals the sum of the diagonal occupancies. For a target-supported sequence x = ( x1: L, <EOS> ), define 
+
+τ q 
+
+> off
+
+(x) := 
+
+> L
+
+X
+
+> t=0
+
+ωqt,t +1 (x≤t). (16) This quantity averages out all randomness of speculative decoding given X = x, namely draft sampling and verifier randomness, and is computed exactly by a single pass of the forward occupancy recursion. Given a dataset of target rollouts D = {x(i) = ( x(i)1: Li , <EOS> )}Ni=1 independently sampled from x(i) ∼ p, we estimate the expected number of rounds and the MAL by 
+
+bTD (q) := 1
+
+N
+
+> N
+
+X
+
+> i=1
+
+τ q 
+
+> off
+
+(x(i)) and [MAL D (q) := N −1 PNi=1 (Li + 1) 
+
+bTD (q) . (17) Since E[T q ] = EX∼p[τ q (X)] , bTD (q) is an unbiased estimator of E[T q ], and [MAL D (q), a ratio of sample means, is a consistent estimator of MAL (q). Moreover, since the rollouts do not depend on the drafter, all drafters can be evaluated on the same D. This yields paired comparisons free of the rollout variation that arises when each drafter is evaluated on independently generated outputs. 
+
+3.4.2 Rounds Committing at Least k Tokens and Acceptance Rate 
+
+A finer-grained statistic is the number of rounds whose committed length , i.e., the number of tokens committed in the round including the correction or bonus token, is at least k. Let T q 
+
+> ≥k
+
+denote this number in a speculative decoding run. Since a round commits at most B + 1 tokens, we consider 1 ≤ k ≤ B + 1 . A round starting after position t commits at least k tokens if and only if its first k − 1 drafts are accepted, i.e., it visits state 
+
+(t, t + k). This observation generalizes Proposition 1 as follows; see Appendix B.2 for the proof. 
+
+Proposition 2. For any target-supported sequence x = ( x1: L, <EOS> ), any drafter q, and any 1 ≤ k ≤ B + 1 ,the expected number of rounds committing at least k tokens to produce x is 
+
+τ q
+
+> ≥k
+
+(x) := ET q 
+
+> ≥k
+
+X = x =
+
+> L+1 −k
+
+X
+
+> n=0
+
+ωqn,n +k(x<n +k). (18) 8Taking k = 1 recovers Proposition 1, so that τ q 
+
+> off
+
+= τ q
+
+> ≥1
+
+. For 1 ≤ k ≤ B, we define the acceptance rate at draft position k as 
+
+AR k(q) := E[T q
+
+> ≥k+1
+
+]
+
+E[T q
+
+> ≥k
+
+] , (19) the fraction of rounds reaching draft position k in which the k-th draft is also accepted. 1 Using the same dataset D, we estimate these quantities by 
+
+bT≥k, D (q) := 1
+
+N
+
+> N
+
+X
+
+> i=1
+
+τ q
+
+> ≥k
+
+(x(i)) and dAR k, D (q) := bT≥k+1 ,D (q)
+
+bT≥k, D (q) . (20) As before, bT≥k, D (q) is unbiased for E[T q
+
+> ≥k
+
+], and dAR k, D (q) is consistent for AR k(q).
+
+## 3.5 Suboptimality of Block-Local Surrogates 
+
+Finally, we show that maximizing accepted length independently within each block can be strictly suboptimal for the global MAL. Since maximizing MAL is equivalent to minimizing the expected number of decoding rounds (see Section 2), which EDR equals exactly (Theorem 1), this theoretically justifies optimizing the EDR objective rather than block-local surrogates. We consider semi-AR drafters that condition on earlier drafts in the block only through the immediately preceding token, i.e., qn,t (· | x1: n; xn+1: t−1) = qn,t (· | x1: n; xt−1), referred to as first-order drafters . This class includes existing semi-AR drafters such as DSpark (Cheng et al., 2026) and DFly (Liu et al., 2026). The following theorem shows that even when the expected accepted length is optimized in every round, the resulting MAL can be a constant factor below the best achievable within the same drafter class. The construction and proof are deferred to Appendix B.5. 
+
+Theorem 3. For any block size B ≥ 3, there exists a target distribution p such that, for any first-order drafter ˆq that maximizes the expected accepted length in every round, there exists another first-order drafter 
+
+q∗ satisfying 
+
+MAL (q∗)
+
+MAL (ˆ q) > 1 + 13B + 9 .
+
+The gap arises from the cross-round interaction ignored by block-local objectives. The draft distribution in the current round determines not only how many tokens are accepted in that round, but also where the next round starts. Consequently, a drafter that is locally optimal for the current round can induce a less favorable distribution of future round starts and result in a lower global MAL. 
+
+# 4 Related Work 
+
+## 4.1 Literature Review 
+
+Drafter architectures for speculative decoding. The latency per generated token depends on the accepted length per round as well as the costs of drafting and verification. Architectural work therefore seeks to increase accepted length while keeping drafting inexpensive. Medusa (Cai et al., 2024) attaches multiple prediction heads to target-model features, while Hydra (Ankner et al., 2024) introduces sequential dependencies between these heads to improve draft accuracy. EAGLE-3 (Li et al., 2026d) combines features from multiple target layers. To reduce sequential drafting overhead, parallel and diffusion-based drafters generate multiple proposals in a single forward pass. DFlash (Chen et al., 2026a) uses a lightweight block-diffusion drafter conditioned on target-model context features. DiffuSpec (Li et al., 2026a) repurposes a pretrained diffusion language model as a parallel drafter and uses causal-consistency path search to construct proposals for autoregressive verification. To improve within-block consistency without returning to fully autoregressive drafting, DSpark (Cheng et al., 2026) and DFly (Liu et al., 2026) combine parallel backbones with lightweight sequential heads that condition on preceding draft tokens.         
+
+> 1A round whose k-th position produces the terminal <EOS> is counted in Tq
+> ≥kbut not in Tq
+> ≥k+1 , since generation stops there.
+
+9Training objectives for speculative drafters. Drafter training commonly uses cross-entropy or KL-divergence objectives to align draft predictions with the target distribution (Li et al., 2026d; Chen et al., 2026a). However, distributional matching under these losses does not necessarily maximize token acceptance when drafter capacity is limited. LK losses (Samarin et al., 2026) address this distinction through acceptance-oriented objectives. For multi-token drafting, the first rejection invalidates all subsequent proposals in the block, making the contributions of different positions unequal. DFlash (Chen et al., 2026a) accounts for this asymmetry using fixed exponentially decaying position weights. D-PACE (Wu et al., 2026) replaces this fixed schedule with adaptive weights derived from a differentiable accepted-length surrogate based on draft confidences. The end-to-end (E2E) multi-step TV loss (Li et al., 2026c) moves beyond independent token-level matching by incorporating the multiplicative structure of acceptance across positions within a block. Recent work addresses the mismatch between drafter training and inference by incorporating verification feedback. Draft-OPD (Lei et al., 2026) replays draft proposals from inference-time anchors and applies acceptance-dependent distillation losses. Verification-Aware Training (Gu et al., 2026) uses simulated verification outcomes to supervise an auxiliary head and adapt position weights. Although these methods incorporate inference-time behavior into training, their objectives remain surrogates for MAL. 
+
+Diffusion language models. Diffusion language models (DLMs) (Nie et al., 2025; Inception Labs et al., 2025; Ye et al., 2025) offer an alternative to AR generation by iteratively refining sequences with bidirectional context, enabling parallel token generation. Continuous DLMs (Li et al., 2022; Chen et al., 2026b; Li et al., 2026b) extend continuous diffusion models (Ho et al., 2020; Song et al., 2020b,a) and flow matching (Lipman et al., 2022) to token embedding spaces. Starting from Gaussian noise, they generate continuous token representations through learned denoising or flow dynamics, then map these representations to discrete tokens. This framework facilitates adapting established techniques for controlling and accelerating diffusion sampling, including classifier-free guidance (Ho and Salimans, 2022), self-conditioning (Chen et al., 2022), few-step solvers (Lu et al., 2022; Li and Cai, 2024; Jiao et al., 2026), and distillation (Song and Dhariwal, 2024; Yin et al., 2024b). Discrete DLMs (Lou et al., 2023; Sahoo et al., 2024; Shi et al., 2024) operate directly in token space using categorical corruption. Masked DLMs belong to this category and corrupt sequences by replacing tokens with a special mask token. Then it generate text by progressively unmasking multiple positions in parallel. This formulation underlies many parallel and semi-AR drafters. However, conditionally independent sampling within an update can overlook dependencies among simultaneously generated tokens, creating a trade-off between generation quality and sampling efficiency (Li and Cai, 2025; Chen et al., 2025; Dmitriev et al., 2026; Zhao and Cai, 2026; Cai and Li, 2026). 
+
+## 4.2 Comparison of Training Objectives 
+
+In this section, we present a unified summary of existing drafter training objectives in the literature, together with our proposed EDR objective. Let X = ( X1, . . . , X L, <EOS> ) be a rollout sequence sampled from the target distribution, and let B be the number of proposed draft tokens in a block. The block is drafted from the committed prefix X1: n; qn,t 
+
+and pt denote the draft and target distributions at position t, respectively. We suppress their dependence on the sampled sequence for brevity. Up to additive constants and positive scaling factors, the objectives considered here can be written as 
+
+L(q) = EX∼p
+
+" LX
+
+> n=0
+
+an
+
+> min {n+B+1 ,L }
+
+X
+
+> t=n+1
+
+bn,t ℓn,t 
+
+#
+
+. (21) This template separates each objective into three components: • Per-position loss ℓn,t specifies the local training signal at position t for a block drafted from anchor 
+
+n. For token-level alignment surrogates, ℓn,t measures the discrepancy between the draft distribution 
+
+qn,t and the target pt, whereas for acceptance-aware objectives, ℓn,t is the surrogate for the rejection probability at position t. All objectives except EDR set ℓn,n +B+1 = 0 , since no draft token is proposed at the bonus position. EDR keeps this term because a round that reaches the bonus position always ends there ( Aqn,n +B+1 = 0 ). 10 Table 1: Drafter training objectives as instances of the template in (21). 
+
+Objective Per-position loss ℓn,t Block position weight bn,t Anchor weight an
+
+Token-level surrogates 
+
+CE − log qn,t (xt) 1 1
+
+KL KL (pt ∥ qn,t ) 1 1
+
+TV TV (pt, q n,t ) 1 1
+
+LK (Samarin et al., 2026) 
+
+ λ KL + (1 − λ) TV ,
+
+λ = exp  −κ sg(1 − TV ) 1 1
+
+Block-level surrogates 
+
+Exponential decay (Chen et al., 2026a) CE / KL / TV / LK or a weighted combination exp  −(t − n − 1) /η  1
+
+D-PACE (Wu et al., 2026) CE / KL / TV / LK or a weighted combination 
+
+sg 
+
+ BX
+
+> m=t−nn+m
+
+Y
+
+> s=n+1
+
+eqn,s (xs)
+
+
+
+,
+
+eqn,s =  1 − αqn,s + α
+
+1
+
+E2E-TV (Li et al., 2026c) (TV (pt, q n,t ) − 1) 
+
+> t−1
+
+Y
+
+> s=n+1
+
+ 1 − TV (ps, q n,s ) 1
+
+Exact objective 
+
+EDR 
+
+(ours) cqn,t t−1Y
+
+> s=n+1
+
+Aqn,s ωqn,n +1 
+
+EDR (TD form) 
+
+(ours) cqn,t + Aqn,t sg  V qn,t +1 − V qt,t +1 
+
+ sg 
+
+ t−1Y
+
+> s=n+1
+
+Aqn,s 
+
+
+
+sg( ωqn,n +1 )
+
+• Block position weight bn,t sets how much position t counts relative to the other positions in the same block. Later draft tokens are verified only if all earlier draft tokens in the block are accepted, so their contributions depend on acceptance at preceding positions. Non-uniform position weights bn,t reflect this asymmetry between positions. • Anchor weight an sets how much the block drafted from anchor n counts relative to the blocks drafted from other anchors. All objectives except EDR weight anchors equally, i.e., an = 1 .Table 1 summarizes the three components of each objective. Here, sg( ·) denotes the stop-gradient operator: 
+
+sg( z) has the same value as z, but it is treated as a constant when taking gradients with respect to the drafter parameters. We discuss these three groups below. 
+
+Token-level surrogates. Token-level surrogates set bn,t = an = 1 and align the draft distribution qn,t 
+
+with the target pt at each position t independently. CE and KL both minimize a KL divergence between a reference distribution and qn,t : the reference is the one-hot distribution at the sampled target token xt for CE and the full target distribution pt for KL. TV uses the TV distance, which equals the rejection probability at position t. LK interpolates between KL and TV using an acceptance-dependent coefficient λ that balances acceptance awareness against ease of optimization. As the acceptance probability 1 − TV (pt, q n,t ) increases, 
+
+λ decreases, so LK relies mainly on the KL term that is easier to optimize when acceptance is low and moves weight to the TV term as acceptance improves. 11 Block-level surrogates. Block-level surrogates extend token-level surrogates with nonuniform block po-sition weights bn,t , which reflect the asymmetry between positions within a block. Later positions receive smaller weights because they are verified less often—a position is verified only if all earlier draft tokens in its block are accepted. Exponential decay and D-PACE multiply a token-level loss by a weight under stop-gradient. The weight is a fixed schedule in exponential decay and a confidence-based surrogate of the accepted length in D-PACE. E2E uses ℓn,t = TV (pt, q n,t )−1 at draft positions and bn,t = Qt−1
+
+> s=n+1
+
+(1 −TV (ps, q n,s )) without stop-gradient. Therefore, the inner sum in (21) is given by 
+
+−
+
+> min {B,L +1 −n}
+
+X
+
+> k=1
+> n+k
+
+Y
+
+> s=n+1
+
+ 1 − TV (ps, q n,s ),
+
+the negative of a surrogate for the expected accepted length of the block drafted from anchor n. In contrast, the block position weight of EDR is the conditional survival probability bn,t = Qt−1 
+
+> s=n+1
+
+Aqn,s along the target rollout. It is exact in expectation, whereas the product of 1 − TV terms in E2E is not. Like token-level surrogates, block-level surrogates ignore cross-round coupling, treating each block sepa-rately and assigning the same weight an = 1 to all anchors. 
+
+EDR. For EDR, the three components are the EOS-aware local rejection cost ℓn,t = cqn,t , the within-round survival probability bn,t = Qt−1 
+
+> s=n+1
+
+Aqn,s , and the anchor weight an = ωqn,n +1 . By the recursion in (5a), we have 
+
+an bn,t = ωqn,n +1 
+
+> t−1
+
+Y
+
+> s=n+1
+
+Aqn,s = ωqn,t ,
+
+which is the probability, conditioned on the target rollout, that decoding visits state (n, t ). Thus, with these choices, the weighted sum inside the expectation in (21), plus the constant 1, equals the per-sequence EDR loss (10). Taking the expectation over target rollouts gives the expected number of decoding rounds. Among the objectives in Table 1, only EDR has drafter-dependent anchor weights. These weights cap-ture how acceptance decisions change where later rounds start, that is, the cross-round coupling that the surrogates above ignore. 
+
+EDR in TD form. The TD form of EDR is a different scalar loss, but it has the same gradient with respect to the drafter parameters as the EDR loss above (see Theorem 2). It applies stop-gradient to both the block position weights and the anchor weights, and it adds the term Aqn,t sg  V qn,t +1 − V qt,t +1 
+
+ to the per-position loss. Gradients therefore flow only through cqn,t and Aqn,t , not through ωq or V q , so training with the TD form is more efficient. We use this form in training (see Algorithm 1). 
+
+# 5 Experiments 
+
+We evaluate whether directly optimizing EDR improves self-speculative decoding over existing block-local training objectives. We consider two SOTA self-speculative drafters, DSpark (Cheng et al., 2026) and DFly (Liu et al., 2026), paired with Qwen3 (Yang et al., 2025) target models of different scales. 
+
+## 5.1 Experimental Setup 
+
+Models and sampling. We evaluate two target–drafter pairs: Qwen3-4B with DSpark and Qwen3-8B with DFly. We set block size B = 7 for both drafters. For Qwen3-4B, target trajectories are sampled with temperature 0.7, top-p = 0 .8, and top-k = 20 , while the DSpark proposal distribution uses temperature 0.7
+
+without top-p or top-k truncation. For Qwen3-8B, both the target and DFly drafter use temperature 1.0
+
+without top-p or top-k truncation. Thinking mode is disable in all settings. 12 Table 2: One-epoch finetuning results. We report mean accepted length (MAL; higher is better) after one epoch of draft-model finetuning. Target and draft sampling configurations in evaluation are the same as in training. Block size B = 7 for all drafters. Bold marks the best finetuned result. Target Drafter (B = 7 )Math Code Chat GSM8K MATH AIME25 MBPP HumanEval LCB MT-Bench Alpaca Arena-Hard Qwen3-4B                                                           
+
+> (T= 0 .7
+> top-p= 0 .8
+> top-k= 20 )
+> DSpark 6.23 6.12 5.46 5.28 5.52 5.46 3.70 3.62 3.59 E2E 6.32 6.20 5.57 5.34 5.58 5.54 3.75 3.66 3.67
+> EDR (Ours) 6.32 6.20 5.59 5.34 5.59 5.56 3.78 3.70 3.70
+> Qwen3-8B
+> (T= 1 .0
+> no top-p/top-k)
+> DFly 6.30 5.94 5.15 5.26 5.58 5.23 3.57 3.45 3.18 E2E 6.34 5.98 5.18 5.32 5.62 5.26 3.61 3.49 3.21
+> EDR (Ours) 6.35 6.00 5.22 5.32 5.63 5.29 3.65 3.52 3.25
+
+Training objectives. Starting from the corresponding publicly released draft-model checkpoint, we fine-tune only the drafter parameters. We compare our exact EDR objective against the end-to-end TV (E2E) block-local objective (Li et al., 2026c), using the same model architecture, training data, optimizer configu-ration, and number of update steps for both objectives. For all methods, we use at most 512 training anchors per trajectory. For EDR, we use importance sampling to select training anchors. For details, see Appendix C.2. 
+
+Training data. We train on Open-PerfectBlend (Xu et al., 2024). Rather than using reference answers, we generate a fresh trajectory for each prompt from the target model using the same target sampling configuration as evaluation. Each drafter is finetuned for one epoch with batch size 96 .
+
+Evaluation. We use the same evaluation prompts as DSpark (Cheng et al., 2026) on nine benchmarks spanning math (Cobbe et al., 2021; Hendrycks et al., 2021; Zhang and Math-AI, 2025), code (Austin et al., 2021; Chen et al., 2021; Jain et al., 2025), and chat (Zheng et al., 2023; Taori et al., 2023; Li et al., 2024a). We generate at least 1,500 target trajectories per benchmark (multiple trajectories for each prompt) under the same sampling configurations as in training. We compute MAL using the offline estimator introduced in Section 3.4. All methods for the same target model and sampling configurations are evaluated on exactly the same target trajectories. This provides paired comparisons across training objectives and removes additional variance from independently sampled evaluation outputs. All training and evaluation are performed on a single NVIDIA H200 GPU or H100 GPU. For more experimental details, see Appendix D. 
+
+## 5.2 Experimental Results 
+
+Table 2 shows that EDR consistently improves speculative decoding across both DSpark and DFly without modifying the drafter architecture. Compared with E2E finetuning, EDR achieves higher or equal MAL across all benchmarks, with larger gains on AIME25, LiveCodeBench, and the chat benchmarks. These results suggest that directly optimizing the global expected number of decoding rounds provides additional gains beyond block-local end-to-end surrogates, and that the improvement transfers across different semi-AR drafter architectures and target-model scales. 
+
+# 6 Conclusion 
+
+We introduced Expected Decoding Rounds (EDR), an exact global training objective for parallel and semi-AR speculative drafters. By formulating speculative decoding as a Markov reward process conditioned on target-model outputs, we derived a tractable gradient for directly minimizing the expected number of verification rounds, together with an exact offline evaluator for paired draft-model comparison. Empirically, EDR consistently improves two strong drafters, DSpark and DFly, across nine benchmarks without modifying 13 their architectures or inference procedures, and outperforms the E2E training objective in overall mean accepted length. These results suggest that explicitly accounting for cross-round dependencies provides a principled and practical direction for training more efficient parallel speculative draft models. We conclude with several directions for future work. First, our current framework focuses on a fixed draft block size. However, under high-concurrency serving, verifying long draft blocks can become inefficient, es-pecially when many later proposals are likely to be rejected. Adaptive block sizing can reduce unnecessary verification by shortening the draft block when confidence is low, thereby further reducing inference la-tency (Hu et al., 2026; Huang et al., 2024). An important direction is to extend our framework to adaptive block sizes and to study whether the optimal block size can be selected dynamically for each decoding round. Second, EDR requires computing occupancy weights ω and value functions V for multiple anchor positions. This is more computationally expensive than block-local objectives. It would be interesting to explore more efficient ways to utilize the occupancy and value computations. Finally, as shown in Table 2, MAL varies substantially across datasets, suggesting that some target distributions are intrinsically more difficult to draft than others. Our current work focuses on optimizing the drafter given a target distribution, but does not provide a complete theoretical characterization of this difficulty. A promising direction is to identify properties of the target distribution that determine the best achievable speculative decoding efficiency. 
+
+# Acknowledgements 
+
+C. Cai is supported by the NSF CAREER Award CCF-2541600 and the NSF grant DMS-2515333. 
+
+# References 
+
+Ankner, Z., Parthasarathy, R., Nrusimha, A., Rinard, C., Ragan-Kelley, J., and Brandon, W. (2024). Hydra: Sequentially-dependent draft heads for medusa decoding. arXiv preprint arXiv:2402.05109 .Austin, J., Odena, A., Nye, M., Bosma, M., Michalewski, H., Dohan, D., Jiang, E., Cai, C., Terry, M., Le, Q., et al. (2021). Program synthesis with large language models. arXiv preprint arXiv:2108.07732 .Bellman, R. (1966). Dynamic programming. science , 153(3731):34–37. Cai, C. and Li, G. (2026). Confidence-based decoding is provably efficient for diffusion language models. 
+
+arXiv preprint arXiv:2603.22248 .Cai, T., Li, Y., Geng, Z., Peng, H., Lee, J. D., Chen, D., and Dao, T. (2024). Medusa: Simple llm inference acceleration framework with multiple decoding heads. arXiv preprint arXiv:2401.10774 .Chen, C., Borgeaud, S., Irving, G., Lespiau, J.-B., Sifre, L., and Jumper, J. (2023). Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 .Chen, J., Liang, Y., and Liu, Z. (2026a). Dflash: Block diffusion for flash speculative decoding. arXiv preprint arXiv:2602.06036 .Chen, M., Tworek, J., Jun, H., Yuan, Q., Pinto, H. P. D. O., Kaplan, J., Edwards, H., Burda, Y., Joseph, N., Brockman, G., et al. (2021). Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Chen, S., Cong, K., and Li, J. (2025). Optimal inference schedules for masked diffusion models. arXiv preprint arXiv:2511.04647 .Chen, T., Zhang, R., and Hinton, G. (2022). Analog bits: Generating discrete data using diffusion models with self-conditioning. arXiv preprint arXiv:2208.04202 .Chen, Y., Liang, C., Sui, H., Guo, R., Cheng, C., You, J., and Liu, G. (2026b). Langflow: Continuous diffusion rivals discrete in language modeling. arXiv preprint arXiv:2604.11748 .14 Cheng, X., Yu, X., Shao, C., Li, J., Xiong, Y., Qian, Y., Zhu, J., Ma, S., Zhang, X., Ye, J., et al. (2026). Dspark: Confidence-scheduled speculative decoding with semi-autoregressive generation. arXiv preprint arXiv:2607.05147 .Cobbe, K., Kosaraju, V., Bavarian, M., Chen, M., Jun, H., Kaiser, L., Plappert, M., Tworek, J., Hilton, J., Nakano, R., et al. (2021). Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 .Dmitriev, D., Huang, Z., and Wei, Y. (2026). Efficient sampling with discrete diffusion models: Sharp and adaptive guarantees. arXiv preprint arXiv:2602.15008 .Gu, G., Heo, B., Jun, H., Kang, Y., Lee, S., Yun, S., and Han, D. (2026). Verification-aware training for speculative decoding. arXiv preprint arXiv:2608.30135 .Hendrycks, D., Burns, C., Kadavath, S., Arora, A., Basart, S., Tang, E., Song, D., and Steinhardt, J. (2021). Measuring mathematical problem solving with the math dataset. arXiv preprint arXiv:2103.03874 .Ho, J., Jain, A., and Abbeel, P. (2020). Denoising diffusion probabilistic models. Advances in neural information processing systems , 33:6840–6851. Ho, J. and Salimans, T. (2022). Classifier-free diffusion guidance. arXiv preprint arXiv:2207.12598 .Howard, R. (1971). Dynamic Probabilistic Systems: Semi-Markov and decision processes . Decision and Control Series. Wiley. Hu, X., Shen, Y., Zhang, B., Zhang, H., Dai, J., Ge, S., Chen, L., Li, Y., and Wan, M. (2026). Echo: Elastic speculative decoding with sparse gating for high-concurrency scenarios. arXiv preprint arXiv:2604.09603 .Huang, K., Guo, X., and Wang, M. (2024). Specdec++: Boosting speculative decoding via adaptive candi-date lengths. arXiv preprint arXiv:2405.19715 .Inception Labs, Khanna, S., Kharbanda, S., Li, S., Varma, H., Wang, E., Birnbaum, S., Luo, Z., Miraoui, Y., Palrecha, A., Ermon, S., Grover, A., and Kuleshov, V. (2025). Mercury: Ultra-fast language models based on diffusion. arXiv preprint arXiv:2506.17298 .Jain, N., Gu, A., Li, W.-D., Yan, F., Zhang, T., Wang, S., Solar-Lezama, A., Sen, K., and Stoica, I. (2025). Livecodebench: Holistic and contamination free evaluation of large language models for code. In 
+
+International Conference on Learning Representations , volume 2025, pages 58791–58831. Jiao, Y., Li, N., Cai, C., and Li, G. (2026). Are first-order diffusion samplers really slower? a fast forward-value approach. In International Conference on Machine Learning . PMLR. Lei, H., Li, Y., Zhang, H., Zhang, S., Cheng, Q., Qu, X., Cui, G., Zhou, B., Ding, N., Luo, Y., et al. (2026). Draft-opd: On-policy distillation for speculative draft models. arXiv preprint arXiv:2605.29343 .Leviathan, Y., Kalman, M., and Matias, Y. (2023). Fast inference from transformers via speculative decoding. In International conference on machine learning , pages 19274–19286. PMLR. Li, G. and Cai, C. (2024). Provable acceleration for diffusion models under minimal assumptions. arXiv preprint arXiv:2410.23285 .Li, G. and Cai, C. (2025). Breaking AR’s sampling bottleneck: Provable acceleration via diffusion language models. In Advances in Neural Information Processing Systems , volume 38, pages 11700–11725. Li, G., Fu, Z., Fang, M., Zhao, Q., Tang, M., Yuan, C., and Wang, J. (2026a). Diffuspec: Unlocking diffusion language models for speculative decoding. In Findings of the Association for Computational Linguistics: ACL 2026 , pages 20896–20910. Li, N., Jiao, Y., Cai, C., and Li, G. (2026b). Convergeflow: Language flow with provable convergence to token embeddings. arXiv preprint arXiv:2608.23551 .15 Li, T., Chiang, W.-L., Frick, E., Dunlap, L., Wu, T., Zhu, B., Gonzalez, J. E., and Stoica, I. (2024a). From crowdsourced data to high-quality benchmarks: Arena-hard and benchbuilder pipeline. arXiv preprint arXiv:2406.11939 .Li, X., Thickstun, J., Gulrajani, I., Liang, P. S., and Hashimoto, T. B. (2022). Diffusion-lm improves controllable text generation. In Advances in Neural Information Processing Systems , volume 35, pages 4328–4343. Li, Y., Jiang, H., Xu, Y., Yang, J., Zhang, Y., Cao, Y., Shen, Y., Zhou, F., Men, R., Zhang, J., et al. (2026c). Breaking entropy bounds: Accelerating rl training via mtp with rejection sampling. arXiv preprint arXiv:2606.12370 .Li, Y., Wei, F., Zhang, C., and Zhang, H. (2024b). Eagle: Speculative sampling requires rethinking feature uncertainty. arXiv preprint arXiv:2401.15077 .Li, Y., Wei, F., Zhang, C., and Zhang, H. (2026d). Eagle-3: Scaling up inference acceleration of large language models via training-time test. Advances in Neural Information Processing Systems , 38:136737–136756. Lipman, Y., Chen, R. T., Ben-Hamu, H., Nickel, M., and Le, M. (2022). Flow matching for generative modeling. arXiv preprint arXiv:2210.02747 .Liu, H., Cen, R., Shi, J., Qin, G., Zhang, J., Liu, T., Fan, R., Zhao, G., Xie, R., Zhang, K., et al. (2026). Angelspec: Towards real-world high performance inference with speculative decoding. arXiv preprint arXiv:2607.25852 .Lou, A., Meng, C., and Ermon, S. (2023). Discrete diffusion modeling by estimating the ratios of the data distribution. arXiv preprint arXiv:2310.16834 .Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., and Zhu, J. (2022). Dpm-solver: A fast ode solver for diffusion probabilistic model sampling in around 10 steps. Advances in Neural Information Processing Systems ,35:5775–5787. Nie, S., Zhu, F., You, Z., Zhang, X., Ou, J., Hu, J., Zhou, J., Lin, Y., Wen, J.-R., and Li, C. (2025). Large language diffusion models. arXiv preprint arXiv:2502.09992 .Sahoo, S., Arriola, M., Schiff, Y., Gokaslan, A., Marroquin, E., Chiu, J., Rush, A., and Kuleshov, V. (2024). Simple and effective masked diffusion language models. Advances in Neural Information Processing Systems , 37:130136–130184. Samarin, A., Krutikov, S., Shevtsov, A., Skvortsov, S., Fisin, F., and Golubev, A. (2026). Lk losses: Direct acceptance rate optimization for speculative decoding. arXiv preprint arXiv:2602.23881 .Shi, J., Han, K., Wang, Z., Doucet, A., and Titsias, M. (2024). Simplified and generalized masked diffusion for discrete data. Advances in neural information processing systems , 37:103131–103167. Song, J., Meng, C., and Ermon, S. (2020a). Denoising diffusion implicit models. arXiv preprint arXiv:2010.02502 .Song, Y. and Dhariwal, P. (2024). Improved techniques for training consistency models. In International Conference on Learning Representations , volume 2024, pages 15078–15097. Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., and Poole, B. (2020b). Score-based generative modeling through stochastic differential equations. arXiv preprint arXiv:2011.13456 .Sutton, R. S. (1988). Learning to predict by the methods of temporal differences. Machine learning , 3(1):9– 44. Taori, R., Gulrajani, I., Zhang, T., Dubois, Y., Li, X., Guestrin, C., Liang, P., and Hashimoto, T. B. (2023). Stanford alpaca: An instruction-following llama model. https://github.com/tatsu-lab/stanford_ alpaca .16 Wu, T., Yao, Y., Qi, Z., Zheng, H., Wang, Z., Ma, H., Liao, L., Lakkaraju, H., Li, J., and Du, Y. (2026). D-pace: Dynamic position-aware cross-entropy for parallel speculative drafting. arXiv preprint arXiv:2605.18810 .Xu, T., Helenowski, E., Sankararaman, K. A., Jin, D., Peng, K., Han, E., Nie, S., Zhu, C., Zhang, H., Zhou, W., et al. (2024). The perfect blend: Redefining rlhf with mixture of judges. arXiv preprint arXiv:2409.20370 .Yang, A., Li, A., Yang, B., Zhang, B., Hui, B., Zheng, B., Yu, B., Gao, C., Huang, C., Lv, C., et al. (2025). Qwen3 technical report. arXiv preprint arXiv:2505.09388 .Ye, J., Xie, Z., Zheng, L., Gao, J., Wu, Z., Jiang, X., Li, Z., and Kong, L. (2025). Dream 7b: Diffusion large language models. arXiv preprint arXiv:2508.15487 .Yin, M., Chen, M., Huang, K., and Wang, M. (2024a). A theoretical perspective for speculative decoding algorithm. Advances in Neural Information Processing Systems , 37:128082–128117. Yin, T., Gharbi, M., Zhang, R., Shechtman, E., Durand, F., Freeman, W. T., and Park, T. (2024b). One-step diffusion with distribution matching distillation. In 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pages 6613–6623. IEEE. Zhang, Y. and Math-AI, T. (2025). American invitational mathematics examination (aime) 2025. Zhao, Y. and Cai, C. (2026). Adaptation to intrinsic dependence in diffusion language models. arXiv preprint arXiv:2602.20126 .Zheng, L., Chiang, W.-L., Sheng, Y., Zhuang, S., Wu, Z., Zhuang, Y., Lin, Z., Li, Z., Li, D., Xing, E., et al. (2023). Judging llm-as-a-judge with mt-bench and chatbot arena. Advances in neural information processing systems , 36:46595–46623. 
+
+# A Speculative Decoding Algorithm 
+
+Algorithm 2 summarizes the speculative decoding procedure we consider. 
+
+# B Proofs 
+
+## B.1 Markov Process Formulation in Section 3.1 
+
+In this section, we give a detailed derivation of the rejection-sampling transition dynamics conditioned on a fixed target-supported output sequence x = ( x1: L, <EOS> ). Specifically, we define the Markov chain states, derive the conditional transition probabilities, and prove that the occupancy ωqn,t (x) depends on x only through x<t . Throughout, all probabilities refer to speculative decoding with a fixed drafter q.
+
+States and decoding histories. For each position t reached by decoding, let Nt denote the round-start index of the round that produces Xt. Thus, immediately before processing position t, the state is 
+
+St = ( Nt, t ), S1 = (0 , 1) .
+
+If Nt = n, then the current round started from the committed prefix X1: n, and all preceding drafts in this round have been accepted. Consequently, their values equal Xn+1: t−1. For t ≤ n + B, position t is processed by draft verification; for t = n + B + 1 , it is processed by drawing a target bonus token. States with t > n + B + 1 are unreachable. Let 
+
+Ht := σ(X<t , N 1, . . . , N t)
+
+denote the history of committed tokens and round-start indices before processing position t. We first analyze the next output token conditional on this history, without conditioning on the complete output sequence. 17 Algorithm 2 Speculative decoding with a semi-autoregressive drafter 
+
+Require: Block size B, target distributions pt, draft distributions qn,t  
+
+> 1:
+
+n ← 0, T ← 0 ▷ n : number of committed ordinary tokens  
+
+> 2:
+
+while true do  
+
+> 3:
+
+Draw a draft block exn+1: n+B ∼ qn,n +1 (· | x1: n) · · · qn,n +B (· | x1: n; exn+1: n+B−1) 
+
+> 4:
+
+Evaluate pt(· | x1: n, exn+1: t−1) for t = n + 1 , . . . , n + B + 1 in one target-model pass  
+
+> 5:
+
+T ← T + 1  
+
+> 6:
+
+rejected ← false  
+
+> 7:
+
+for t = n + 1 , . . . , n + B do  
+
+> 8:
+
+p ← pt(· | x1: n, exn+1: t−1) 
+
+> 9:
+
+q ← qn,t (· | x1: n; exn+1: t−1) 
+
+> 10:
+
+Draw Ut ∼ Unif[0 , 1]  
+
+> 11:
+
+if Ut ≤ min {1, p (ext)/q (ext)} then  
+
+> 12:
+
+xt ← ext 
+
+> 13:
+
+else  
+
+> 14:
+
+Draw xt ∼ [p − q]+/TV (p, q ) 
+
+> 15:
+
+rejected ← true  
+
+> 16:
+
+end if  
+
+> 17:
+
+if xt = <EOS> then  
+
+> 18:
+
+return (x1: t−1, <EOS> ) and T 
+
+> 19:
+
+end if  
+
+> 20:
+
+if rejected then  
+
+> 21:
+
+n ← t 
+
+> 22:
+
+break  
+
+> 23:
+
+end if  
+
+> 24:
+
+end for  
+
+> 25:
+
+if not rejected then  
+
+> 26:
+
+Draw exn+B+1 ∼ pn+B+1 (· | x1: n+B ) ▷ bonus token  
+
+> 27:
+
+if exn+B+1 = <EOS> then  
+
+> 28:
+
+return (x1: n+B , <EOS> ) and T 
+
+> 29:
+
+else  
+
+> 30:
+
+xn+B+1 ← exn+B+1  
+
+> 31:
+
+n ← n + B + 1  
+
+> 32:
+
+end if  
+
+> 33:
+
+end if  
+
+> 34:
+
+end while 
+
+The local rejection-sampling law. Consider a history with X<t = x<t and Nt = n at a draft position 
+
+t ≤ n + B. For brevity, write 
+
+pt(v) := pt(v | x<t ), qt(v) := qn,t (v | x1: n; xn+1: t−1), v ∈ V .
+
+Let acc t and rej t denote the acceptance and rejection events at this position. The verification rule gives 
+
+Pr( Xt = v, acc t | H t) = min {pt(v), q t(v)},
+
+Pr( Xt = v, rej t | H t) = [ pt(v) − qt(v)] +.
+
+The first identity follows by multiplying the proposal probability by the verifier’s acceptance probability. For the second identity, rejection has total probability TV( pt, q t), and the correction token is drawn from the residual distribution [pt − qt]+/ TV( pt, q t). When TV( pt, q t) = 0 , rejection has probability zero and no residual draw is needed. Adding the two identities yields 
+
+Pr( Xt = v | H t) = min {pt(v), q t(v)} + [ pt(v) − qt(v)] + = pt(v | X<t ). (22) At a bonus-token position, the same identity holds because the token is drawn directly from the target distribution. Therefore, conditional on any decoding history, the next committed token has the target conditional distribution, regardless of the current round-start index. 18 Transition kernels conditioning on the complete output. Equation (22) implies that, on any history with X<t = x<t ,
+
+Pr( X = x | H t) = p(xt:L+1 | x<t ) := 
+
+> L+1
+
+Y
+
+> s=t
+
+ps(xs | x<s ). (23) To see this rigorously, use backward induction along the fixed sequence x. At t = L+1 , the required remaining output is just <EOS> , so the identity follows directly from (22). Suppose it holds at t + 1 for every possible decoding history. After committing Xt = xt, every possible resulting history has the same remaining-output probability p(xt+1: L+1 | x≤t). Multiplying this probability by Pr( Xt = xt | H t) = pt(xt | x<t ) proves the identity at t.In particular, after committing the same non-EOS token xt, the future suffix has the same probability whether the token was accepted or produced by residual sampling. Thus, for t ≤ L at a draft position, Bayes’ rule gives 
+
+Pr(acc t | H t, X = x) = min {pt(xt), q t(xt)} p(xt+1: L+1 | x≤t)
+
+pt(xt) p(xt+1: L+1 | x≤t)= min {pt(xt), q t(xt)}
+
+pt(xt)= min 
+
+
+
+1, qn,t (xt | x1: n; xn+1: t−1)
+
+pt(xt | x<t )
+
+
+
+= Aqn,t (x≤t).
+
+All target-probability factors being cancelled are positive because x is target-supported. Similarly, 
+
+Pr(rej t | H t, X = x) = 1 − Aqn,t (x≤t) = Rqn,t (x≤t).
+
+Notice that the ratio here is qt(xt)/p t(xt), rather than the verifier’s ratio pt( eXt)/q t( eXt): we are conditioning on the committed output token, not on the proposed token. If the token is accepted, the current round continues. If it is rejected, the next round starts after position 
+
+t. At a bonus-token position t = n + B + 1 , the next round also starts after position t, provided that the bonus token is not EOS. Accordingly, setting 
+
+Aqn,t = 0 , Rqn,t = 1 , t > n + B, 
+
+incorporates the bonus-token case into the same transition rule. At such a position, Rqn,t = 1 represents a forced round transition, not an actual draft rejection. It follows that, under Pr( · | X = x), the transitions for t ≤ L are 
+
+(n, t ) −→ 
+
+(
+
+(n, t + 1) , with probability Aqn,t (x≤t),
+
+(t, t + 1) , with probability Rqn,t (x≤t).
+
+With x fixed, these probabilities depend on the past history only through the current state (n, t ). This establishes the Markov property. The conditional chain has states 0 ≤ n < t ≤ L + 1 and is stopped at position L + 1 . All states (n, L + 1) 
+
+are terminal for the round-count process: the final EOS is produced in the current round and does not start another round, regardless of whether it is accepted, sampled as a correction, or sampled as a bonus token. 
+
+Occupancy depends only on the committed prefix. Since the position index increases by one at every transition, state (n, t ) is visited exactly when Nt = n. Hence, 
+
+ωqn,t (x) = Pr( Nt = n | X = x).
+
+By (23), conditional on the committed prefix x<t , the probability of the remaining output xt:L+1 is the same for every possible round-start history. Therefore, 
+
+ωqn,t (x) = Pr( Nt = n, X <t = x<t ) p(xt:L+1 | x<t )Pr( X<t = x<t ) p(xt:L+1 | x<t )
+
+19 = Pr( Nt = n | X<t = x<t )=: ωqn,t (x<t ).
+
+This proves that the occupancy depends only on x<t , even though it was originally defined by conditioning on the complete output sequence. Starting from ωq 
+
+> 0,1
+
+= 1 , the conditional Markov transitions give the forward recursions 
+
+ωqn,t +1 (x≤t) = ωqn,t (x<t )Aqn,t (x≤t), 0 ≤ n < t ≤ L, ωqt,t +1 (x≤t) = 
+
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t )Rqn,t (x≤t), 1 ≤ t ≤ L. 
+
+The first recursion accounts for continuing the current round. The second sums over all states from which a new round can start after position t. These are precisely the occupancy recursions used in Section 3.1. 
+
+## B.2 Proofs of Proposition 1 and Proposition 2 
+
+We first prove Proposition 2, and then obtain Proposition 1 as its special case k = 1 .
+
+Proof of Proposition 2. Fix 1 ≤ k ≤ B + 1 . The random variable T q 
+
+> ≥k
+
+counts the decoding rounds that commit at least k tokens. Conditioned on a fixed output sequence x, consider the round that starts after position n, i.e., from the committed prefix x1: n. By the transition rule (4), a rejection transition always leads to a diagonal state, so a non-diagonal state (n, t ) with t > n + 1 can only be reached from (n, t − 1) by an acceptance. Hence state (n, n + k) is visited exactly when this round has started and its drafts at positions 
+
+n + 1 , . . . , n + k − 1 have all been accepted. In that case, position n + k is processed in the same round and commits one more token, which is an accepted draft, a correction token, a bonus token, or the terminal 
+
+<EOS> . Conversely, if the round commits at least k tokens, its first k − 1 committed tokens must be accepted drafts: a correction token or <EOS> ends the round, and a bonus token can only be the (B + 1) -th committed token. Therefore, the round starting after position n commits at least k tokens exactly when state (n, n + k)
+
+is visited. It follows that 
+
+T q 
+
+> ≥k
+
+=
+
+> L+1 −k
+
+X
+
+> n=0
+
+1{state (n, n + k) is visited }.
+
+Conditioned on X = x, the event that state (n, n + k) is visited has probability ωqn,n +k(x<n +k). Therefore, by linearity of expectation, 
+
+τ q
+
+> ≥k
+
+(x) = E[T q 
+
+> ≥k
+
+| X = x] = 
+
+> L+1 −k
+
+X
+
+> n=0
+
+ωqn,n +k(x<n +k).
+
+Proof of Proposition 1. Every round commits at least one token, so T q = T q
+
+> ≥1
+
+. Equivalently, a round starts after position t exactly when state (t, t + 1) is visited. Taking k = 1 in Proposition 2 gives 
+
+τ q (x) = E[T q | X = x] = 
+
+> L
+
+X
+
+> t=0
+
+ωqt,t +1 (x≤t).
+
+Separating the term t = 0 , using ωq 
+
+> 0,1
+
+= 1 , and substituting the occupancy recursion (5b) for 1 ≤ t ≤ L gives 
+
+τ q (x) = ωq 
+
+> 0,1
+
++
+
+> L
+
+X
+
+> t=1
+
+ωqt,t +1 (x≤t) = 1 + 
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t )Rqn,t (x≤t).
+
+20 B.3 Proof of Theorem 1 
+
+To handle the randomness of the sequence length L, we rewrite Proposition 1 and take the expectation over 
+
+X ∼ p,
+
+E[τ q (X)] = 1 + X
+
+> t≥1
+> t−1
+
+X
+
+> n=0
+
+E1{t≤L}ωqn,t (X<t )Rqn,t (X≤t) . (24) Before Xt is revealed, ωqn,t (X<t ) is determined by X<t , and t ≤ L is exactly the event Xt̸ = <EOS> . Hence, conditioning on X<t and using the definition of cqn,t ,
+
+E1{t≤L}ωqn,t (X<t )Rqn,t (X≤t) | X<t 
+
+
+
+= ωqn,t (X<t ) Pr( Xt̸ = <EOS> | X<t )cqn,t (X<t )= E1{t≤L}ωqn,t (X<t )cqn,t (X<t ) | X<t 
+
+ . (25) Taking expectations and summing over n and t proves (9). 
+
+## B.4 Proof of Theorem 2 
+
+We first prove (13), which relates the initial-state value to the per-sequence EDR loss. 
+
+V q
+
+> 0,1
+
+(x) = 
+
+> L
+
+X
+
+> t=1
+
+"t−1X
+
+> n=0
+
+ωqn,t (x<t )V qn,t (x) −
+
+> t
+
+X
+
+> n=0
+
+ωqn,t +1 (x≤t)V qn,t +1 (x)
+
+#
+
+=
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t ) V qn,t (x) − Aqn,t (x≤t)V qn,t +1 (x) − Rqn,t (x≤t)V qt,t +1 (x)
+
+=
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t )cqn,t (x<t )= bLEDR (qθ ; x) − 1.
+
+Now we prove Theorem 2. Differentiating the Bellman equation (12) at one state gives 
+
+∇θ V qn,t = ∇θ cqn,t + ∇θ Aqn,t 
+
+ V qn,t +1 − V qt,t +1 
+
+| {z }
+
+> local TD gradient
+
++ Aqn,t ∇θ V qn,t +1 + Rqn,t ∇θ V qt,t +1 , (26) where we used Rqn,t = 1 − Aqn,t . Unrolling the last two terms from the initial state weights each local TD gradient by the probability of visiting that state, namely ωqn,t . Apply (26) recursively from (0 , 1) . Every time a state (n, t ) is reached, its local term is accumulated once, while the two recursive terms propagate with transition probabilities Aqn,t and Rqn,t . The total coefficient on the local term at (n, t ) is therefore exactly its state occupancy ωqn,t . Using (13) yields (14). Rigorously, 
+
+∇θ bLEDR (qθ ; x) = ∇θ V q
+
+> 0,1
+
+(x)=
+
+> L
+
+X
+
+> t=1
+
+"t−1X
+
+> n=0
+
+ωqn,t (x<t )∇θ V qn,t (x) −
+
+> t
+
+X
+
+> n=0
+
+ωqn,t +1 (x≤t)∇θ V qn,t +1 (x)
+
+#
+
+=
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t )
+
+h
+
+∇θ V qn,t (x) − Aqn,t (x≤t)∇θ V qn,t +1 (x) − Rqn,t (x≤t)∇θ V qt,t +1 (x)
+
+i
+
+=
+
+> L
+
+X
+
+> t=1
+> t−1
+
+X
+
+> n=0
+
+ωqn,t (x<t ) ∇θ cqn,t (x<t ) + ∇θ Aqn,t (x≤t)  V qn,t +1 (x) − V qt,t +1 (x) .
+
+21 B.5 Proof of Theorem 3 
+
+Let B ≥ 3 and let the vocabulary be V = {0, 1, a }. We independently generate m subsequences W1, . . . , W m,where 
+
+Wi =
+
+
+
+0 aa · · · a| {z } 
+
+> B−2times
+
+0a, with probability 2/3,
+
+1 aa · · · a| {z } 
+
+> B−2times
+
+1, with probability 1/3.
+
+We refer to these as type-0 and type-1 subsequences, respectively. Let the target distribution be X =
+
+W1W2 · · · Wm<EOS> , so that E[L] =  B + 23
+
+ m. The integer m will be chosen at the end of the proof. We consider first-order drafters of the form 
+
+qn,t (· | x1: n; xn+1: t−1) = qn,t (· | x1: n; xt−1) .
+
+The block-local optimum. Consider a round that starts exactly at the beginning of a subsequence, following a committed prefix x1: n. The first B − 1 draft positions can match the target distribution exactly: 
+
+bqn,n +1 = 23 δ0 + 13 δ1, bqn,n +j = δa, 2 ≤ j ≤ B − 1.
+
+Here and below, these equalities are understood on target-supported within-block prefixes. At the final draft position n + B, the target repeats the first bit of the subsequence. Since B ≥ 3,the immediately preceding token is a for both types. A first-order drafter must therefore use the same distribution at this position for both types. To maximize the expected accepted length, bq should maximize probablity of accepting the last token in the round, i.e, 
+
+bqn,n +B = δ0.
+
+If Wi = 0 aa · · · a| {z } 
+
+> B−2times
+
+0a, all B draft tokens are accepted, and the target bonus token commits the final a.If Wi = 1 aa · · · a| {z } 
+
+> B−2times
+
+1, the proposal is rejected at the final draft position, and residual sampling commits the final 1. In either case, the round commits exactly the entire subsequence, and the next round starts at the beginning of Wi+1 . After the m subsequences have been generated, one additional round generates <EOS> .Therefore, every block-local optimal drafter bq satisfies 
+
+E[T bq ] = m + 1 .
+
+A continuation-aware drafter. We next construct another first-order drafter q∗ that intentionally sac-rifices accepted length in some rounds to obtain more favorable future round starts. Whenever a round starts at the beginning of a subsequence, let q∗ match the target distribution in the first B − 1 positions: 
+
+q∗ 
+
+> n,n +1
+
+= 23 δ0 + 13 δ1, q∗ 
+
+> n,n +j
+
+= δa, 2 ≤ j ≤ B − 1,
+
+but choose 
+
+q∗ 
+
+> n,n +B
+
+= δ1.
+
+If Wi = 0 aa · · · a| {z } 
+
+> B−2times
+
+0a, the final proposal is rejected. The round commits the corrected 0 and advances by 
+
+B tokens, leaving the final a for the next round. If Wi = 1 aa · · · a| {z } 
+
+> B−2times
+
+1, all B draft tokens are accepted. The bonus token then commits the first token of the next subsequence, or <EOS> if i = m.Whenever a round starts inside a subsequence, let q∗ match the target conditionals at every draft position. This is possible within the first-order drafter class: the bit defining the current subsequence is already contained in the committed prefix. Any fresh bit from the next subsequence appears at draft position j ≥ 2,and its repeated occurrence is at position j + B − 1 ≥ B + 1 , outside the draft block. Before that repeated 22 occurrence, the intervening tokens are all a. Thus no draft position needs access to an earlier within-block bit beyond the immediately preceding token. Every such round therefore advances by B + 1 tokens, unless generation terminates earlier at <EOS> .To count the decoding rounds, extend W1, W 2, . . . to an infinite independent sequence for this calculation. Group consecutive subsequences between successive rounds that start at the beginning of a subsequence. If a group starts with a type-0 subsequence, its first round leaves the final a uncommitted. Each subse-quent round either leaves the final a of another type-0 subsequence or commits an entire type-1 subsequence and returns to a subsequence boundary. The group therefore ends at the first type-1 subsequence after its initial type-0 subsequence. Its expected number of subsequences is 1 + 3 = 4 , and it uses exactly one round per subsequence. If a group starts with a type-1 subsequence, every round advances by B + 1 tokens until a subsequence boundary is reached again. For any initial segment of this group, its total length is B + 1 times its number of subsequences, minus its number of type-1 subsequences. Consequently, the first return to a subsequence boundary occurs upon completing the (B + 1) -st type-1 subsequence, counting the initial one. The expected number of subsequences in this group is 1 + 3 B. If the group contains ℓ subsequences, its total length is 
+
+(ℓ − 1)( B + 1) , so it uses exactly ℓ − 1 rounds and saves one round. Let ℓj denote the number of subsequences in group j. The groups are independent and identically distributed, with 
+
+E[ℓj ] = 23 · 4 + 13 (1 + 3 B) = B + 3 .
+
+Let 
+
+N := min 
+
+k ≥ 1 : 
+
+> k
+
+X
+
+> j=1
+
+ℓj ≥ m
+
+ ,
+
+and let H be the number of these N groups that start with a type-1 subsequence. Since {N ≥ j} depends only on the preceding groups and N ≤ m, summing expectations gives 
+
+m ≤ E
+
+
+
+> N
+
+X
+
+> j=1
+
+ℓj
+
+ =
+
+> m
+
+X
+
+> j=1
+
+E1{N ≥j}ℓj
+
+ = ( B + 3) E[N ],
+
+E[H] = 
+
+> m
+
+X
+
+> j=1
+
+Pr( N ≥ j, group j starts with type 1) = 13 E[N ].
+
+All groups except possibly the last are fully generated before termination, and each completed type-1
+
+group saves one round. For the last group, suppose that r of its subsequences remain before <EOS> . These subsequences contain at most r(B + 1) tokens, and only the first round of the group can lose one token to rejection. Thus generating these subsequences together with <EOS> requires at most 
+
+ r(B + 1) + 2 
+
+B + 1 
+
+
+
+= r + 1 
+
+rounds. At most one of the H type-1 groups is the last group, so 
+
+T q∗
+
+≤ m + 2 − H. 
+
+Taking expectations yields 
+
+E[T q∗
+
+] ≤ m + 2 − E[H] = m + 2 − 13 E[N ]
+
+≤
+
+
+
+1 − 13( B + 3) 
+
+
+
+m + 2 .
+
+Finally, choose any integer m > (3 B + 9)(3 B + 11) . Since both drafters preserve the same target distribution, 
+
+MAL (q∗)
+
+MAL (bq) = E[T bq ]
+
+E[T q∗ ]
+
+23 ≥ m + 1 
+
+
+
+1 − 13( B+3) 
+
+
+
+m + 2 
+
+> 1 + 13B + 9 .
+
+This proves the theorem. 
+
+# C Additional Details for Expected Decoding Rounds 
+
+## C.1 Draft EOS Probability Does Not Reduce EDR 
+
+For the EDR objective, a correctly drafted terminal <EOS> does not save a target-model verification round. Conditional on reaching the terminal position, accepting a drafted <EOS> terminates in the current verification pass. If the draft instead misses <EOS> , the correction branch can generate <EOS> in that same pass and terminates before another round starts. The same holds when the terminal token is produced as the target bonus token after block exhaustion. Accordingly, the EDR sum runs only over ordinary-token positions 
+
+t ≤ L.This is also visible in the dense local cost cn,t . Its numerator is 
+
+X
+
+> v∈V
+
+[pt(v | x<t ) − qn,t (v | x1: n; xn+1: t−1)] + ,
+
+which excludes <EOS> . Thus matching target EOS mass is not directly rewarded by EDR. 
+
+## C.2 Fixed-Size Anchor Sampling 
+
+In this section, we explain how to use importance sampling to select a fixed number of anchors in EDR training. We apply anchor sampling separately to each target rollout in Algorithm 1. For a rollout x =(x1: L, <EOS> ), define 
+
+N+(x) := 0 ≤ n < L : ωqθ
+
+> n,n +1
+
+(x1: n) > 0 .
+
+An anchor outside N+(x) contributes zero to (14), since its occupancy ωqθ
+
+> n,t
+
+(x<t ) is zero for every t > n .Let ρ be the maximum number of training anchors per rollout, set to 512 in our experiments. If ρ ≥|N +(x)|, select I = N+(x) and set πn(x) = 1 for every n ∈ N +(x). Otherwise, choose λ(x) > 0 such that 
+
+X
+
+> n∈N +(x)
+
+min 1, λ (x)ωqθ
+
+> n,n +1
+
+(x1: n) = ρ, (27) and set 
+
+πn(x) := min 1, λ (x)ωqθ
+
+> n,n +1
+
+(x1: n) . (28) We draw a set I ⊆ N +(x) of exactly ρ anchors by random-start systematic sampling, with 
+
+Pr( n ∈ I | x) = πn(x).
+
+For rollout x(i), denote the sampled anchor set by I(i) and write π(i) 
+
+> n
+
+:= πn(x(i)). Using the same notation as Algorithm 1, replace its loss by 
+
+ℓ(θ) = 1
+
+M
+
+> M
+
+X
+
+> i=1
+
+X
+
+> n∈I (i)
+> Li
+
+X
+
+> t=n+1
+
+sg ω(i)
+
+> n,t
+
+π(i)
+
+> n
+
+! h
+
+c(i) 
+
+> n,t
+
++ A(i) 
+
+> n,t
+
+sg 
+
+
+
+V (i) 
+
+> n,t +1
+
+− V (i)
+
+> t,t +1
+
+i 
+
+. (29) The occupancies and value functions are still computed by the full recursions in Algorithm 1, without gradients; sampling restricts only which anchor contributions are differentiated. The sampled anchor sets and inclusion probabilities are also held fixed during differentiation. 24 Conditioned on the target rollouts, the inclusion probabilities cancel the inverse-probability weights. Hence, 
+
+E{I (i)}Mi=1 
+
+h
+
+∇θ ℓ(θ) {x(i)}Mi=1 
+
+i
+
+= 1
+
+M
+
+> M
+
+X
+
+> i=1
+
+X
+
+> n∈N +(x(i))
+> Li
+
+X
+
+> t=n+1
+
+ω(i)
+
+> n,t
+
+h
+
+∇θ c(i) 
+
+> n,t
+
++ ∇θ A(i)
+
+> n,t
+
+
+
+V (i) 
+
+> n,t +1
+
+− V (i)
+
+> t,t +1
+
+i 
+
+= 1
+
+M
+
+> M
+
+X
+
+> i=1
+
+∇θ bLEDR (qθ ; x(i)), (30) where the last equality follows from (14). Taking the expectation over the target rollouts and applying (15) gives 
+
+E[∇θ ℓ(θ)] = ∇θ LEDR (qθ ).
+
+Thus anchor sampling preserves preserves the unbiasedness of the stochastic gradient. 
+
+# D Additional Details for Experiments 
+
+For all training settings and methods, we use the hyperparameters summarized in Table 3. Table 3: Training hyperparameters used in all experiments. 
+
+Hyperparameter Value 
+
+Learning rate 3 × 10 −5
+
+Optimizer AdamW AdamW β1 0.9
+
+AdamW β2 0.999 
+
+Learning-rate schedule 4% linear warmup of the first epoch, then constant Gradient clipping Global norm ≤ 1
+
+Global batch size 96 
+
+25
